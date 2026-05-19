@@ -1,0 +1,17 @@
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+# Cargo
+/target
+
+# Build outputs
+result
+bin
+
+# Giant runtime state
+.giant/
