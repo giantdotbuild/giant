@@ -478,6 +478,14 @@ async fn run_target(job: &BuildJob, spec: &TargetSpec, key: CacheKey) -> TargetR
         .stderr(Stdio::piped())
         .env("GIANT_CACHE_KEY", key.to_hex())
         .env("GIANT_WORKSPACE_ROOT", job.workspace_root.as_path());
+
+    // Color preservation: most modern CLIs disable color when they detect
+    // stdout is a pipe (we use Stdio::piped). These env vars are the de
+    // facto signals to force color anyway. Tools that strictly check
+    // isatty(stdout) are unaffected - pty: true (v0.2) covers that case.
+    apply_color_env(&mut cmd);
+
+    // Per-target env overrides take precedence over our color signals.
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
@@ -656,6 +664,27 @@ impl OutputFile {
 impl OutputEntry {
     fn rel_path_string(&self) -> String {
         self.path.clone()
+    }
+}
+
+/// Set color-forcing env vars on a child command. Each variable is the
+/// well-known signal for an ecosystem; tools that don't recognise theirs
+/// just ignore it. The user's `env:` map is applied *after* these and
+/// can override any of them.
+fn apply_color_env(cmd: &mut Command) {
+    // npm / node ecosystem
+    cmd.env("FORCE_COLOR", "1");
+    // BSD / macOS convention; respected by many CLIs
+    cmd.env("CLICOLOR_FORCE", "1");
+    cmd.env("CLICOLOR", "1");
+    // python's "do you want color?" hint
+    cmd.env("PY_COLORS", "1");
+    // cargo
+    cmd.env("CARGO_TERM_COLOR", "always");
+    // many TUI-aware tools probe TERM; set something modest if absent.
+    // Don't override if the parent already passed a TERM through.
+    if std::env::var_os("TERM").is_none() {
+        cmd.env("TERM", "xterm-256color");
     }
 }
 
