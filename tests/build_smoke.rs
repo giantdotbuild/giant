@@ -560,6 +560,89 @@ targets:
 }
 
 #[test]
+fn structural_input_ignores_function_body_edits() {
+    // Property under test (TDD-0002 §Per-input fingerprint): a target
+    // with a structural input matching `^package ` and `^import ` lines
+    // in *.go files. Editing a function body - none of the matching
+    // lines change - must leave the target's cache key stable, so a
+    // rebuild after the edit cache-hits.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::write(
+        ws.join("src/main.go"),
+        "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"v1\") }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: structural
+cache:
+  dir: ./cache
+targets:
+  - id: "discover:go"
+    inputs:
+      - "go.mod"
+      - kind: structural
+        files: "src/**/*.go"
+        lines: ["package ", "import "]
+    outputs: ["discovered.json"]
+    command: 'echo "{\"targets\": []}" > discovered.json'
+"#,
+    )
+    .unwrap();
+    std::fs::write(ws.join("go.mod"), "module x\n").unwrap();
+
+    // First build - cold.
+    let out1 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out1.status.success(), "first build failed: {}", String::from_utf8_lossy(&out1.stderr));
+    let s1 = String::from_utf8_lossy(&out1.stdout);
+    assert!(s1.contains("built  discover:go"), "got: {s1}");
+
+    // Edit the function body but not the package/import lines.
+    std::fs::write(
+        ws.join("src/main.go"),
+        "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"v2-totally-different\") }\n",
+    )
+    .unwrap();
+    let out2 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out2.status.success());
+    let s2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        s2.contains("cache  discover:go"),
+        "structural input should ignore function-body edits; got: {s2}"
+    );
+
+    // Add an import - matching lines change.
+    std::fs::write(
+        ws.join("src/main.go"),
+        "package main\nimport \"fmt\"\nimport \"log\"\nfunc main() { fmt.Println(\"v3\") }\n",
+    )
+    .unwrap();
+    let out3 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out3.status.success());
+    let s3 = String::from_utf8_lossy(&out3.stdout);
+    assert!(
+        s3.contains("built  discover:go"),
+        "import edit should invalidate structural input; got: {s3}"
+    );
+}
+
+#[test]
 fn cache_miss_when_command_changes() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();

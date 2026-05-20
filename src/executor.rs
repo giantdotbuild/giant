@@ -521,15 +521,27 @@ async fn compute_cache_key(
         // file inputs (expand globs, sort, hash content)
         h.update(b"file_inputs\0");
         let mut paths: Vec<PathBuf> = Vec::new();
+        // Collect structural-input specs as we walk; they hash separately
+        // so the section is independent of file-input order.
+        let mut structurals: Vec<StructuralSpec> = Vec::new();
         for input in &spec.inputs {
             match input {
                 Input::File { glob } => {
                     expand_glob_into(workspace_root.as_path(), glob.as_str(), &mut paths)?;
                 }
-                Input::Structural { .. } => {
-                    // TODO(impl): structural inputs in a later slice (TDD-0002).
-                    // For now treat as no contribution beyond the literal target
-                    // declaration (already in `cmd`).
+                Input::Structural {
+                    files,
+                    lines,
+                    scope,
+                } => {
+                    structurals.push(StructuralSpec {
+                        files: files.iter().map(|g| g.as_str().to_string()).collect(),
+                        lines: lines.clone(),
+                        scope: scope
+                            .iter()
+                            .map(|s| s.as_path().to_string_lossy().into_owned())
+                            .collect(),
+                    });
                 }
             }
         }
@@ -548,9 +560,42 @@ async fn compute_cache_key(
             h.update(b"\0");
         }
 
-        // structural inputs placeholder - write a stable marker so adding
-        // structural inputs later changes the schema deliberately.
-        h.update(b"structural_inputs\0\0");
+        // structural inputs - one fingerprint per declared structural
+        // input, canonicalised (sort each input's globs/lines/scope; sort
+        // the inputs themselves) so YAML reordering doesn't shift the key.
+        h.update(b"structural_inputs\0");
+        for s in &mut structurals {
+            s.files.sort();
+            s.lines.sort();
+            s.scope.sort();
+        }
+        structurals.sort();
+        for s in &structurals {
+            for f in &s.files {
+                h.update(f.as_bytes());
+                h.update(b"\0");
+            }
+            h.update(b"|\0");
+            for l in &s.lines {
+                h.update(l.as_bytes());
+                h.update(b"\0");
+            }
+            h.update(b"|\0");
+            for sc in &s.scope {
+                h.update(sc.as_bytes());
+                h.update(b"\0");
+            }
+            h.update(b"|\0");
+            let fp = crate::structural::compute_fingerprint(
+                &workspace_root,
+                &s.files,
+                &s.lines,
+                &s.scope,
+            )
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            h.update(fp.as_bytes());
+            h.update(b"\0");
+        }
 
         // dep output content hashes (sorted). The section header changed
         // from "dep_keys" to "dep_outputs" - old cached entries from a
@@ -574,6 +619,15 @@ async fn compute_cache_key(
     .await
     .map_err(|e| ExecutorError::Io(std::io::Error::other(e.to_string())))??;
     Ok(CacheKey::new(hash))
+}
+
+/// Internal canonical representation of one structural input, used to
+/// build a deterministic section of the cache key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct StructuralSpec {
+    files: Vec<String>,
+    lines: Vec<String>,
+    scope: Vec<String>,
 }
 
 fn expand_glob_into(
