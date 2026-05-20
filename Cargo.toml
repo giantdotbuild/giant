@@ -75,13 +75,17 @@ libc = "0.2"
 # Optional remote cache support
 [features]
 default = []
-remote = ["dep:reqwest"]
+remote = ["dep:reqwest", "dep:base64"]
 
 [dependencies.reqwest]
 version = "0.12"
 optional = true
 default-features = false
 features = ["rustls-tls", "stream"]
+
+[dependencies.base64]
+version = "0.22"
+optional = true
 
 [profile.release]
 lto = "fat"
@@ -91,3 +95,5 @@ strip = true
 [dev-dependencies]
 tempfile = "3"
 serial_test = "3"
+# Mock HTTP server for the remote-cache integration test.
+wiremock = "0.6"

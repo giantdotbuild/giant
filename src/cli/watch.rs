@@ -245,6 +245,8 @@ async fn run_build(
         }
     });
 
+    let (remote, upload_tx, upload_handle) = prep::open_remote(&prepared.config)?;
+
     let job = BuildJob {
         graph: Arc::new(prepared.graph.clone()),
         selection: selection.to_vec(),
@@ -255,8 +257,25 @@ async fn run_build(
         events: tx,
         cancel,
         build_id: format!("watch_{}", prep::short_random()),
+        #[cfg(feature = "remote")]
+        remote,
+        #[cfg(feature = "remote")]
+        upload_tx: upload_tx.clone(),
     };
+    #[cfg(not(feature = "remote"))]
+    let _ = (remote, upload_tx);
     let summary = build(job).await?;
+
+    #[cfg(feature = "remote")]
+    {
+        drop(upload_tx);
+        if let Some(h) = upload_handle {
+            let _ = h.await;
+        }
+    }
+    #[cfg(not(feature = "remote"))]
+    let _ = upload_handle;
+
     let _ = renderer.await;
 
     if summary.counts.failed > 0 {

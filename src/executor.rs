@@ -59,6 +59,13 @@ pub struct BuildJob {
     pub events: EventSender,
     pub cancel: CancellationToken,
     pub build_id: String,
+    /// Optional remote cache. Inserted by the CLI when configured;
+    /// always `None` when the `remote` feature is off.
+    #[cfg(feature = "remote")]
+    pub remote: Option<crate::remote::RemoteCache>,
+    /// Background uploader sink. Same lifecycle as `remote`.
+    #[cfg(feature = "remote")]
+    pub upload_tx: Option<tokio::sync::mpsc::Sender<crate::remote::UploadJob>>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +89,16 @@ enum TargetResult {
         /// Carried out of try_cache_hit so the dispatcher doesn't re-read AC.
         output_hash: ContentHash,
     },
+    /// Restored from the remote cache. We've already written the outputs
+    /// to the workspace AND populated the local cache, so future runs
+    /// hit locally. Constructed only when the `remote` feature is on;
+    /// the variant stays defined either way so the public TargetResultKind
+    /// (in `events::Event`) lines up across builds.
+    #[allow(dead_code)]
+    RemoteCacheHit {
+        key: CacheKey,
+        output_hash: ContentHash,
+    },
     /// `exists:` check returned 0 - the artifact lives outside the local
     /// filesystem (registry, S3, etc.). No local outputs were produced or
     /// restored; downstream consumers see the empty-outputs hash for this
@@ -101,6 +118,7 @@ impl TargetResult {
         match self {
             Self::Built { key, .. }
             | Self::CacheHit { key, .. }
+            | Self::RemoteCacheHit { key, .. }
             | Self::ExternalCacheHit { key, .. } => Some(*key),
             Self::Failed { key, .. } => *key,
         }
@@ -110,6 +128,7 @@ impl TargetResult {
         match self {
             Self::Built { .. } => TargetResultKind::Built,
             Self::CacheHit { .. } => TargetResultKind::CacheHit,
+            Self::RemoteCacheHit { .. } => TargetResultKind::RemoteCacheHit,
             Self::ExternalCacheHit { .. } => TargetResultKind::ExternalCacheHit,
             Self::Failed { .. } => TargetResultKind::Failed,
         }
@@ -144,6 +163,15 @@ struct TargetCtx {
     events: EventSender,
     cancel: CancellationToken,
     build_id: String,
+    /// Optional remote cache. `None` when the binary is built without
+    /// the `remote` feature or when the user has it disabled. Lookup
+    /// chain consults it between local AC and the `exists:` check.
+    #[cfg(feature = "remote")]
+    remote: Option<crate::remote::RemoteCache>,
+    /// Sender for background uploads. `None` when remote disabled.
+    /// Workers push completed builds onto this; the build never waits.
+    #[cfg(feature = "remote")]
+    upload_tx: Option<tokio::sync::mpsc::Sender<crate::remote::UploadJob>>,
 }
 
 /// What a worker reports when it finishes a target.
@@ -225,6 +253,10 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
         events: job.events.clone(),
         cancel: job.cancel.clone(),
         build_id: job.build_id.clone(),
+        #[cfg(feature = "remote")]
+        remote: job.remote.clone(),
+        #[cfg(feature = "remote")]
+        upload_tx: job.upload_tx.clone(),
     };
 
     // 3. Dispatch loop.
@@ -323,10 +355,12 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
 
         match &next.result {
             TargetResult::Built { .. } => counts.built += 1,
-            TargetResult::CacheHit { .. } | TargetResult::ExternalCacheHit { .. } => {
-                // External hits get bundled into cache_hit for the summary.
-                // The TargetResultKind in the event is still distinct, so
-                // consumers can break them out if they care.
+            TargetResult::CacheHit { .. }
+            | TargetResult::RemoteCacheHit { .. }
+            | TargetResult::ExternalCacheHit { .. } => {
+                // Remote and external hits get bundled into cache_hit
+                // for the summary; the TargetResultKind on the event
+                // stays distinct so NDJSON consumers can break them out.
                 counts.cache_hit += 1;
             }
             TargetResult::Failed { error, .. } => {
@@ -407,22 +441,23 @@ async fn dispatch_target(
         .await;
 
     // Lookup chain when not --fresh:
-    //   1. local AC cache (try_cache_hit)
-    //   2. `exists:` check - for artifacts that live elsewhere (Docker
+    //   1. local AC cache
+    //   2. remote AC cache (feature-gated; populates local on hit)
+    //   3. `exists:` check - for artifacts that live elsewhere (Docker
     //      registry, S3, etc.). The command runs with $GIANT_CACHE_KEY in
     //      env. Exit 0 → ExternalCacheHit, skip the build.
-    //   3. run the target's command.
+    //   4. run the target's command.
     let (result, output_hash) = if !ctx.fresh {
-        match try_cache_hit(&ctx.cache, &ctx.workspace_root, &key).await? {
-            Some((r, oh)) => (r, Some(oh)),
-            None => match try_exists_check(&ctx, &spec, key).await {
-                Some((r, oh)) => (r, Some(oh)),
-                None => {
-                    let r = run_target(&ctx, &spec, key).await;
-                    let oh = result_output_hash(&r);
-                    (r, oh)
-                }
-            },
+        if let Some((r, oh)) = try_cache_hit(&ctx.cache, &ctx.workspace_root, &key).await? {
+            (r, Some(oh))
+        } else if let Some((r, oh)) = try_remote_hit(&ctx, &key).await? {
+            (r, Some(oh))
+        } else if let Some((r, oh)) = try_exists_check(&ctx, &spec, key).await {
+            (r, Some(oh))
+        } else {
+            let r = run_target(&ctx, &spec, key).await;
+            let oh = result_output_hash(&r);
+            (r, oh)
         }
     } else {
         let r = run_target(&ctx, &spec, key).await;
@@ -468,6 +503,7 @@ fn result_output_hash(r: &TargetResult) -> Option<ContentHash> {
     match r {
         TargetResult::Built { outputs, .. } => Some(compute_outputs_content_hash(outputs)),
         TargetResult::CacheHit { output_hash, .. }
+        | TargetResult::RemoteCacheHit { output_hash, .. }
         | TargetResult::ExternalCacheHit { output_hash, .. } => Some(*output_hash),
         TargetResult::Failed { .. } => None,
     }
@@ -829,6 +865,96 @@ async fn try_cache_hit(
     Ok(Some((TargetResult::CacheHit { key: *key, output_hash }, output_hash)))
 }
 
+/// Try the remote cache. Hits restore outputs to the workspace AND
+/// populate the local cache so the next run hits locally without
+/// touching the remote. Misses / errors return `Ok(None)` so the
+/// dispatcher falls through.
+///
+/// Feature-gated: a no-op stub when `remote` is off.
+#[cfg(feature = "remote")]
+async fn try_remote_hit(
+    ctx: &TargetCtx,
+    key: &CacheKey,
+) -> Result<Option<(TargetResult, ContentHash)>, ExecutorError> {
+    let Some(remote) = ctx.remote.as_ref() else {
+        return Ok(None);
+    };
+    let Ok(Some(entry)) = remote.get_ac(key).await else {
+        return Ok(None);
+    };
+
+    // Fetch every referenced blob from remote, write to local CAS,
+    // restore to the workspace. Any failure mid-restore → treat as a
+    // miss (the local AC entry would be inconsistent if we wrote it).
+    for out in &entry.outputs {
+        let Ok(bytes) = const_hex::decode(&out.content_hash) else {
+            return Ok(None);
+        };
+        let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) else {
+            return Ok(None);
+        };
+        let hash = ContentHash::from_raw(arr);
+
+        let blob = match remote.get_cas(&hash).await {
+            Ok(Some(b)) => b,
+            _ => return Ok(None),
+        };
+        // Verify the blob we got actually hashes to what the AC claims.
+        // Cheap insurance against a corrupted or hostile server.
+        if ContentHash::of_bytes(&blob) != hash {
+            tracing::warn!(
+                "remote CAS blob {} content does not match its name; treating as miss",
+                hash.to_hex()
+            );
+            return Ok(None);
+        }
+        ctx.cache.put_cas(blob.clone()).await?;
+
+        let dst = ctx.workspace_root.as_path().join(&out.path);
+        if let Some(parent) = dst.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&dst, &blob).await?;
+        #[cfg(unix)]
+        if out.executable {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = tokio::fs::metadata(&dst).await?.permissions();
+            perms.set_mode(0o755);
+            tokio::fs::set_permissions(&dst, perms).await?;
+        }
+    }
+
+    // Write the AC entry to local cache too so the next run goes
+    // straight to the local fast path.
+    ctx.cache.put_ac(key, &entry).await?;
+
+    let output_hash = match const_hex::decode(&entry.outputs_content_hash)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+    {
+        Some(arr) => ContentHash::from_raw(arr),
+        None => return Ok(None),
+    };
+
+    Ok(Some((
+        TargetResult::RemoteCacheHit {
+            key: *key,
+            output_hash,
+        },
+        output_hash,
+    )))
+}
+
+/// No-op stub used when the `remote` feature is off so the dispatcher
+/// chain stays uniform.
+#[cfg(not(feature = "remote"))]
+async fn try_remote_hit(
+    _ctx: &TargetCtx,
+    _key: &CacheKey,
+) -> Result<Option<(TargetResult, ContentHash)>, ExecutorError> {
+    Ok(None)
+}
+
 /// Run the target's `exists:` shell command, if any, to ask "does this
 /// artifact already live somewhere external?" (registry, S3, …).
 ///
@@ -1036,6 +1162,30 @@ async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> Target
             key: Some(key),
             error: format!("cache write: {e}"),
         };
+    }
+
+    // Queue background remote upload. Reads each blob back from local
+    // CAS - they're hot in the OS page cache from being written moments
+    // ago, so the read is cheap. The build never waits on this.
+    #[cfg(feature = "remote")]
+    if let Some(tx) = ctx.upload_tx.as_ref() {
+        let mut blobs = Vec::with_capacity(outputs.len());
+        for o in &outputs {
+            match ctx.cache.get_cas(&o.content_hash).await {
+                Ok(Some(bytes)) => blobs.push((o.content_hash, bytes)),
+                _ => {
+                    tracing::warn!("local CAS read failed for upload of {}", o.rel_path);
+                }
+            }
+        }
+        let job = crate::remote::UploadJob {
+            cache_key: key,
+            ac_entry: ac,
+            blobs,
+        };
+        // try_send: if the uploader is backlogged, drop the job rather
+        // than block the build. Better local progress than a stuck queue.
+        let _ = tx.try_send(job);
     }
 
     TargetResult::Built {

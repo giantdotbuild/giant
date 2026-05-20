@@ -68,6 +68,14 @@ pub async fn prepare(
             events,
             cancel,
             build_id: format!("bootstrap_{}", short_random()),
+            // Discovery doesn't currently use the remote cache -
+            // discoveries are per-workspace dynamic and aren't worth
+            // pushing to a shared server. Easy to revisit if a real
+            // use case appears.
+            #[cfg(feature = "remote")]
+            remote: None,
+            #[cfg(feature = "remote")]
+            upload_tx: None,
         };
         let bootstrap = build(bootstrap_job).await?;
         if bootstrap.counts.failed > 0 {
@@ -171,4 +179,40 @@ pub fn short_random() -> String {
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
     format!("{nanos:08x}")
+}
+
+/// Returned by `open_remote`. All three fields are `None` when the
+/// remote is disabled in config or the `remote` feature is off; in
+/// that case callers don't have to do anything special - the executor
+/// silently skips the remote lookup chain.
+#[cfg(feature = "remote")]
+pub type OpenedRemote = (
+    Option<crate::remote::RemoteCache>,
+    Option<tokio::sync::mpsc::Sender<crate::remote::UploadJob>>,
+    Option<tokio::task::JoinHandle<()>>,
+);
+
+/// Open the remote cache + background uploader if configured.
+#[cfg(feature = "remote")]
+pub fn open_remote(config: &Config) -> anyhow::Result<OpenedRemote> {
+    if !config.remote.enabled {
+        return Ok((None, None, None));
+    }
+    let resolved = crate::remote::RemoteCacheConfig::from_config(&config.remote)
+        .map_err(|e| anyhow::anyhow!("remote cache config: {e}"))?;
+    let remote = crate::remote::RemoteCache::open(resolved)
+        .map_err(|e| anyhow::anyhow!("open remote cache: {e}"))?;
+    let (tx, handle) = crate::remote::spawn_uploader(remote.clone());
+    Ok((Some(remote), Some(tx), Some(handle)))
+}
+
+#[cfg(not(feature = "remote"))]
+pub fn open_remote(
+    config: &Config,
+) -> anyhow::Result<(Option<()>, Option<()>, Option<()>)> {
+    // When the user has cache.remote.enabled: true in config but the
+    // binary was built without the `remote` feature, log once and
+    // proceed with local-only behaviour (TDD-0006).
+    let _ = config;
+    Ok((None, None, None))
 }

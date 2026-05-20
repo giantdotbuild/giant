@@ -16,6 +16,8 @@ pub mod git;
 pub mod graph;
 pub mod model;
 pub mod paths;
+#[cfg(feature = "remote")]
+pub mod remote;
 pub mod renderer;
 pub mod selection;
 pub mod structural;

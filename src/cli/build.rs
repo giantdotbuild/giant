@@ -141,6 +141,9 @@ pub async fn execute(args: BuildArgs, global: &super::GlobalFlags) -> anyhow::Re
     }
 
     let build_id = format!("b_{}", prep::short_random());
+
+    let (remote, upload_tx, upload_handle) = prep::open_remote(&prepared.config)?;
+
     let job = BuildJob {
         graph: Arc::new(prepared.graph),
         selection,
@@ -151,8 +154,27 @@ pub async fn execute(args: BuildArgs, global: &super::GlobalFlags) -> anyhow::Re
         events: tx,
         cancel,
         build_id,
+        #[cfg(feature = "remote")]
+        remote,
+        #[cfg(feature = "remote")]
+        upload_tx: upload_tx.clone(),
     };
+    #[cfg(not(feature = "remote"))]
+    let _ = (remote, upload_tx);
     let summary = build(job).await?;
+
+    // Drop the upload sender so the background task drains, then wait
+    // for it (bounded by reqwest's internal timeouts). Local + remote
+    // caches now reflect the build state.
+    #[cfg(feature = "remote")]
+    {
+        drop(upload_tx);
+        if let Some(h) = upload_handle {
+            let _ = h.await;
+        }
+    }
+    #[cfg(not(feature = "remote"))]
+    let _ = upload_handle;
 
     let _ = renderer.await;
 
