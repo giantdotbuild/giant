@@ -1233,6 +1233,163 @@ targets:
 }
 
 #[test]
+fn graph_subcommand_lists_all_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: graph_list
+cache:
+  dir: ./cache
+targets:
+  - id: "a"
+    inputs: []
+    outputs: ["a.txt"]
+    command: "echo a > a.txt"
+  - id: "b"
+    inputs: ["a.txt"]
+    outputs: ["b.txt"]
+    command: "cat a.txt > b.txt"
+  - id: "c"
+    inputs: []
+    outputs: ["c.txt"]
+    command: "echo c > c.txt"
+"#,
+    )
+    .unwrap();
+    let out = Command::new(giant_bin())
+        .arg("graph")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "graph failed: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    // All three IDs present.
+    for id in ["a", "b", "c"] {
+        assert!(s.contains(id), "expected target {id:?} in list; got: {s}");
+    }
+    // 'b' depends on 'a' (inferred via a.txt), so it should show the arrow.
+    assert!(s.contains("b") && s.contains("→") && s.contains("a"));
+    // Footer.
+    assert!(s.contains("3 target(s)"), "expected count footer; got: {s}");
+}
+
+#[test]
+fn graph_subcommand_shows_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: graph_tree
+cache:
+  dir: ./cache
+targets:
+  - id: "a"
+    inputs: []
+    outputs: ["a.txt"]
+    command: "echo a > a.txt"
+  - id: "b"
+    inputs: ["a.txt"]
+    outputs: ["b.txt"]
+    command: "cat a.txt > b.txt"
+  - id: "c"
+    inputs: ["b.txt"]
+    outputs: ["c.txt"]
+    command: "cat b.txt > c.txt"
+"#,
+    )
+    .unwrap();
+
+    // Tree under 'c' should be c → b → a.
+    let out = Command::new(giant_bin())
+        .args(["graph", "c"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    // Order matters: first line is 'c', then indented 'b', then deeper-indented 'a'.
+    let lines: Vec<&str> = s.lines().collect();
+    assert_eq!(lines[0].trim(), "c");
+    assert!(lines[1].starts_with("  ") && lines[1].contains("b"));
+    assert!(lines[2].starts_with("    ") && lines[2].contains("a"));
+}
+
+#[test]
+fn graph_subcommand_reverse_shows_downstream() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: graph_rev
+cache:
+  dir: ./cache
+targets:
+  - id: "lib"
+    inputs: []
+    outputs: ["lib.o"]
+    command: "echo lib > lib.o"
+  - id: "app"
+    inputs: ["lib.o"]
+    outputs: ["app"]
+    command: "cp lib.o app"
+  - id: "release"
+    inputs: ["app"]
+    outputs: ["release.tag"]
+    command: "echo r > release.tag"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .args(["graph", "lib", "--reverse"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    // lib → app → release downstream
+    assert!(s.contains("lib"), "got: {s}");
+    assert!(s.contains("app"), "got: {s}");
+    assert!(s.contains("release"), "got: {s}");
+}
+
+#[test]
+fn graph_unknown_target_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: graph_unknown
+cache:
+  dir: ./cache
+targets:
+  - id: "real"
+    inputs: []
+    outputs: ["x"]
+    command: "true"
+"#,
+    )
+    .unwrap();
+    let out = Command::new(giant_bin())
+        .args(["graph", "ghost"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("ghost"));
+}
+
+#[test]
 fn cache_miss_when_command_changes() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();
