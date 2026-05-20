@@ -11,20 +11,25 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
-/// Content-addressed hash (blake3, 32 bytes).
+/// Content-addressed hash (sha256, 32 bytes). 64 hex chars when stringified.
+///
+/// sha256 chosen for ecosystem alignment with bazel-remote, sccache, and
+/// `sha256sum` (debuggability via shell). See ADR-0006.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContentHash([u8; 32]);
 
 impl ContentHash {
     pub fn of_bytes(data: &[u8]) -> Self {
-        Self(*blake3::hash(data).as_bytes())
+        use sha2::{Digest, Sha256};
+        Self(Sha256::digest(data).into())
     }
 
     pub fn of_file(path: &Path) -> io::Result<Self> {
+        use sha2::{Digest, Sha256};
         let mut file = File::open(path)?;
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = Sha256::new();
         io::copy(&mut file, &mut hasher)?;
-        Ok(Self(*hasher.finalize().as_bytes()))
+        Ok(Self(hasher.finalize().into()))
     }
 
     pub fn to_hex(&self) -> String {
@@ -37,6 +42,28 @@ impl ContentHash {
 
     pub fn from_raw(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+
+    /// Build a streaming hasher when you want to feed bytes incrementally.
+    pub fn hasher() -> Hasher {
+        use sha2::Digest;
+        Hasher(sha2::Sha256::new())
+    }
+}
+
+/// Streaming hasher wrapper. Use for incremental hashing
+/// (`update(...)` then `finalize()`).
+pub struct Hasher(sha2::Sha256);
+
+impl Hasher {
+    pub fn update(&mut self, bytes: &[u8]) {
+        use sha2::Digest;
+        self.0.update(bytes);
+    }
+
+    pub fn finalize(self) -> ContentHash {
+        use sha2::Digest;
+        ContentHash(self.0.finalize().into())
     }
 }
 

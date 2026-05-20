@@ -20,8 +20,10 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml_ng = "0.10"
 indexmap = { version = "2", features = ["serde"] }
 
-# Hashing
-blake3 = { version = "1", features = ["mmap", "rayon"] }
+# Hashing - sha256 for ecosystem fit (bazel-remote, sccache, sha256sum).
+# Modern x86_64 has SHA-NI (~1.5 GB/s single-threaded); not a bottleneck
+# for our many-small-files workload. ARM has its own SHA crypto extensions.
+sha2 = { version = "0.10", features = ["asm"] }
 const-hex = "1"
 
 # Graph algorithms

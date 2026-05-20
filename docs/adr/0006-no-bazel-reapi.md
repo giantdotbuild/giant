@@ -42,11 +42,10 @@ Skip REAPI gRPC. Implement the **Bazel HTTP cache protocol** as
 giant's remote cache transport.
 
 - Endpoints: `GET/PUT /ac/<hash>` and `GET/PUT /cas/<hash>`.
-- Hash algorithm: blake3 in our native cache; we hex-encode and use the
-  same string as the URL path component. (Bazel uses SHA-256 by default
-  but its spec accepts any hash function as long as client and server
-  agree. bazel-remote-style servers configured for blake3 will work.
-  Servers that hard-require SHA-256 need a small compat layer.)
+- Hash algorithm: **sha256**, matching Bazel's default. Hashes are
+  hex-encoded and used directly as URL path components. This gives us
+  drop-in compatibility with bazel-remote, sccache backends, and
+  `sha256sum`-based shell debugging.
 - Auth: HTTP headers (`Authorization: Bearer <token>`,
   `Authorization: Basic ...`). Token sourced from env var or
   `cache.remote.auth_env` field in config.
@@ -81,9 +80,8 @@ We **do not implement** REAPI gRPC (Action/Directory/Tree wire types).
   remain fully compatible.)
 - No remote execution. We never had that anyway; HTTP cache protocol
   is cache-only by design.
-- Default hash algorithm differs from Bazel's SHA-256. Most HTTP cache
-  servers are hash-agnostic (they just use the URL component as a key)
-  so this rarely matters in practice, but we document it.
+- Hash algorithm is sha256, matching Bazel - no algorithm mismatch
+  with the broader ecosystem.
 
 ### What we're committing to maintaining
 
