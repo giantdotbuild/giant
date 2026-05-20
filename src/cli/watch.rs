@@ -38,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Args, Debug)]
 pub struct WatchArgs {
     /// Target IDs to watch. Empty = watch all non-test targets.
+    #[arg(add = clap_complete::ArgValueCompleter::new(super::dynamic::complete_target_ids))]
     pub patterns: Vec<String>,
 
     /// Number of parallel jobs for each rebuild (default: number of CPUs).

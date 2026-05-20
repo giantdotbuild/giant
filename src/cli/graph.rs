@@ -17,6 +17,7 @@ use super::prep;
 #[derive(Args, Debug)]
 pub struct GraphArgs {
     /// Target to show. If omitted, lists every target in the merged graph.
+    #[arg(add = clap_complete::ArgValueCompleter::new(super::dynamic::complete_target_ids))]
     pub target: Option<String>,
 
     /// In tree mode, show downstream consumers instead of upstream deps.

@@ -4,12 +4,14 @@
 //! through to porcelain dispatch: `giant <name>` looks for `giant-<name>`
 //! on PATH and execs it (git/cargo/kubectl model - see ADR-0010).
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::ffi::OsString;
 
 mod affected;
 mod build;
 mod clean;
+mod completions;
+pub(crate) mod dynamic;
 mod explain;
 mod external;
 mod graph;
@@ -68,6 +70,11 @@ pub enum Commands {
     /// targets when files change. Ctrl-C to exit.
     Watch(watch::WatchArgs),
 
+    /// Generate a shell completion script for bash / zsh / fish /
+    /// powershell / elvish / nushell. Pipe the output into the right
+    /// place for your shell.
+    Completions(completions::CompletionsArgs),
+
     /// Unknown subcommand → dispatch to `giant-<name>` on PATH if
     /// available, else error with a helpful hint (ADR-0010).
     #[command(external_subcommand)]
@@ -76,6 +83,11 @@ pub enum Commands {
 
 /// Entry point invoked from `main`.
 pub async fn run() -> anyhow::Result<()> {
+    // Dynamic completion: when invoked by the shell at TAB time, clap
+    // sees the COMPLETE env var and emits suggestions on stdout, then
+    // exits - without ever reaching the normal command dispatch.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -95,6 +107,7 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Graph(args) => graph::execute(args, &global).await,
         Commands::Clean(args) => clean::execute(args, &global).await,
         Commands::Watch(args) => watch::execute(args, &global).await,
+        Commands::Completions(args) => completions::execute(args),
         Commands::External(args) => external::dispatch(args),
     }
 }

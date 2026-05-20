@@ -20,6 +20,7 @@ use super::prep;
 #[derive(Args, Debug)]
 pub struct ExplainArgs {
     /// Target ID to explain.
+    #[arg(add = clap_complete::ArgValueCompleter::new(super::dynamic::complete_target_ids))]
     pub target: String,
 }
 

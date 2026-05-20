@@ -16,6 +16,7 @@ use super::prep;
 #[derive(Args, Debug)]
 pub struct BuildArgs {
     /// Target IDs to build. Empty = build all non-test targets.
+    #[arg(add = clap_complete::ArgValueCompleter::new(super::dynamic::complete_target_ids))]
     pub patterns: Vec<String>,
 
     /// Number of parallel jobs (default: number of CPUs).

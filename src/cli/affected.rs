@@ -30,6 +30,7 @@ pub struct AffectedArgs {
     /// Restrict to targets matching these patterns. Same selection
     /// language as `giant build`: exact ids, globs (`go:*`, `**:test:*`),
     /// and exclusions (`!go:test:*`). See TDD-0011.
+    #[arg(add = clap_complete::ArgValueCompleter::new(super::dynamic::complete_target_ids))]
     pub patterns: Vec<String>,
 
     /// Include only targets carrying this tag. Repeatable.

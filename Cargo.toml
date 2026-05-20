@@ -1,3 +1,7 @@
+[workspace]
+resolver = "2"
+members = [".", "crates/giant-task"]
+
 [package]
 name = "giant"
 version = "0.1.0"
@@ -13,6 +17,8 @@ futures-util = "0.3"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
+clap_complete_nushell = "4"
 # anstyle is already in the tree via clap; declaring it directly so we
 # can build Style values for the renderer without paying for it twice.
 anstyle = "1"
