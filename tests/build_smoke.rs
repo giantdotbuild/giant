@@ -1390,6 +1390,139 @@ targets:
 }
 
 #[test]
+fn clean_removes_cache_contents() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: clean_test
+cache:
+  dir: ./cache
+targets:
+  - id: "demo"
+    inputs: []
+    outputs: ["out.txt"]
+    command: "echo hello > out.txt"
+"#,
+    )
+    .unwrap();
+
+    // Build to populate the cache.
+    let build = Command::new(giant_bin()).arg("build").current_dir(ws).output().unwrap();
+    assert!(build.status.success());
+    assert!(ws.join("cache/version").exists(), "cache should have been initialised");
+
+    // Dry-run: shows summary, doesn't delete.
+    let dry = Command::new(giant_bin())
+        .args(["clean", "--dry-run"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(dry.status.success());
+    let s = String::from_utf8_lossy(&dry.stdout);
+    assert!(s.contains("entries:"), "summary should show entries; got: {s}");
+    assert!(s.contains("Dry run"), "should label as dry run; got: {s}");
+    // AC entries should still be on disk.
+    let ac_count_after_dry = walkdir::WalkDir::new(ws.join("cache/ac"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .count();
+    assert!(ac_count_after_dry > 0, "dry-run must not delete AC entries");
+
+    // Real clean.
+    let clean = Command::new(giant_bin())
+        .args(["clean", "-y"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(clean.status.success(), "clean failed: {}", String::from_utf8_lossy(&clean.stderr));
+    let s = String::from_utf8_lossy(&clean.stdout);
+    assert!(s.contains("Cleared"), "expected 'Cleared' message; got: {s}");
+
+    // After clean: cache dir exists but is empty (no AC, CAS, etc.).
+    let after_count = walkdir::WalkDir::new(ws.join("cache"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .count();
+    assert_eq!(after_count, 0, "cache should be empty after clean");
+}
+
+#[test]
+fn clean_empty_cache_is_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: clean_empty
+cache:
+  dir: ./cache
+targets:
+  - id: "x"
+    inputs: []
+    outputs: ["x"]
+    command: "echo x > x"
+"#,
+    )
+    .unwrap();
+    // Cache directory doesn't exist yet (no build run).
+    let out = Command::new(giant_bin())
+        .args(["clean", "-y"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "clean on missing cache should exit 0");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("empty") || s.contains("Nothing to clean"),
+        "expected friendly empty message; got: {s}"
+    );
+}
+
+#[test]
+fn clean_requires_yes_in_non_interactive() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: clean_y
+cache:
+  dir: ./cache
+targets:
+  - id: "demo"
+    inputs: []
+    outputs: ["out.txt"]
+    command: "echo hi > out.txt"
+"#,
+    )
+    .unwrap();
+    // Populate cache.
+    let _ = Command::new(giant_bin()).arg("build").current_dir(ws).output().unwrap();
+
+    // Run with stdin closed (Command::output gives no tty by default) and no -y.
+    let out = Command::new(giant_bin())
+        .arg("clean")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "clean without -y in non-interactive should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("pass -y") || stderr.contains("not a terminal"),
+        "expected guidance to pass -y; got stderr: {stderr}"
+    );
+    // Cache must still be intact.
+    assert!(ws.join("cache/version").exists());
+}
+
+#[test]
 fn cache_miss_when_command_changes() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();

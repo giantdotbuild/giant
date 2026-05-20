@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 mod affected;
 mod build;
+mod clean;
 mod explain;
 mod graph;
 pub(crate) mod prep;
@@ -42,6 +43,9 @@ pub enum Commands {
 
     /// List targets, or show a target's dep tree.
     Graph(graph::GraphArgs),
+
+    /// Clear the local cache.
+    Clean(clean::CleanArgs),
 }
 
 /// Entry point invoked from `main`.
@@ -62,6 +66,7 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Affected(args) => affected::execute(args, &global).await,
         Commands::Explain(args) => explain::execute(args, &global).await,
         Commands::Graph(args) => graph::execute(args, &global).await,
+        Commands::Clean(args) => clean::execute(args, &global).await,
     }
 }
 
