@@ -1,11 +1,17 @@
 //! CLI surface - parses args, dispatches to subcommand handlers.
+//!
+//! Built-in subcommands are matched first. Unknown subcommands fall
+//! through to porcelain dispatch: `giant <name>` looks for `giant-<name>`
+//! on PATH and execs it (git/cargo/kubectl model - see ADR-0010).
 
 use clap::{Parser, Subcommand};
+use std::ffi::OsString;
 
 mod affected;
 mod build;
 mod clean;
 mod explain;
+mod external;
 mod graph;
 pub(crate) mod prep;
 mod watch;
@@ -51,6 +57,11 @@ pub enum Commands {
     /// Run an initial build, then continuously rebuild affected
     /// targets when files change. Ctrl-C to exit.
     Watch(watch::WatchArgs),
+
+    /// Unknown subcommand → dispatch to `giant-<name>` on PATH if
+    /// available, else error with a helpful hint (ADR-0010).
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
 }
 
 /// Entry point invoked from `main`.
@@ -73,6 +84,7 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Graph(args) => graph::execute(args, &global).await,
         Commands::Clean(args) => clean::execute(args, &global).await,
         Commands::Watch(args) => watch::execute(args, &global).await,
+        Commands::External(args) => external::dispatch(args),
     }
 }
 
