@@ -118,14 +118,26 @@ pub fn compute_fingerprint(
         })
         .unwrap_or_default();
 
-    // Walk + fingerprint, using mtime+size to skip unchanged files.
-    let per_file = walk_with_mtime_skip(
+    // Try the git fast-path first; it knows what changed without walking
+    // the workspace. Falls back to a mtime+size-skipped ignore::Walk when
+    // not in a git repo or git ops fail (per TDD-0002 §Warm validation /
+    // §Cold computation).
+    let per_file = match try_git_fast_path(
         workspace_root,
         &canonical_files,
         &canonical_lines,
         &canonical_scope,
         &prior_per_file,
-    )?;
+    ) {
+        Some(pf) => pf,
+        None => walk_with_mtime_skip(
+            workspace_root,
+            &canonical_files,
+            &canonical_lines,
+            &canonical_scope,
+            &prior_per_file,
+        )?,
+    };
 
     let global_hash = combine_per_file(&per_file);
 
@@ -194,6 +206,142 @@ fn save_sidecar(
     })?;
     cache.put_structural_sidecar_raw(target_id, &bytes)?;
     Ok(())
+}
+
+/// Git fast-path. Returns `None` when not in a git repo or git ops fail
+/// - the caller falls back to a filesystem walk.
+///
+/// Two modes:
+/// - **Cold** (no prior sidecar entry): enumerate via the git index +
+///   untracked files. No directory walk; single index read.
+/// - **Warm** (prior sidecar present): use `git status` scoped to the
+///   input's globs to find what changed. Only re-read modified / new
+///   files; drop deleted; reuse everything else from the prior entry.
+fn try_git_fast_path(
+    workspace_root: &AbsPath,
+    files_globs: &[String],
+    lines_patterns: &[String],
+    scope: &[String],
+    prior_per_file: &BTreeMap<String, PerFileEntry>,
+) -> Option<BTreeMap<String, PerFileEntry>> {
+    let patterns: Vec<glob::Pattern> = files_globs
+        .iter()
+        .filter_map(|s| glob::Pattern::new(s).ok())
+        .collect();
+    if patterns.is_empty() {
+        return Some(BTreeMap::new());
+    }
+
+    // Best-effort extension hint to filter the index - purely a perf
+    // narrow; the pattern check below is the source of truth.
+    let exts: Vec<String> = files_globs
+        .iter()
+        .filter_map(|g| Path::new(g).extension())
+        .filter_map(|e| e.to_str())
+        .map(|s| s.to_string())
+        .collect();
+    let exts_ref: Vec<&str> = exts.iter().map(|s| s.as_str()).collect();
+
+    if prior_per_file.is_empty() {
+        // Cold path: enumerate via git index, fingerprint each match.
+        let listing = crate::git::get_index_files_and_status(workspace_root.as_path(), &exts_ref)?;
+        let mut current = BTreeMap::new();
+        let candidates = listing.tracked.iter().chain(listing.untracked.iter());
+        for rel in candidates {
+            let rel_str = rel.to_string_lossy().into_owned();
+            if !matches_path(&patterns, &rel_str, scope) {
+                continue;
+            }
+            let abs = workspace_root.as_path().join(rel);
+            if let Some(entry) = fingerprint_file_with_skip(&abs, lines_patterns, None).ok().flatten() {
+                current.insert(rel_str, entry);
+            }
+        }
+        return Some(current);
+    }
+
+    // Warm path: derive scoped pathspecs (auto-pick from scope when
+    // present; otherwise the glob's longest non-wildcard prefix).
+    let pathspecs = build_pathspecs(scope, files_globs);
+    let status = crate::git::get_full_status_fast_scoped(workspace_root.as_path(), &pathspecs)?;
+
+    let mut current = prior_per_file.clone();
+
+    // Drop deleted files.
+    for path in &status.deleted {
+        let rel = path.to_string_lossy().into_owned();
+        current.remove(&rel);
+    }
+
+    // Re-fingerprint modified files.
+    for path in &status.modified {
+        let rel = path.to_string_lossy().into_owned();
+        if !matches_path(&patterns, &rel, scope) {
+            continue;
+        }
+        let abs = workspace_root.as_path().join(path);
+        match fingerprint_file_with_skip(&abs, lines_patterns, None).ok().flatten() {
+            Some(entry) => {
+                current.insert(rel, entry);
+            }
+            None => {
+                // No matching lines (or unreadable) - drop from per_file.
+                current.remove(&rel);
+            }
+        }
+    }
+
+    // Newly untracked files that match: add them.
+    for path in &status.untracked {
+        let rel = path.to_string_lossy().into_owned();
+        if !matches_path(&patterns, &rel, scope) {
+            continue;
+        }
+        let abs = workspace_root.as_path().join(path);
+        if let Some(entry) = fingerprint_file_with_skip(&abs, lines_patterns, None).ok().flatten() {
+            current.insert(rel, entry);
+        }
+    }
+
+    Some(current)
+}
+
+/// Pattern + scope match for a workspace-relative path.
+fn matches_path(patterns: &[glob::Pattern], rel: &str, scope: &[String]) -> bool {
+    if !scope.is_empty() && !scope.iter().any(|s| rel.starts_with(s.as_str())) {
+        return false;
+    }
+    patterns.iter().any(|p| p.matches(rel))
+}
+
+/// Build pathspecs for `git status` scoping. Prefers user-declared scope,
+/// otherwise derives from each glob's longest non-wildcard prefix. Empty
+/// pathspec list = workspace-wide status.
+fn build_pathspecs(scope: &[String], files_globs: &[String]) -> Vec<gix::bstr::BString> {
+    if !scope.is_empty() {
+        return scope
+            .iter()
+            .map(|s| gix::bstr::BString::from(s.as_str()))
+            .collect();
+    }
+    let mut out: Vec<gix::bstr::BString> = files_globs
+        .iter()
+        .filter_map(|g| {
+            let prefix: String = g
+                .chars()
+                .take_while(|&c| c != '*' && c != '?' && c != '[')
+                .collect();
+            let prefix = prefix.trim_end_matches('/');
+            if prefix.is_empty() {
+                None
+            } else {
+                Some(gix::bstr::BString::from(prefix))
+            }
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Walk the workspace (or the scoped subtrees), fingerprint each

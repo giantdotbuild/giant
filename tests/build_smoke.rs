@@ -643,6 +643,95 @@ targets:
 }
 
 #[test]
+fn structural_input_with_git_fast_path_warm_runs_are_consistent() {
+    // Same property as the non-git test, exercised inside a real git
+    // repo. Confirms the git fast-path produces the same hash as the
+    // mtime walk (otherwise the cache key would shift on `git init`).
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::write(
+        ws.join("src/main.go"),
+        "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"v1\") }\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("go.mod"), "module x\n").unwrap();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: gitfastpath
+cache:
+  dir: ./cache
+targets:
+  - id: "discover:go"
+    inputs:
+      - "go.mod"
+      - kind: structural
+        files: "src/**/*.go"
+        lines: ["package ", "import "]
+    outputs: ["d.json"]
+    command: 'echo "{}" > d.json'
+"#,
+    )
+    .unwrap();
+
+    // Initialize a real git repo and commit src/main.go so the fast-path
+    // sees it as tracked.
+    let run_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(ws)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git available");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run_git(&["init", "--initial-branch=main"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "init"]);
+
+    let out1 = Command::new(giant_bin()).arg("build").current_dir(ws).output().unwrap();
+    assert!(out1.status.success(), "first build failed: {}", String::from_utf8_lossy(&out1.stderr));
+    let s1 = String::from_utf8_lossy(&out1.stdout);
+    assert!(s1.contains("built  discover:go"), "got: {s1}");
+
+    // Edit function body - git status reports src/main.go as modified.
+    // The fast-path should re-read it, see no matching-line change, and
+    // emit the same fingerprint → cache hit on the discovery target.
+    std::fs::write(
+        ws.join("src/main.go"),
+        "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"v2-very-different\") }\n",
+    )
+    .unwrap();
+    let out2 = Command::new(giant_bin()).arg("build").current_dir(ws).output().unwrap();
+    assert!(out2.status.success());
+    let s2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        s2.contains("cache  discover:go"),
+        "warm fast-path with function-body edit should cache-hit; got: {s2}"
+    );
+
+    // Edit import line - matching line changes → rebuild.
+    std::fs::write(
+        ws.join("src/main.go"),
+        "package main\nimport \"fmt\"\nimport \"log\"\nfunc main() { fmt.Println(\"v3\") }\n",
+    )
+    .unwrap();
+    let out3 = Command::new(giant_bin()).arg("build").current_dir(ws).output().unwrap();
+    assert!(out3.status.success());
+    let s3 = String::from_utf8_lossy(&out3.stdout);
+    assert!(s3.contains("built  discover:go"), "import edit must rebuild; got: {s3}");
+}
+
+#[test]
 fn cache_miss_when_command_changes() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();
