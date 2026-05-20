@@ -859,6 +859,208 @@ fn fixture_discover_go_runs_end_to_end() {
 }
 
 #[test]
+fn affected_with_file_only_runs_matching_targets() {
+    // No git involved - pass --file directly. Verifies the
+    // selection::affected_targets path: only `a` (whose input matches
+    // src/a/main.go) should run; `b` is untouched.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir_all(ws.join("src/a")).unwrap();
+    std::fs::create_dir_all(ws.join("src/b")).unwrap();
+    std::fs::write(ws.join("src/a/main.go"), "package main\n").unwrap();
+    std::fs::write(ws.join("src/b/main.go"), "package main\n").unwrap();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: affected_file
+cache:
+  dir: ./cache
+targets:
+  - id: "a"
+    inputs: ["src/a/**/*"]
+    outputs: ["a.out"]
+    command: "echo a > a.out"
+  - id: "b"
+    inputs: ["src/b/**/*"]
+    outputs: ["b.out"]
+    command: "echo b > b.out"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .args(["build", "--affected", "--file", "src/a/main.go"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("built  a"), "a should build; got: {s}");
+    assert!(!s.contains(" b "), "b should not appear; got: {s}");
+    assert!(!ws.join("b.out").exists(), "b.out should not exist");
+}
+
+#[test]
+fn affected_with_base_uses_git_diff() {
+    // Real git workflow: commit baseline, modify one file, run with
+    // --base HEAD. Only the affected target should run.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir_all(ws.join("src/a")).unwrap();
+    std::fs::create_dir_all(ws.join("src/b")).unwrap();
+    std::fs::write(ws.join("src/a/main.go"), "package main\nfunc f() {}\n").unwrap();
+    std::fs::write(ws.join("src/b/main.go"), "package main\nfunc g() {}\n").unwrap();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: affected_git
+cache:
+  dir: ./cache
+targets:
+  - id: "a"
+    inputs: ["src/a/**/*"]
+    outputs: ["a.out"]
+    command: "echo a > a.out"
+  - id: "b"
+    inputs: ["src/b/**/*"]
+    outputs: ["b.out"]
+    command: "echo b > b.out"
+"#,
+    )
+    .unwrap();
+
+    let run_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(ws)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git available");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run_git(&["init", "-q", "--initial-branch=main"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "init"]);
+
+    // Modify src/a only; src/b untouched.
+    std::fs::write(
+        ws.join("src/a/main.go"),
+        "package main\nfunc f() { /* updated */ }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .args(["build", "--affected", "--base", "HEAD"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("built  a"), "a should rebuild; got: {s}");
+    assert!(!s.contains(" b "), "b should not appear; got: {s}");
+}
+
+#[test]
+fn affected_with_no_changes_exits_cleanly() {
+    // git clean + no edits → no affected targets. Should exit 0 with a
+    // friendly message, not bail with an error.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::write(ws.join("src/main.go"), "package main\n").unwrap();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: affected_nochanges
+cache:
+  dir: ./cache
+targets:
+  - id: "a"
+    inputs: ["src/**/*"]
+    outputs: ["a.out"]
+    command: "echo a > a.out"
+"#,
+    )
+    .unwrap();
+    let run_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(ws)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git available");
+        assert!(out.status.success(), "git {args:?} failed");
+    };
+    run_git(&["init", "-q", "--initial-branch=main"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "init"]);
+
+    let out = Command::new(giant_bin())
+        .args(["build", "--affected", "--base", "HEAD"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "clean build with no changes should exit 0");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no affected"),
+        "expected 'no affected' message; got: {stderr}"
+    );
+}
+
+#[test]
+fn affected_walks_downstream_transitively() {
+    // a's output feeds b's input. Editing src/a/* should make BOTH a and
+    // b run (b is transitively affected via output-based inference).
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir_all(ws.join("src/a")).unwrap();
+    std::fs::write(ws.join("src/a/main.go"), "v1\n").unwrap();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: affected_downstream
+cache:
+  dir: ./cache
+targets:
+  - id: "a"
+    inputs: ["src/a/**/*"]
+    outputs: ["a.out"]
+    command: "cp src/a/main.go a.out"
+  - id: "b"
+    inputs: ["a.out"]
+    outputs: ["b.out"]
+    command: "cp a.out b.out"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .args(["build", "--affected", "--file", "src/a/main.go"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("built  a"), "a should build; got: {s}");
+    assert!(s.contains("built  b"), "b should also build (transitive); got: {s}");
+}
+
+#[test]
 fn cache_miss_when_command_changes() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();

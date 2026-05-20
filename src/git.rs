@@ -152,3 +152,59 @@ pub fn head_commit(workspace_root: &Path) -> Option<String> {
     let head = repo.head_id().ok()?;
     Some(head.to_string())
 }
+
+/// Files changed in the working tree (committed + uncommitted) since
+/// `base`, plus untracked-but-not-gitignored files. Workspace-relative
+/// paths.
+///
+/// Implementation shells out to `git` for two reasons:
+/// (1) `git diff --name-only --no-renames <base>` and
+/// `git ls-files --others --exclude-standard` are stable, well-known
+/// commands users can audit;
+/// (2) the gix `diff` API for the same query is significantly more
+/// code without any speed advantage at our scale.
+pub fn affected_files_since(
+    workspace_root: &Path,
+    base: &str,
+) -> Result<Vec<std::path::PathBuf>, GitError> {
+    use std::process::Command;
+
+    let diff = Command::new("git")
+        .args(["diff", "--name-only", "--no-renames", "-z", base])
+        .current_dir(workspace_root)
+        .output()
+        .map_err(|e| GitError::Other(format!("spawn git diff: {e}")))?;
+    if !diff.status.success() {
+        return Err(GitError::Other(format!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&diff.stderr).trim()
+        )));
+    }
+
+    let untracked = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .current_dir(workspace_root)
+        .output()
+        .map_err(|e| GitError::Other(format!("spawn git ls-files: {e}")))?;
+    if !untracked.status.success() {
+        return Err(GitError::Other(format!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&untracked.stderr).trim()
+        )));
+    }
+
+    let mut files: Vec<std::path::PathBuf> = parse_z_separated(&diff.stdout);
+    files.extend(parse_z_separated(&untracked.stdout));
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+/// Parse `-z` (NUL-separated) output from git into PathBufs.
+fn parse_z_separated(bytes: &[u8]) -> Vec<std::path::PathBuf> {
+    bytes
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| std::path::PathBuf::from(std::ffi::OsString::from(String::from_utf8_lossy(s).into_owned())))
+        .collect()
+}

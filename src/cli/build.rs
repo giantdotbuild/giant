@@ -5,11 +5,13 @@ use crate::config::Config;
 use crate::discovery;
 use crate::events::Event;
 use crate::executor::{BuildJob, build};
+use crate::git;
 use crate::graph::BuildGraph;
 use crate::model::TargetId;
 use crate::paths::AbsPath;
+use crate::selection;
 use clap::Args;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -26,6 +28,23 @@ pub struct BuildArgs {
     /// in v1; the option is shaped so other formats can be added later.)
     #[arg(long, value_name = "FORMAT")]
     pub events: Option<EventsFormat>,
+
+    /// Build only targets affected by changes. Requires `--base` or
+    /// `--file`. If both are given, `--file` wins.
+    #[arg(long)]
+    pub affected: bool,
+
+    /// Git ref used as the diff baseline. Affected files = everything
+    /// changed in the worktree (committed + uncommitted) relative to this
+    /// ref, plus untracked-but-not-gitignored files.
+    #[arg(long, value_name = "REF")]
+    pub base: Option<String>,
+
+    /// Explicit changed-file list. Repeatable; overrides `--base`. Useful
+    /// in CI where the file list comes from elsewhere and you don't want
+    /// to invoke git.
+    #[arg(long, value_name = "PATH")]
+    pub file: Vec<PathBuf>,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -125,7 +144,9 @@ pub async fn execute(args: BuildArgs, global: &super::GlobalFlags) -> anyhow::Re
     }
 
     // 6. Resolve selection over the merged graph.
-    let selection: Vec<TargetId> = if args.patterns.is_empty() {
+    //
+    // Pipeline: pattern match → optional --affected filter → final list.
+    let pattern_selection: Vec<TargetId> = if args.patterns.is_empty() {
         graph
             .iter()
             .filter(|(_, spec)| !spec.test)
@@ -144,6 +165,27 @@ pub async fn execute(args: BuildArgs, global: &super::GlobalFlags) -> anyhow::Re
             anyhow::bail!("no target matches {p:?} (selection-language is v1.1)");
         }
         out
+    };
+
+    let selection = if args.affected {
+        let changed = resolve_changed_files(&args, workspace_abs.as_path())?;
+        let changed_refs: Vec<&Path> = changed.iter().map(|p| p.as_path()).collect();
+        let affected = selection::affected_targets(&graph, &changed_refs);
+        let intersected: Vec<TargetId> = pattern_selection
+            .into_iter()
+            .filter(|id| affected.contains(id))
+            .collect();
+        if intersected.is_empty() {
+            drop(tx);
+            let _ = renderer.await;
+            // Clean exit, not an error - CI invocations want exit-0 when
+            // nothing's affected.
+            eprintln!("no affected targets");
+            return Ok(());
+        }
+        intersected
+    } else {
+        pattern_selection
     };
 
     if selection.is_empty() {
@@ -235,6 +277,29 @@ fn render_plain(ev: &Event) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// Resolve the list of changed files from `--file` (explicit) or `--base`
+/// (git diff). Returns workspace-relative paths.
+fn resolve_changed_files(args: &BuildArgs, workspace_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    if !args.file.is_empty() {
+        // Trust the user's list verbatim. Strip workspace_root prefix if
+        // the user passed absolute paths.
+        return Ok(args
+            .file
+            .iter()
+            .map(|p| {
+                p.strip_prefix(workspace_root)
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|_| p.clone())
+            })
+            .collect());
+    }
+    let base = args.base.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("--affected requires --base <ref> or one or more --file <path>")
+    })?;
+    git::affected_files_since(workspace_root, base)
+        .map_err(|e| anyhow::anyhow!("affected detection: {e}"))
 }
 
 /// Walk up from cwd looking for `giant.yaml` / `giant.json`.
