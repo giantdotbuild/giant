@@ -1,0 +1,15 @@
+workspace:
+  name: discover-go-fixture
+cache:
+  dir: ./cache
+
+include:
+  - id: "discover:go"
+    inputs:
+      - "tools/discover-go.sh"
+      - "go.mod"
+      - kind: structural
+        files: "**/*.go"
+        lines: ["package ", "import ", "//go:embed "]
+    outputs: [".giant/d/go.json"]
+    command: "tools/discover-go.sh > .giant/d/go.json"

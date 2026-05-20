@@ -827,6 +827,18 @@ async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> Target
         cmd.env(k, v);
     }
 
+    // Ensure the parent directory of each declared output exists. Many
+    // commands use `> outdir/file` redirects; with parent dirs absent
+    // the shell fails before the user's command sees the workspace.
+    // Cheap, idempotent, and matches the "you declared this output,
+    // the engine handles the boilerplate" philosophy.
+    for out_path in &spec.outputs {
+        let abs = ctx.workspace_root.as_path().join(out_path.as_path());
+        if let Some(parent) = abs.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+    }
+
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {

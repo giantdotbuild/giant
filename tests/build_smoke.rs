@@ -9,6 +9,44 @@ fn giant_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
+fn fixture_path(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+/// Recursively copy a directory tree. Preserves the executable bit so
+/// fixture scripts stay runnable after copy.
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&src_path)?.permissions().mode();
+                std::fs::set_permissions(&dst_path, std::fs::Permissions::from_mode(mode))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn have_program(name: &str) -> bool {
+    Command::new(name)
+        .arg("version")
+        .output()
+        .or_else(|_| Command::new(name).arg("--version").output())
+        .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
+        .unwrap_or(false)
+}
+
 #[test]
 fn build_then_cache_hit_restores_outputs() {
     let dir = tempfile::tempdir().unwrap();
@@ -729,6 +767,95 @@ targets:
     assert!(out3.status.success());
     let s3 = String::from_utf8_lossy(&out3.stdout);
     assert!(s3.contains("built  discover:go"), "import edit must rebuild; got: {s3}");
+}
+
+#[test]
+fn fixture_discover_docker_runs_end_to_end() {
+    // Copy the docker discovery fixture into a tempdir, run `giant build`,
+    // verify the discovery emitted docker:api and docker:worker targets
+    // and they ran (with safe echo placeholders, not real docker calls).
+    if !have_program("jq") {
+        eprintln!("skipping: jq not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    copy_dir(&fixture_path("discover-docker"), ws).unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .expect("spawn giant");
+    assert!(
+        out.status.success(),
+        "build failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Bootstrap built the discovery target.
+    assert!(
+        stdout.contains("built  discover:docker") || stdout.contains("cache  discover:docker"),
+        "expected discover:docker to run; got: {stdout}"
+    );
+    // Discovery emitted two docker targets - one per Dockerfile.
+    assert!(stdout.contains("docker:api"), "expected docker:api in output; got: {stdout}");
+    assert!(
+        stdout.contains("docker:worker"),
+        "expected docker:worker in output; got: {stdout}"
+    );
+}
+
+#[test]
+fn fixture_discover_go_runs_end_to_end() {
+    // Copy the go discovery fixture into a tempdir; run `giant build`;
+    // verify go:pkg:* targets get discovered and executed.
+    if !have_program("go") || !have_program("jq") {
+        eprintln!("skipping: go or jq not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    copy_dir(&fixture_path("discover-go"), ws).unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        // Isolate the Go build cache so test parallelism doesn't fight
+        // over $XDG_CACHE_HOME/go-build.
+        .env("GOCACHE", ws.join(".gocache").to_string_lossy().to_string())
+        .env("GOMODCACHE", ws.join(".gomodcache").to_string_lossy().to_string())
+        .output()
+        .expect("spawn giant");
+    assert!(
+        out.status.success(),
+        "build failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Bootstrap built (or cache-hit) the discovery target.
+    assert!(
+        stdout.contains("built  discover:go") || stdout.contains("cache  discover:go"),
+        "expected discover:go to run; got: {stdout}"
+    );
+    // Discovery emitted two packages - library (pkg/util) + main (root).
+    assert!(
+        stdout.contains("go:pkg:pkg/util"),
+        "expected go:pkg:pkg/util in output; got: {stdout}"
+    );
+    assert!(
+        stdout.contains("go:pkg:root"),
+        "expected go:pkg:root in output; got: {stdout}"
+    );
+    // The main package compiled into bin/root.
+    assert!(
+        ws.join("bin/root").exists(),
+        "expected bin/root binary to exist after build"
+    );
 }
 
 #[test]
