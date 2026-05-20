@@ -15,7 +15,11 @@ impl AbsPath {
     /// Wrap a path, panicking if it isn't absolute.
     pub fn new(p: impl Into<PathBuf>) -> Self {
         let p = p.into();
-        assert!(p.is_absolute(), "AbsPath requires an absolute path: {}", p.display());
+        assert!(
+            p.is_absolute(),
+            "AbsPath requires an absolute path: {}",
+            p.display()
+        );
         Self(p)
     }
 
@@ -44,7 +48,9 @@ impl WsRelPath {
         if p.is_absolute() {
             return Err(PathError::Absolute(p));
         }
-        if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        if p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             return Err(PathError::ParentRef(p));
         }
         Ok(Self(p))

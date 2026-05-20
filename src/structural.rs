@@ -113,7 +113,11 @@ pub fn compute_fingerprint(
         .and_then(|s| {
             s.entries
                 .iter()
-                .find(|e| e.files == canonical_files && e.lines == canonical_lines && e.scope == canonical_scope)
+                .find(|e| {
+                    e.files == canonical_files
+                        && e.lines == canonical_lines
+                        && e.scope == canonical_scope
+                })
                 .map(|e| e.per_file.clone())
         })
         .unwrap_or_default();
@@ -151,10 +155,7 @@ pub fn compute_fingerprint(
         per_file,
     };
 
-    let mut entries = sidecar
-        .take()
-        .map(|s| s.entries)
-        .unwrap_or_default();
+    let mut entries = sidecar.take().map(|s| s.entries).unwrap_or_default();
     entries.retain(|e| {
         !(e.files == canonical_files && e.lines == canonical_lines && e.scope == canonical_scope)
     });
@@ -183,10 +184,11 @@ fn load_sidecar(
     let Some(bytes) = cache.get_structural_sidecar_raw(target_id)? else {
         return Ok(None);
     };
-    let sidecar: Sidecar = serde_json::from_slice(&bytes).map_err(|e| StructuralError::Corrupt {
-        target_id: target_id.as_str().to_string(),
-        detail: e.to_string(),
-    })?;
+    let sidecar: Sidecar =
+        serde_json::from_slice(&bytes).map_err(|e| StructuralError::Corrupt {
+            target_id: target_id.as_str().to_string(),
+            detail: e.to_string(),
+        })?;
     if sidecar.schema != SCHEMA {
         // Schema mismatch - discard and recompute. Future code can
         // migrate; for now we just treat as cold.
@@ -253,7 +255,10 @@ fn try_git_fast_path(
                 continue;
             }
             let abs = workspace_root.as_path().join(rel);
-            if let Some(entry) = fingerprint_file_with_skip(&abs, lines_patterns, None).ok().flatten() {
+            if let Some(entry) = fingerprint_file_with_skip(&abs, lines_patterns, None)
+                .ok()
+                .flatten()
+            {
                 current.insert(rel_str, entry);
             }
         }
@@ -280,7 +285,10 @@ fn try_git_fast_path(
             continue;
         }
         let abs = workspace_root.as_path().join(path);
-        match fingerprint_file_with_skip(&abs, lines_patterns, None).ok().flatten() {
+        match fingerprint_file_with_skip(&abs, lines_patterns, None)
+            .ok()
+            .flatten()
+        {
             Some(entry) => {
                 current.insert(rel, entry);
             }
@@ -298,7 +306,10 @@ fn try_git_fast_path(
             continue;
         }
         let abs = workspace_root.as_path().join(path);
-        if let Some(entry) = fingerprint_file_with_skip(&abs, lines_patterns, None).ok().flatten() {
+        if let Some(entry) = fingerprint_file_with_skip(&abs, lines_patterns, None)
+            .ok()
+            .flatten()
+        {
             current.insert(rel, entry);
         }
     }
@@ -386,16 +397,15 @@ fn walk_with_mtime_skip(
                 continue;
             }
             let path = entry.path();
-            let rel = path
-                .strip_prefix(workspace_root.as_path())
-                .unwrap_or(path);
+            let rel = path.strip_prefix(workspace_root.as_path()).unwrap_or(path);
             let rel_str = rel.to_string_lossy().into_owned();
 
             if !patterns.iter().any(|p| p.matches(&rel_str)) {
                 continue;
             }
 
-            let Some(entry) = fingerprint_file_with_skip(path, lines_patterns, prior_per_file.get(&rel_str))?
+            let Some(entry) =
+                fingerprint_file_with_skip(path, lines_patterns, prior_per_file.get(&rel_str))?
             else {
                 continue;
             };
@@ -448,10 +458,7 @@ fn fingerprint_file_with_skip(
     let mut hasher = ContentHash::hasher();
     let mut any_match = false;
     for line in content.lines() {
-        if lines_patterns
-            .iter()
-            .any(|p| line.starts_with(p.as_str()))
-        {
+        if lines_patterns.iter().any(|p| line.starts_with(p.as_str())) {
             hasher.update(line.as_bytes());
             hasher.update(b"\0");
             any_match = true;
@@ -517,7 +524,8 @@ mod tests {
         let (cache, _cache_dir) = temp_cache_dir().await;
         let dir = tempfile::tempdir().unwrap();
         let id = TargetId::new("t");
-        let h = compute_fingerprint(&ws(&dir), &cache, &id, &[], &["package ".into()], &[]).unwrap();
+        let h =
+            compute_fingerprint(&ws(&dir), &cache, &id, &[], &["package ".into()], &[]).unwrap();
         assert_eq!(h, ContentHash::of_bytes(b""));
     }
 
@@ -701,7 +709,10 @@ mod tests {
         let (cache, _cache_dir) = temp_cache_dir().await;
         let dir = tempfile::tempdir().unwrap();
         let id = TargetId::new("svc");
-        write(&dir.path().join("internal/a.go"), "package a\nimport \"x\"\n");
+        write(
+            &dir.path().join("internal/a.go"),
+            "package a\nimport \"x\"\n",
+        );
         write(&dir.path().join("vendor/b.go"), "package b\nimport \"y\"\n");
         let with_scope = compute_fingerprint(
             &ws(&dir),
@@ -736,7 +747,10 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".git")).unwrap();
         write(&dir.path().join(".gitignore"), "gen/\n");
         write(&dir.path().join("a.go"), "package a\nimport \"x\"\n");
-        write(&dir.path().join("gen/auto.go"), "package gen\nimport \"z\"\n");
+        write(
+            &dir.path().join("gen/auto.go"),
+            "package gen\nimport \"z\"\n",
+        );
         let h = compute_fingerprint(
             &ws(&dir),
             &cache,

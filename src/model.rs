@@ -349,7 +349,11 @@ mod tests {
         "#;
         let input: Input = serde_yaml_ng::from_str(yaml).unwrap();
         match input {
-            Input::Structural { files, lines, scope } => {
+            Input::Structural {
+                files,
+                lines,
+                scope,
+            } => {
                 assert_eq!(files.len(), 1);
                 assert_eq!(files[0].as_str(), "**/*.go");
                 assert_eq!(lines, vec!["^package ", "^import "]);

@@ -15,11 +15,11 @@
 
 use crate::cache::AcEntry;
 use crate::model::{CacheKey, ContentHash};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, RETRY_AFTER};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, RETRY_AFTER};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -87,12 +87,10 @@ impl RemoteCacheConfig {
                 username_env,
                 password_env,
             } => Auth::Basic {
-                user: std::env::var(username_env).map_err(|_| {
-                    RemoteError::Config(format!("env var {username_env} is unset"))
-                })?,
-                pass: std::env::var(password_env).map_err(|_| {
-                    RemoteError::Config(format!("env var {password_env} is unset"))
-                })?,
+                user: std::env::var(username_env)
+                    .map_err(|_| RemoteError::Config(format!("env var {username_env} is unset")))?,
+                pass: std::env::var(password_env)
+                    .map_err(|_| RemoteError::Config(format!("env var {password_env} is unset")))?,
             },
         };
 
@@ -166,8 +164,8 @@ impl RemoteCache {
             }
             Auth::Basic { user, pass } => {
                 use base64::Engine;
-                let token = base64::engine::general_purpose::STANDARD
-                    .encode(format!("{user}:{pass}"));
+                let token =
+                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
                 if let Ok(v) = HeaderValue::from_str(&format!("Basic {token}")) {
                     h.insert(AUTHORIZATION, v);
                 }

@@ -137,7 +137,9 @@ fn default_max_blob_size_mb() -> u64 {
 pub enum RemoteAuth {
     #[default]
     None,
-    Bearer { token_env: String },
+    Bearer {
+        token_env: String,
+    },
     Basic {
         username_env: String,
         password_env: String,
@@ -183,16 +185,7 @@ pub struct TaskArg {
 
 /// Task names that shadow built-in subcommands. Validated at load.
 const RESERVED_TASK_NAMES: &[&str] = &[
-    "build",
-    "affected",
-    "graph",
-    "clean",
-    "explain",
-    "serve",
-    "verify",
-    "watch",
-    "test",
-    "help",
+    "build", "affected", "graph", "clean", "explain", "serve", "verify", "watch", "test", "help",
 ];
 
 impl Config {
@@ -212,9 +205,7 @@ impl Config {
     pub fn validate_static(&self) -> Result<(), ConfigError> {
         // workspace.name
         if self.workspace.name.is_empty() {
-            return Err(ConfigError::Validation(
-                "workspace.name is required".into(),
-            ));
+            return Err(ConfigError::Validation("workspace.name is required".into()));
         }
         if !is_valid_workspace_name(&self.workspace.name) {
             return Err(ConfigError::Validation(format!(
@@ -431,10 +422,7 @@ targets:
         );
         let err = Config::load(f.path()).unwrap_err();
         let msg = format!("{err}");
-        assert!(
-            msg.contains("cacheable but has no outputs"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("cacheable but has no outputs"), "got: {msg}");
     }
 
     #[test]

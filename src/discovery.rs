@@ -127,7 +127,10 @@ mod tests {
     fn parse_rejects_unknown_schema() {
         let f = write_json(r#"{ "schema_version": 99, "targets": [] }"#);
         let err = parse_fragment(f.path()).unwrap_err();
-        assert!(matches!(err, DiscoveryError::UnsupportedSchema { found: 99, .. }));
+        assert!(matches!(
+            err,
+            DiscoveryError::UnsupportedSchema { found: 99, .. }
+        ));
     }
 
     #[test]

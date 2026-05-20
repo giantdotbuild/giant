@@ -115,8 +115,14 @@ targets:
     let keys: Vec<String> = store.0.lock().unwrap().keys().cloned().collect();
     let n_ac = keys.iter().filter(|k| k.starts_with("/ac/")).count();
     let n_cas = keys.iter().filter(|k| k.starts_with("/cas/")).count();
-    assert!(n_ac >= 1, "expected at least 1 AC entry on remote; got: {keys:?}");
-    assert!(n_cas >= 1, "expected at least 1 CAS blob on remote; got: {keys:?}");
+    assert!(
+        n_ac >= 1,
+        "expected at least 1 AC entry on remote; got: {keys:?}"
+    );
+    assert!(
+        n_cas >= 1,
+        "expected at least 1 CAS blob on remote; got: {keys:?}"
+    );
 
     // Wipe local cache + the workspace output. Next build must restore
     // from the remote.

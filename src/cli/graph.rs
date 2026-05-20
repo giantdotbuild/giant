@@ -72,7 +72,12 @@ fn print_list(graph: &BuildGraph) {
     // Column-align the target column so the arrows line up. Width = the
     // longest ID, capped so absurdly long IDs don't bury the rest.
     const MAX_COL: usize = 48;
-    let col = ids.iter().map(|id| id.as_str().len()).max().unwrap_or(0).min(MAX_COL);
+    let col = ids
+        .iter()
+        .map(|id| id.as_str().len())
+        .max()
+        .unwrap_or(0)
+        .min(MAX_COL);
 
     for id in &ids {
         let deps = graph.direct_deps(id);

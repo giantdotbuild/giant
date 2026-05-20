@@ -90,7 +90,10 @@ mod tests {
                     glob: GlobPattern::new(*g).unwrap(),
                 })
                 .collect(),
-            outputs: outputs.iter().map(|o| OutputPath::new(*o).unwrap()).collect(),
+            outputs: outputs
+                .iter()
+                .map(|o| OutputPath::new(*o).unwrap())
+                .collect(),
             deps: deps.iter().map(|d| TargetId::new(*d)).collect(),
             command: "true".into(),
             cwd: WsRelPath::default(),

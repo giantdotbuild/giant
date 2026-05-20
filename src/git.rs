@@ -205,6 +205,10 @@ fn parse_z_separated(bytes: &[u8]) -> Vec<std::path::PathBuf> {
     bytes
         .split(|&b| b == 0)
         .filter(|s| !s.is_empty())
-        .map(|s| std::path::PathBuf::from(std::ffi::OsString::from(String::from_utf8_lossy(s).into_owned())))
+        .map(|s| {
+            std::path::PathBuf::from(std::ffi::OsString::from(
+                String::from_utf8_lossy(s).into_owned(),
+            ))
+        })
         .collect()
 }

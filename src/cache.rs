@@ -137,7 +137,11 @@ impl LocalCache {
     fn ac_path(&self, key: &CacheKey) -> PathBuf {
         let hex = key.to_hex();
         let prefix = &hex[..2];
-        self.root.as_path().join("ac").join(prefix).join(format!("{hex}.json"))
+        self.root
+            .as_path()
+            .join("ac")
+            .join(prefix)
+            .join(format!("{hex}.json"))
     }
 
     fn cas_path(&self, hash: &ContentHash) -> PathBuf {
@@ -344,10 +348,7 @@ mod tests {
         let abs = AbsPath::new(dir.path().to_path_buf());
         let _cache = LocalCache::open(abs).await.unwrap();
         for sub in ["ac", "cas", "structural", "log", "tmp"] {
-            assert!(
-                dir.path().join(sub).is_dir(),
-                "expected {sub}/ to exist"
-            );
+            assert!(dir.path().join(sub).is_dir(), "expected {sub}/ to exist");
         }
         assert!(dir.path().join("version").is_file());
     }
@@ -370,7 +371,10 @@ mod tests {
         }
         let abs = AbsPath::new(dir.path().to_path_buf());
         let err = LocalCache::open(abs).await.unwrap_err();
-        assert!(matches!(err, CacheError::VersionMismatch { found: 999, .. }));
+        assert!(matches!(
+            err,
+            CacheError::VersionMismatch { found: 999, .. }
+        ));
     }
 
     #[tokio::test]
@@ -470,9 +474,7 @@ mod tests {
         let (cache, dir) = temp_cache().await;
         // Run a normal write; verify tmp/ is empty afterwards (no leftovers).
         let _ = cache.put_cas(b"some bytes".to_vec()).await.unwrap();
-        let entries: Vec<_> = std::fs::read_dir(dir.path().join("tmp"))
-            .unwrap()
-            .collect();
+        let entries: Vec<_> = std::fs::read_dir(dir.path().join("tmp")).unwrap().collect();
         assert!(entries.is_empty(), "tmp/ should be empty after write");
     }
 }

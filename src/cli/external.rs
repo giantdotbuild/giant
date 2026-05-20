@@ -102,7 +102,9 @@ mod tests {
 
     #[test]
     fn is_executable_says_no_for_missing_file() {
-        assert!(!is_executable(Path::new("/tmp/definitely-does-not-exist-12345")));
+        assert!(!is_executable(Path::new(
+            "/tmp/definitely-does-not-exist-12345"
+        )));
     }
 
     // PATH-dispatch coverage lives in tests/external_dispatch.rs (it

@@ -324,9 +324,7 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
             running.insert(tid.clone());
             let ctx2 = ctx.clone();
             let tid2 = tid.clone();
-            join_set.spawn(async move {
-                dispatch_target(tid2, spec, dep_outs, ctx2).await
-            });
+            join_set.spawn(async move { dispatch_target(tid2, spec, dep_outs, ctx2).await });
         }
 
         // Propagate any inline-handled completions through pending_deps.
@@ -371,7 +369,13 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
             }
         }
 
-        propagate(&job.graph, &in_subgraph, &next.id, &mut pending_deps, &mut ready);
+        propagate(
+            &job.graph,
+            &in_subgraph,
+            &next.id,
+            &mut pending_deps,
+            &mut ready,
+        );
     }
 
     let duration = started.elapsed();
@@ -607,7 +611,11 @@ fn empty_breakdown(spec: &TargetSpec) -> CacheKeyBreakdown {
         schema: KEY_SCHEMA.to_string(),
         command: spec.command.clone(),
         cwd: spec.cwd.as_path().to_string_lossy().into_owned(),
-        user_env: spec.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        user_env: spec
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         built_in_env: built_in,
         file_inputs: Vec::new(),
         structural_inputs: Vec::new(),
@@ -669,7 +677,11 @@ fn compose_cache_key_blocking(
             Input::File { glob } => {
                 expand_glob_into(workspace_root.as_path(), glob.as_str(), &mut paths)?;
             }
-            Input::Structural { files, lines, scope } => {
+            Input::Structural {
+                files,
+                lines,
+                scope,
+            } => {
                 structurals.push(StructuralSpec {
                     files: files.iter().map(|g| g.as_str().to_string()).collect(),
                     lines: lines.clone(),
@@ -862,7 +874,13 @@ async fn try_cache_hit(
         }
     };
 
-    Ok(Some((TargetResult::CacheHit { key: *key, output_hash }, output_hash)))
+    Ok(Some((
+        TargetResult::CacheHit {
+            key: *key,
+            output_hash,
+        },
+        output_hash,
+    )))
 }
 
 /// Try the remote cache. Hits restore outputs to the workspace AND
@@ -1030,7 +1048,13 @@ async fn try_exists_check(
             // hash to downstream cache keys. If a future use case needs
             // local outputs *and* an exists check, we can extend this.
             let oh = compute_outputs_content_hash(&[]);
-            Some((TargetResult::ExternalCacheHit { key, output_hash: oh }, oh))
+            Some((
+                TargetResult::ExternalCacheHit {
+                    key,
+                    output_hash: oh,
+                },
+                oh,
+            ))
         }
         _ => None,
     }

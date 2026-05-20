@@ -56,8 +56,7 @@ pub async fn prepare(
     let cache = LocalCache::open(AbsPath::new(cache_root)).await?;
 
     if !config.include.is_empty() {
-        let include_ids: Vec<TargetId> =
-            config.include.iter().map(|t| t.id.clone()).collect();
+        let include_ids: Vec<TargetId> = config.include.iter().map(|t| t.id.clone()).collect();
         let bootstrap_job = BuildJob {
             graph: Arc::new(graph.clone()),
             selection: include_ids.clone(),
@@ -117,9 +116,7 @@ pub async fn prepare(
 /// shouldn't dump per-target events to the user.
 pub fn null_event_sink() -> (EventSender, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(1024);
-    let handle = tokio::spawn(async move {
-        while rx.recv().await.is_some() {}
-    });
+    let handle = tokio::spawn(async move { while rx.recv().await.is_some() {} });
     (tx, handle)
 }
 
@@ -207,9 +204,7 @@ pub fn open_remote(config: &Config) -> anyhow::Result<OpenedRemote> {
 }
 
 #[cfg(not(feature = "remote"))]
-pub fn open_remote(
-    config: &Config,
-) -> anyhow::Result<(Option<()>, Option<()>, Option<()>)> {
+pub fn open_remote(config: &Config) -> anyhow::Result<(Option<()>, Option<()>, Option<()>)> {
     // When the user has cache.remote.enabled: true in config but the
     // binary was built without the `remote` feature, log once and
     // proceed with local-only behaviour (TDD-0006).

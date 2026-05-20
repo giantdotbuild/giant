@@ -121,8 +121,8 @@ async fn walk_target(
     // after the dep ran). For explain on never-built targets that's
     // OK; the key shown matches what the next build will compute given
     // the current cache state.
-    let (key, _) = compute_cache_key_with_breakdown(spec, workspace_root, cache, dep_outputs)
-        .await?;
+    let (key, _) =
+        compute_cache_key_with_breakdown(spec, workspace_root, cache, dep_outputs).await?;
 
     // Look up the AC entry to get the real output hash if cached.
     let output_hash = match cache.get_ac(&key).await? {

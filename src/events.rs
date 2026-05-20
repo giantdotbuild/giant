@@ -211,6 +211,9 @@ mod tests {
             truncated: false,
         };
         let s = serde_json::to_string(&ev).unwrap();
-        assert!(!s.contains("truncated"), "truncated:false should be skipped");
+        assert!(
+            !s.contains("truncated"),
+            "truncated:false should be skipped"
+        );
     }
 }
