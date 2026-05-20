@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 mod affected;
 mod build;
+mod explain;
 pub(crate) mod prep;
 
 #[derive(Parser, Debug)]
@@ -33,6 +34,10 @@ pub enum Commands {
     /// List targets that would rebuild given a set of changed files.
     /// Doesn't actually run anything.
     Affected(affected::AffectedArgs),
+
+    /// Show what feeds a target's cache key - the first thing to reach
+    /// for when "why did this rebuild?" comes up.
+    Explain(explain::ExplainArgs),
 }
 
 /// Entry point invoked from `main`.
@@ -51,6 +56,7 @@ pub async fn run() -> anyhow::Result<()> {
     match cli.command {
         Commands::Build(args) => build::execute(args, &global).await,
         Commands::Affected(args) => affected::execute(args, &global).await,
+        Commands::Explain(args) => explain::execute(args, &global).await,
     }
 }
 

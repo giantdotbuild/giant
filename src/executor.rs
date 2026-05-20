@@ -473,6 +473,41 @@ fn result_output_hash(r: &TargetResult) -> Option<ContentHash> {
     }
 }
 
+/// Breakdown of what went into a target's cache key. Populated when the
+/// caller asks for it (see `compute_cache_key_with_breakdown`); the
+/// dispatcher's `compute_cache_key` just discards it. Used by
+/// `giant explain` to show users where the bytes that produced the
+/// final hash came from.
+#[derive(Debug, Clone)]
+pub struct CacheKeyBreakdown {
+    pub schema: String,
+    pub command: String,
+    pub cwd: String,
+    pub user_env: std::collections::BTreeMap<String, String>,
+    pub built_in_env: std::collections::BTreeMap<String, String>,
+    pub file_inputs: Vec<FileInputContribution>,
+    pub structural_inputs: Vec<StructuralContribution>,
+    /// dep_id → output_content_hash. The caller fills this in *after*
+    /// the hash is computed (the inner compose has no view of dep IDs).
+    pub dep_outputs: std::collections::BTreeMap<TargetId, ContentHash>,
+    pub sandbox: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileInputContribution {
+    pub rel_path: String,
+    pub content_hash: ContentHash,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructuralContribution {
+    pub files: Vec<String>,
+    pub lines: Vec<String>,
+    pub scope: Vec<String>,
+    pub fingerprint: ContentHash,
+}
+
 /// Compute the cache key for a target. See TDD-0009 §Cache key composition.
 ///
 /// `dep_output_hashes` is each direct dep's output content hash - *not* its
@@ -488,141 +523,215 @@ async fn compute_cache_key(
     let workspace_root = workspace_root.clone();
     let cache = cache.clone();
     let dep_output_hashes = dep_output_hashes.to_vec();
-    let hash = tokio::task::spawn_blocking(move || -> Result<ContentHash, std::io::Error> {
-        let mut h = ContentHash::hasher();
-        h.update(KEY_SCHEMA.as_bytes());
-        h.update(b"\0");
-
-        // command
-        h.update(b"cmd\0");
-        h.update(spec.command.as_bytes());
-        h.update(b"\0");
-
-        // cwd
-        h.update(b"cwd\0");
-        h.update(spec.cwd.as_path().to_string_lossy().as_bytes());
-        h.update(b"\0");
-
-        // env (sorted by key) + built-in target triple + version
-        h.update(b"env\0");
-        let mut env_keys: Vec<&String> = spec.env.keys().collect();
-        env_keys.sort();
-        for k in env_keys {
-            h.update(k.as_bytes());
-            h.update(b"=");
-            h.update(spec.env[k].as_bytes());
-            h.update(b"\0");
-        }
-        h.update(b"GIANT_TARGET_TRIPLE=");
-        h.update(TARGET_TRIPLE.as_bytes());
-        h.update(b"\0");
-        h.update(b"GIANT_VERSION=");
-        h.update(GIANT_VERSION.as_bytes());
-        h.update(b"\0");
-
-        // file inputs (expand globs, sort, hash content)
-        h.update(b"file_inputs\0");
-        let mut paths: Vec<PathBuf> = Vec::new();
-        // Collect structural-input specs as we walk; they hash separately
-        // so the section is independent of file-input order.
-        let mut structurals: Vec<StructuralSpec> = Vec::new();
-        for input in &spec.inputs {
-            match input {
-                Input::File { glob } => {
-                    expand_glob_into(workspace_root.as_path(), glob.as_str(), &mut paths)?;
-                }
-                Input::Structural {
-                    files,
-                    lines,
-                    scope,
-                } => {
-                    structurals.push(StructuralSpec {
-                        files: files.iter().map(|g| g.as_str().to_string()).collect(),
-                        lines: lines.clone(),
-                        scope: scope
-                            .iter()
-                            .map(|s| s.as_path().to_string_lossy().into_owned())
-                            .collect(),
-                    });
-                }
-            }
-        }
-        paths.sort();
-        paths.dedup();
-        for p in &paths {
-            let rel = p
-                .strip_prefix(workspace_root.as_path())
-                .unwrap_or(p)
-                .to_string_lossy()
-                .into_owned();
-            h.update(rel.as_bytes());
-            h.update(b"\0");
-            let file_hash = ContentHash::of_file(p)?;
-            h.update(file_hash.as_bytes());
-            h.update(b"\0");
-        }
-
-        // structural inputs - one fingerprint per declared structural
-        // input, canonicalised (sort each input's globs/lines/scope; sort
-        // the inputs themselves) so YAML reordering doesn't shift the key.
-        h.update(b"structural_inputs\0");
-        for s in &mut structurals {
-            s.files.sort();
-            s.lines.sort();
-            s.scope.sort();
-        }
-        structurals.sort();
-        for s in &structurals {
-            for f in &s.files {
-                h.update(f.as_bytes());
-                h.update(b"\0");
-            }
-            h.update(b"|\0");
-            for l in &s.lines {
-                h.update(l.as_bytes());
-                h.update(b"\0");
-            }
-            h.update(b"|\0");
-            for sc in &s.scope {
-                h.update(sc.as_bytes());
-                h.update(b"\0");
-            }
-            h.update(b"|\0");
-            let fp = crate::structural::compute_fingerprint(
-                &workspace_root,
-                &cache,
-                &spec.id,
-                &s.files,
-                &s.lines,
-                &s.scope,
-            )
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-            h.update(fp.as_bytes());
-            h.update(b"\0");
-        }
-
-        // dep output content hashes (sorted). The section header changed
-        // from "dep_keys" to "dep_outputs" - old cached entries from a
-        // pre-early-cutoff build are stale and correctly miss.
-        h.update(b"dep_outputs\0");
-        let mut sorted: Vec<[u8; 32]> =
-            dep_output_hashes.iter().map(|h| *h.as_bytes()).collect();
-        sorted.sort();
-        for hb in &sorted {
-            h.update(hb);
-            h.update(b"\0");
-        }
-
-        // sandbox flag (ADR-0008)
-        h.update(b"sandbox\0");
-        h.update(if spec.sandbox { b"1" } else { b"0" });
-        h.update(b"\0");
-
-        Ok(h.finalize())
+    let hash = tokio::task::spawn_blocking(move || {
+        compose_cache_key_blocking(&spec, &workspace_root, &cache, &dep_output_hashes, None)
     })
     .await
     .map_err(|e| ExecutorError::Io(std::io::Error::other(e.to_string())))??;
     Ok(CacheKey::new(hash))
+}
+
+/// Like `compute_cache_key` but also returns a `CacheKeyBreakdown` so
+/// callers (`giant explain`) can show users what fed into the hash.
+pub async fn compute_cache_key_with_breakdown(
+    spec: &TargetSpec,
+    workspace_root: &AbsPath,
+    cache: &LocalCache,
+    dep_outputs: std::collections::BTreeMap<TargetId, ContentHash>,
+) -> Result<(CacheKey, CacheKeyBreakdown), ExecutorError> {
+    let spec = spec.clone();
+    let workspace_root = workspace_root.clone();
+    let cache = cache.clone();
+    let dep_output_hashes: Vec<ContentHash> = dep_outputs.values().copied().collect();
+    let (key, mut bd) = tokio::task::spawn_blocking(
+        move || -> Result<(ContentHash, CacheKeyBreakdown), std::io::Error> {
+            let mut bd = empty_breakdown(&spec);
+            let h = compose_cache_key_blocking(
+                &spec,
+                &workspace_root,
+                &cache,
+                &dep_output_hashes,
+                Some(&mut bd),
+            )?;
+            Ok((h, bd))
+        },
+    )
+    .await
+    .map_err(|e| ExecutorError::Io(std::io::Error::other(e.to_string())))??;
+    // Fill in dep_outputs with real IDs (the inner compose has no view).
+    bd.dep_outputs = dep_outputs;
+    Ok((CacheKey::new(key), bd))
+}
+
+fn empty_breakdown(spec: &TargetSpec) -> CacheKeyBreakdown {
+    let mut built_in = std::collections::BTreeMap::new();
+    built_in.insert("GIANT_TARGET_TRIPLE".into(), TARGET_TRIPLE.into());
+    built_in.insert("GIANT_VERSION".into(), GIANT_VERSION.into());
+    CacheKeyBreakdown {
+        schema: KEY_SCHEMA.to_string(),
+        command: spec.command.clone(),
+        cwd: spec.cwd.as_path().to_string_lossy().into_owned(),
+        user_env: spec.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        built_in_env: built_in,
+        file_inputs: Vec::new(),
+        structural_inputs: Vec::new(),
+        dep_outputs: std::collections::BTreeMap::new(),
+        sandbox: spec.sandbox,
+    }
+}
+
+/// The actual cache-key hash composition. Sync; caller wraps in
+/// spawn_blocking. If `breakdown` is `Some`, populates `file_inputs` and
+/// `structural_inputs` alongside hashing so `giant explain` can show
+/// exactly what bytes fed the hash.
+fn compose_cache_key_blocking(
+    spec: &TargetSpec,
+    workspace_root: &AbsPath,
+    cache: &LocalCache,
+    dep_output_hashes: &[ContentHash],
+    mut breakdown: Option<&mut CacheKeyBreakdown>,
+) -> Result<ContentHash, std::io::Error> {
+    let mut h = ContentHash::hasher();
+    h.update(KEY_SCHEMA.as_bytes());
+    h.update(b"\0");
+
+    // command
+    h.update(b"cmd\0");
+    h.update(spec.command.as_bytes());
+    h.update(b"\0");
+
+    // cwd
+    h.update(b"cwd\0");
+    h.update(spec.cwd.as_path().to_string_lossy().as_bytes());
+    h.update(b"\0");
+
+    // env (sorted by key) + built-in target triple + version
+    h.update(b"env\0");
+    let mut env_keys: Vec<&String> = spec.env.keys().collect();
+    env_keys.sort();
+    for k in env_keys {
+        h.update(k.as_bytes());
+        h.update(b"=");
+        h.update(spec.env[k].as_bytes());
+        h.update(b"\0");
+    }
+    h.update(b"GIANT_TARGET_TRIPLE=");
+    h.update(TARGET_TRIPLE.as_bytes());
+    h.update(b"\0");
+    h.update(b"GIANT_VERSION=");
+    h.update(GIANT_VERSION.as_bytes());
+    h.update(b"\0");
+
+    // file inputs (expand globs, sort, hash content)
+    h.update(b"file_inputs\0");
+    let mut paths: Vec<PathBuf> = Vec::new();
+    // Collect structural-input specs as we walk; they hash separately
+    // so the section is independent of file-input order.
+    let mut structurals: Vec<StructuralSpec> = Vec::new();
+    for input in &spec.inputs {
+        match input {
+            Input::File { glob } => {
+                expand_glob_into(workspace_root.as_path(), glob.as_str(), &mut paths)?;
+            }
+            Input::Structural { files, lines, scope } => {
+                structurals.push(StructuralSpec {
+                    files: files.iter().map(|g| g.as_str().to_string()).collect(),
+                    lines: lines.clone(),
+                    scope: scope
+                        .iter()
+                        .map(|s| s.as_path().to_string_lossy().into_owned())
+                        .collect(),
+                });
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    for p in &paths {
+        let rel = p
+            .strip_prefix(workspace_root.as_path())
+            .unwrap_or(p)
+            .to_string_lossy()
+            .into_owned();
+        h.update(rel.as_bytes());
+        h.update(b"\0");
+        let file_hash = ContentHash::of_file(p)?;
+        h.update(file_hash.as_bytes());
+        h.update(b"\0");
+        if let Some(bd) = breakdown.as_deref_mut() {
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            bd.file_inputs.push(FileInputContribution {
+                rel_path: rel,
+                content_hash: file_hash,
+                size,
+            });
+        }
+    }
+
+    // structural inputs - one fingerprint per declared structural
+    // input, canonicalised (sort each input's globs/lines/scope; sort
+    // the inputs themselves) so YAML reordering doesn't shift the key.
+    h.update(b"structural_inputs\0");
+    for s in &mut structurals {
+        s.files.sort();
+        s.lines.sort();
+        s.scope.sort();
+    }
+    structurals.sort();
+    for s in &structurals {
+        for f in &s.files {
+            h.update(f.as_bytes());
+            h.update(b"\0");
+        }
+        h.update(b"|\0");
+        for l in &s.lines {
+            h.update(l.as_bytes());
+            h.update(b"\0");
+        }
+        h.update(b"|\0");
+        for sc in &s.scope {
+            h.update(sc.as_bytes());
+            h.update(b"\0");
+        }
+        h.update(b"|\0");
+        let fp = crate::structural::compute_fingerprint(
+            workspace_root,
+            cache,
+            &spec.id,
+            &s.files,
+            &s.lines,
+            &s.scope,
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        h.update(fp.as_bytes());
+        h.update(b"\0");
+        if let Some(bd) = breakdown.as_deref_mut() {
+            bd.structural_inputs.push(StructuralContribution {
+                files: s.files.clone(),
+                lines: s.lines.clone(),
+                scope: s.scope.clone(),
+                fingerprint: fp,
+            });
+        }
+    }
+
+    // dep output content hashes (sorted). The section header changed
+    // from "dep_keys" to "dep_outputs" - old cached entries from a
+    // pre-early-cutoff build are stale and correctly miss.
+    h.update(b"dep_outputs\0");
+    let mut sorted: Vec<[u8; 32]> = dep_output_hashes.iter().map(|h| *h.as_bytes()).collect();
+    sorted.sort();
+    for hb in &sorted {
+        h.update(hb);
+        h.update(b"\0");
+    }
+
+    // sandbox flag (ADR-0008)
+    h.update(b"sandbox\0");
+    h.update(if spec.sandbox { b"1" } else { b"0" });
+    h.update(b"\0");
+
+    Ok(h.finalize())
 }
 
 /// Internal canonical representation of one structural input, used to
