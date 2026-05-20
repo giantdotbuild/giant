@@ -216,6 +216,98 @@ targets:
 }
 
 #[test]
+fn parallel_dispatch_runs_independent_targets_concurrently() {
+    // Two independent targets, each sleeps 300ms. With --jobs 2 the
+    // total wall time should be roughly one sleep (~300ms), not two
+    // (~600ms). We assert under 500ms to give generous headroom for
+    // process spawn + cache write + slow CI.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: par
+cache:
+  dir: ./cache
+targets:
+  - id: "a"
+    inputs: []
+    outputs: ["a.txt"]
+    cache: false
+    command: "sleep 0.3 && echo a > a.txt"
+  - id: "b"
+    inputs: []
+    outputs: ["b.txt"]
+    cache: false
+    command: "sleep 0.3 && echo b > b.txt"
+"#,
+    )
+    .unwrap();
+
+    let start = std::time::Instant::now();
+    let output = Command::new(giant_bin())
+        .args(["build", "-j", "2"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        elapsed.as_millis() < 500,
+        "expected parallel wall time <500ms (single sleep + overhead), got {elapsed:?}"
+    );
+}
+
+#[test]
+fn serial_dispatch_runs_targets_sequentially() {
+    // Same fixture, but --jobs 1. Wall time should be >= 2 × sleep
+    // (~600ms). Proves the serial-mode lower bound and validates that
+    // parallelism actually scales work (vs the previous test passing for
+    // unrelated reasons).
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: ser
+cache:
+  dir: ./cache
+targets:
+  - id: "a"
+    inputs: []
+    outputs: ["a.txt"]
+    cache: false
+    command: "sleep 0.3 && echo a > a.txt"
+  - id: "b"
+    inputs: []
+    outputs: ["b.txt"]
+    cache: false
+    command: "sleep 0.3 && echo b > b.txt"
+"#,
+    )
+    .unwrap();
+
+    let start = std::time::Instant::now();
+    let output = Command::new(giant_bin())
+        .args(["build", "-j", "1"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    let elapsed = start.elapsed();
+    assert!(output.status.success());
+    assert!(
+        elapsed.as_millis() >= 580,
+        "serial wall time should be ≥2× sleep (~600ms), got {elapsed:?}"
+    );
+}
+
+#[test]
 fn cache_miss_when_command_changes() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();

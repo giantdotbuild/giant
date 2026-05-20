@@ -10,14 +10,14 @@ use crate::events::{Event, EventSender, LogStream, TargetCounts, TargetResultKin
 use crate::graph::BuildGraph;
 use crate::model::{CacheKey, ContentHash, Input, TargetId, TargetSpec};
 use crate::paths::AbsPath;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 /// Built-in env contributions for the cache key (see TDD-0007).
@@ -79,6 +79,8 @@ enum TargetResult {
     },
     CacheHit {
         key: CacheKey,
+        /// Carried out of try_cache_hit so the dispatcher doesn't re-read AC.
+        output_hash: ContentHash,
     },
     Failed {
         key: Option<CacheKey>,
@@ -89,7 +91,7 @@ enum TargetResult {
 impl TargetResult {
     fn key(&self) -> Option<CacheKey> {
         match self {
-            Self::Built { key, .. } | Self::CacheHit { key } => Some(*key),
+            Self::Built { key, .. } | Self::CacheHit { key, .. } => Some(*key),
             Self::Failed { key, .. } => *key,
         }
     }
@@ -99,6 +101,15 @@ impl TargetResult {
             Self::Built { .. } => TargetResultKind::Built,
             Self::CacheHit { .. } => TargetResultKind::CacheHit,
             Self::Failed { .. } => TargetResultKind::Failed,
+        }
+    }
+
+    /// Sentinel used when the dispatcher synthesises a Skipped completion
+    /// inline (no worker spawned).
+    fn skipped() -> Self {
+        Self::Failed {
+            key: None,
+            error: "skipped".into(),
         }
     }
 }
@@ -112,12 +123,34 @@ struct OutputFile {
     mode: String,
 }
 
+/// Shared per-target context for the worker. Cheap to clone; mostly
+/// `Arc`-backed handles.
+#[derive(Clone)]
+struct TargetCtx {
+    cache: LocalCache,
+    workspace_root: AbsPath,
+    fresh: bool,
+    events: EventSender,
+    cancel: CancellationToken,
+    build_id: String,
+}
+
+/// What a worker reports when it finishes a target.
+struct CompletionMsg {
+    id: TargetId,
+    cache_key: CacheKey,
+    result: TargetResult,
+    /// `outputs_content_hash` for downstream dep keys (TDD-0009 §Early
+    /// cutoff). `None` only when the target failed.
+    output_hash: Option<ContentHash>,
+}
+
 /// Run the build.
 pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
     let started = Instant::now();
-    let _permits = Arc::new(Semaphore::new(job.parallelism.max(1)));
+    let parallelism = job.parallelism.max(1);
 
-    // 1. Closure of selection over deps, then topo order over the whole graph.
+    // 1. Closure of selection over deps; topo order restricted to subgraph.
     let in_subgraph = job.graph.closure_over_deps(job.selection.iter());
     let order: Vec<TargetId> = job
         .graph
@@ -136,138 +169,156 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
                 .map(|t| t.as_str().to_string())
                 .collect(),
             target_ids: order.clone(),
-            parallelism: job.parallelism,
+            parallelism,
         },
     )
     .await;
 
-    let mut cache_keys: HashMap<TargetId, CacheKey> = HashMap::new();
+    // 2. Initialize the dispatcher state.
+    //
+    // `pending_deps[T]` counts unmet deps of T (any disposition: success,
+    // failure, or skipped). When it reaches zero, T is *ready* - meaning
+    // its deps' state is fully known, not necessarily that they all
+    // succeeded. At dispatch time we re-check whether any dep failed and
+    // skip accordingly.
+    let mut pending_deps: HashMap<TargetId, usize> = HashMap::with_capacity(order.len());
+    let mut ready: VecDeque<TargetId> = VecDeque::new();
+    let mut running: HashSet<TargetId> = HashSet::new();
+    let mut failed_or_skipped: HashSet<TargetId> = HashSet::new();
     let mut dep_output_hashes: HashMap<TargetId, ContentHash> = HashMap::new();
-    let mut failed_set: std::collections::HashSet<TargetId> = Default::default();
+    let mut cache_keys: HashMap<TargetId, CacheKey> = HashMap::new();
     let mut counts = TargetCounts::default();
     let mut failed_targets: Vec<TargetId> = Vec::new();
 
-    for target_id in &order {
+    for id in &order {
+        let spec = job
+            .graph
+            .get(id)
+            .ok_or_else(|| ExecutorError::TargetNotFound(id.clone()))?;
+        let unmet = spec
+            .deps
+            .iter()
+            .filter(|d| in_subgraph.contains(*d))
+            .count();
+        pending_deps.insert(id.clone(), unmet);
+        if unmet == 0 {
+            ready.push_back(id.clone());
+        }
+    }
+
+    let ctx = TargetCtx {
+        cache: job.cache.clone(),
+        workspace_root: job.workspace_root.clone(),
+        fresh: job.fresh,
+        events: job.events.clone(),
+        cancel: job.cancel.clone(),
+        build_id: job.build_id.clone(),
+    };
+
+    // 3. Dispatch loop.
+    //
+    // - Drain `ready` up to `parallelism` in-flight tasks.
+    // - At each dispatch, check whether any of T's deps failed - if so
+    //   we synthesise a Skipped completion inline (no worker spawn) and
+    //   immediately propagate to downstream.
+    // - `join_set.join_next()` is the heartbeat; whenever a worker
+    //   finishes, we update state and refill the ready queue.
+    let mut join_set: JoinSet<Result<CompletionMsg, ExecutorError>> = JoinSet::new();
+    let mut handled_completions: Vec<(TargetId, TargetResult)> = Vec::new();
+
+    loop {
         if job.cancel.is_cancelled() {
+            join_set.abort_all();
+            // Drain so abort takes effect; ignore results.
+            while join_set.join_next().await.is_some() {}
             return Err(ExecutorError::Cancelled);
         }
 
-        let spec = job
-            .graph
-            .get(target_id)
-            .ok_or_else(|| ExecutorError::TargetNotFound(target_id.clone()))?;
+        // Dispatch as many ready targets as the parallelism budget allows.
+        while running.len() < parallelism
+            && let Some(tid) = ready.pop_front()
+        {
+            let spec = match job.graph.get(&tid) {
+                Some(s) => s.clone(),
+                None => return Err(ExecutorError::TargetNotFound(tid)),
+            };
 
-        // Cascade dep failure: skip without running, mark as skipped, and
-        // propagate further so downstream gets the same treatment.
-        if let Some(failed_dep) = spec.deps.iter().find(|d| failed_set.contains(*d)) {
-            failed_set.insert(target_id.clone());
-            counts.skipped += 1;
-            let reason = format!("dep '{failed_dep}' failed");
-            emit_finished(
-                &job.events,
-                &job.build_id,
-                target_id,
-                TargetResultKind::Skipped,
-                0,
-                None,
-                vec![],
-                Some(reason),
-            )
-            .await;
-            continue;
+            // Check: did any of this target's deps fail / get skipped?
+            if let Some(bad) = spec.deps.iter().find(|d| failed_or_skipped.contains(*d)) {
+                let reason = format!("dep '{bad}' failed");
+                failed_or_skipped.insert(tid.clone());
+                counts.skipped += 1;
+                emit_finished(
+                    &ctx.events,
+                    &ctx.build_id,
+                    &tid,
+                    TargetResultKind::Skipped,
+                    0,
+                    None,
+                    vec![],
+                    Some(reason),
+                )
+                .await;
+                handled_completions.push((tid, TargetResult::skipped()));
+                continue;
+            }
+
+            // Build dep_outs from already-completed deps.
+            let dep_outs: Vec<ContentHash> = spec
+                .deps
+                .iter()
+                .map(|d| {
+                    dep_output_hashes
+                        .get(d)
+                        .copied()
+                        .expect("dep must be completed by ready-time")
+                })
+                .collect();
+
+            running.insert(tid.clone());
+            let ctx2 = ctx.clone();
+            let tid2 = tid.clone();
+            join_set.spawn(async move {
+                dispatch_target(tid2, spec, dep_outs, ctx2).await
+            });
         }
 
-        // Phase A: compute cache key.
-        //
-        // The dep contribution is each dep's **output content hash**, not
-        // its cache key. This is the early-cutoff property (TDD-0009):
-        // an upstream rebuild that produces byte-identical outputs leaves
-        // downstream cache keys unchanged, so downstream cache-hits.
-        let dep_outs: Vec<ContentHash> = spec
-            .deps
-            .iter()
-            .map(|d| {
-                dep_output_hashes
-                    .get(d)
-                    .copied()
-                    .expect("dep must be resolved before parent")
-            })
-            .collect();
-        let key = compute_cache_key(spec, &job.workspace_root, &dep_outs).await?;
-        cache_keys.insert(target_id.clone(), key);
+        // Propagate any inline-handled completions through pending_deps.
+        for (id, _result) in handled_completions.drain(..) {
+            propagate(&job.graph, &in_subgraph, &id, &mut pending_deps, &mut ready);
+        }
 
-        emit(
-            &job.events,
-            Event::TargetStarted {
-                build: job.build_id.clone(),
-                id: target_id.clone(),
-                cache_key: key.to_hex(),
-                command: spec.command.clone(),
-            },
-        )
-        .await;
+        // Are we done?
+        if running.is_empty() && ready.is_empty() {
+            break;
+        }
 
-        // Phase B: cache lookup (local only in this slice).
-        let result = if !job.fresh {
-            match try_cache_hit(&job.cache, &job.workspace_root, spec, &key).await? {
-                Some(hit) => hit,
-                None => run_target(&job, spec, key).await,
-            }
-        } else {
-            run_target(&job, spec, key).await
+        // Block on the next worker completion.
+        let next = match join_set.join_next().await {
+            Some(Ok(Ok(msg))) => msg,
+            Some(Ok(Err(e))) => return Err(e),
+            Some(Err(je)) => return Err(ExecutorError::Io(std::io::Error::other(je.to_string()))),
+            None => break,
         };
 
-        match &result {
-            TargetResult::Built { outputs, .. } => {
-                counts.built += 1;
-                let oh = compute_outputs_content_hash(outputs);
-                dep_output_hashes.insert(target_id.clone(), oh);
-            }
-            TargetResult::CacheHit { .. } => {
-                counts.cache_hit += 1;
-                // Read the AC entry to know the outputs hash for downstream.
-                if let Some(entry) = job.cache.get_ac(&key).await?
-                    && let Ok(bytes) = const_hex::decode(&entry.outputs_content_hash)
-                    && let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice())
-                {
-                    dep_output_hashes.insert(target_id.clone(), ContentHash::from_raw(arr));
-                }
-            }
+        running.remove(&next.id);
+        cache_keys.insert(next.id.clone(), next.cache_key);
+        if let Some(oh) = next.output_hash {
+            dep_output_hashes.insert(next.id.clone(), oh);
+        }
+
+        match &next.result {
+            TargetResult::Built { .. } => counts.built += 1,
+            TargetResult::CacheHit { .. } => counts.cache_hit += 1,
             TargetResult::Failed { error, .. } => {
                 counts.failed += 1;
-                failed_set.insert(target_id.clone());
-                failed_targets.push(target_id.clone());
-                tracing::warn!(target=%target_id, error=%error, "target failed");
+                failed_or_skipped.insert(next.id.clone());
+                failed_targets.push(next.id.clone());
+                tracing::warn!(target=%next.id, error=%error, "target failed");
             }
         }
 
-        let duration_ms = match &result {
-            TargetResult::Built { duration, .. } => duration.as_millis() as u64,
-            _ => 0,
-        };
-        let outputs_paths: Vec<String> = match &result {
-            TargetResult::Built { outputs, .. } => {
-                outputs.iter().map(|o| o.rel_path.clone()).collect()
-            }
-            _ => vec![],
-        };
-        let err: Option<String> = if let TargetResult::Failed { error, .. } = &result {
-            Some(error.clone())
-        } else {
-            None
-        };
-
-        emit_finished(
-            &job.events,
-            &job.build_id,
-            target_id,
-            result.kind(),
-            duration_ms,
-            result.key().map(|k| k.to_hex()),
-            outputs_paths,
-            err,
-        )
-        .await;
+        propagate(&job.graph, &in_subgraph, &next.id, &mut pending_deps, &mut ready);
     }
 
     let duration = started.elapsed();
@@ -289,6 +340,108 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
         failed_targets,
         cache_keys,
     })
+}
+
+/// Decrement downstream pending-dep counts and push any that hit zero
+/// onto the ready queue.
+fn propagate(
+    graph: &BuildGraph,
+    in_subgraph: &HashSet<TargetId>,
+    just_done: &TargetId,
+    pending_deps: &mut HashMap<TargetId, usize>,
+    ready: &mut VecDeque<TargetId>,
+) {
+    for downstream in graph.direct_downstream(just_done) {
+        if !in_subgraph.contains(&downstream) {
+            continue;
+        }
+        let Some(count) = pending_deps.get_mut(&downstream) else {
+            continue;
+        };
+        if *count > 0 {
+            *count -= 1;
+            if *count == 0 {
+                ready.push_back(downstream);
+            }
+        }
+    }
+}
+
+/// Per-target worker: compute key, look up, run if needed, emit events,
+/// return a completion message.
+async fn dispatch_target(
+    id: TargetId,
+    spec: TargetSpec,
+    dep_outs: Vec<ContentHash>,
+    ctx: TargetCtx,
+) -> Result<CompletionMsg, ExecutorError> {
+    let key = compute_cache_key(&spec, &ctx.workspace_root, &dep_outs).await?;
+
+    let _ = ctx
+        .events
+        .send(Event::TargetStarted {
+            build: ctx.build_id.clone(),
+            id: id.clone(),
+            cache_key: key.to_hex(),
+            command: spec.command.clone(),
+        })
+        .await;
+
+    let (result, output_hash) = if !ctx.fresh {
+        match try_cache_hit(&ctx.cache, &ctx.workspace_root, &key).await? {
+            Some((r, oh)) => (r, Some(oh)),
+            None => {
+                let r = run_target(&ctx, &spec, key).await;
+                let oh = result_output_hash(&r);
+                (r, oh)
+            }
+        }
+    } else {
+        let r = run_target(&ctx, &spec, key).await;
+        let oh = result_output_hash(&r);
+        (r, oh)
+    };
+
+    let duration_ms = match &result {
+        TargetResult::Built { duration, .. } => duration.as_millis() as u64,
+        _ => 0,
+    };
+    let outputs_paths: Vec<String> = match &result {
+        TargetResult::Built { outputs, .. } => outputs.iter().map(|o| o.rel_path.clone()).collect(),
+        _ => vec![],
+    };
+    let err: Option<String> = if let TargetResult::Failed { error, .. } = &result {
+        Some(error.clone())
+    } else {
+        None
+    };
+
+    emit_finished(
+        &ctx.events,
+        &ctx.build_id,
+        &id,
+        result.kind(),
+        duration_ms,
+        result.key().map(|k| k.to_hex()),
+        outputs_paths,
+        err,
+    )
+    .await;
+
+    Ok(CompletionMsg {
+        id,
+        cache_key: key,
+        result,
+        output_hash,
+    })
+}
+
+fn result_output_hash(r: &TargetResult) -> Option<ContentHash> {
+    match r {
+        TargetResult::Built { outputs, .. } => Some(compute_outputs_content_hash(outputs)),
+        TargetResult::CacheHit { output_hash, .. } => Some(*output_hash),
+        TargetResult::Failed { .. } => None,
+    }
 }
 
 /// Compute the cache key for a target. See TDD-0009 §Cache key composition.
@@ -412,13 +565,14 @@ fn expand_glob_into(
     Ok(())
 }
 
-/// Try a local-cache lookup; if hit, restore outputs to workspace.
+/// Try a local-cache lookup; if hit, restore outputs to workspace and
+/// return the (result, output_content_hash) tuple. Returning the hash
+/// here saves a re-read on the dispatcher side.
 async fn try_cache_hit(
     cache: &LocalCache,
     workspace_root: &AbsPath,
-    spec: &TargetSpec,
     key: &CacheKey,
-) -> Result<Option<TargetResult>, ExecutorError> {
+) -> Result<Option<(TargetResult, ContentHash)>, ExecutorError> {
     let Some(entry) = cache.get_ac(key).await? else {
         return Ok(None);
     };
@@ -460,15 +614,30 @@ async fn try_cache_hit(
             tokio::fs::set_permissions(&path, perms).await?;
         }
     }
-    let _ = spec; // unused for now; will matter for link mode later
-    Ok(Some(TargetResult::CacheHit { key: *key }))
+
+    // Read the outputs_content_hash from the entry; this is the value
+    // downstream targets feed into their cache keys (early cutoff).
+    let output_hash = match const_hex::decode(&entry.outputs_content_hash)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+    {
+        Some(arr) => ContentHash::from_raw(arr),
+        None => {
+            return Err(ExecutorError::Cache(crate::cache::CacheError::Corrupt {
+                path: std::path::PathBuf::from(format!("ac/{}", key.to_hex())),
+                detail: "outputs_content_hash field is not 32-byte hex".into(),
+            }));
+        }
+    };
+
+    Ok(Some((TargetResult::CacheHit { key: *key, output_hash }, output_hash)))
 }
 
 /// Run a target's command end-to-end and store outputs.
-async fn run_target(job: &BuildJob, spec: &TargetSpec, key: CacheKey) -> TargetResult {
+async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> TargetResult {
     let started = Instant::now();
 
-    let cwd = job.workspace_root.as_path().join(spec.cwd.as_path());
+    let cwd = ctx.workspace_root.as_path().join(spec.cwd.as_path());
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg(&spec.command)
@@ -477,7 +646,7 @@ async fn run_target(job: &BuildJob, spec: &TargetSpec, key: CacheKey) -> TargetR
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("GIANT_CACHE_KEY", key.to_hex())
-        .env("GIANT_WORKSPACE_ROOT", job.workspace_root.as_path());
+        .env("GIANT_WORKSPACE_ROOT", ctx.workspace_root.as_path());
 
     // Color preservation: most modern CLIs disable color when they detect
     // stdout is a pipe (we use Stdio::piped). These env vars are the de
@@ -502,18 +671,18 @@ async fn run_target(job: &BuildJob, spec: &TargetSpec, key: CacheKey) -> TargetR
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let target_id = spec.id.clone();
-    let build_id = job.build_id.clone();
+    let build_id = ctx.build_id.clone();
 
     let pump_stdout = pump_lines(
         stdout,
-        job.events.clone(),
+        ctx.events.clone(),
         build_id.clone(),
         target_id.clone(),
         LogStream::Stdout,
     );
     let pump_stderr = pump_lines(
         stderr,
-        job.events.clone(),
+        ctx.events.clone(),
         build_id,
         target_id,
         LogStream::Stderr,
@@ -521,7 +690,7 @@ async fn run_target(job: &BuildJob, spec: &TargetSpec, key: CacheKey) -> TargetR
 
     let status = tokio::select! {
         s = child.wait() => s,
-        _ = job.cancel.cancelled() => {
+        _ = ctx.cancel.cancelled() => {
             let _ = child.kill().await;
             return TargetResult::Failed { key: Some(key), error: "cancelled".into() };
         }
@@ -545,7 +714,7 @@ async fn run_target(job: &BuildJob, spec: &TargetSpec, key: CacheKey) -> TargetR
     }
 
     // Capture and store outputs.
-    let outputs = match capture_outputs(&job.cache, &job.workspace_root, spec).await {
+    let outputs = match capture_outputs(&ctx.cache, &ctx.workspace_root, spec).await {
         Ok(o) => o,
         Err(e) => {
             return TargetResult::Failed {
@@ -573,7 +742,7 @@ async fn run_target(job: &BuildJob, spec: &TargetSpec, key: CacheKey) -> TargetR
         built_by: None,
         sandboxed: spec.sandbox,
     };
-    if let Err(e) = job.cache.put_ac(&key, &ac).await {
+    if let Err(e) = ctx.cache.put_ac(&key, &ac).await {
         return TargetResult::Failed {
             key: Some(key),
             error: format!("cache write: {e}"),
