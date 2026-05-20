@@ -178,12 +178,22 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
         }
 
         // Phase A: compute cache key.
-        let dep_keys: Vec<CacheKey> = spec
+        //
+        // The dep contribution is each dep's **output content hash**, not
+        // its cache key. This is the early-cutoff property (TDD-0009):
+        // an upstream rebuild that produces byte-identical outputs leaves
+        // downstream cache keys unchanged, so downstream cache-hits.
+        let dep_outs: Vec<ContentHash> = spec
             .deps
             .iter()
-            .map(|d| cache_keys.get(d).copied().expect("dep must be resolved before parent"))
+            .map(|d| {
+                dep_output_hashes
+                    .get(d)
+                    .copied()
+                    .expect("dep must be resolved before parent")
+            })
             .collect();
-        let key = compute_cache_key(spec, &job.workspace_root, &dep_keys).await?;
+        let key = compute_cache_key(spec, &job.workspace_root, &dep_outs).await?;
         cache_keys.insert(target_id.clone(), key);
 
         emit(
@@ -282,14 +292,18 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
 }
 
 /// Compute the cache key for a target. See TDD-0009 §Cache key composition.
+///
+/// `dep_output_hashes` is each direct dep's output content hash - *not* its
+/// cache key. This is the early-cutoff property: byte-identical upstream
+/// rebuilds leave downstream cache keys unchanged.
 async fn compute_cache_key(
     spec: &TargetSpec,
     workspace_root: &AbsPath,
-    dep_keys: &[CacheKey],
+    dep_output_hashes: &[ContentHash],
 ) -> Result<CacheKey, ExecutorError> {
     let spec = spec.clone();
     let workspace_root = workspace_root.clone();
-    let dep_keys = dep_keys.to_vec();
+    let dep_output_hashes = dep_output_hashes.to_vec();
     let hash = tokio::task::spawn_blocking(move || -> Result<ContentHash, std::io::Error> {
         let mut h = ContentHash::hasher();
         h.update(KEY_SCHEMA.as_bytes());
@@ -356,12 +370,15 @@ async fn compute_cache_key(
         // structural inputs later changes the schema deliberately.
         h.update(b"structural_inputs\0\0");
 
-        // dep cache keys (sorted)
-        h.update(b"dep_keys\0");
-        let mut dep_hex: Vec<String> = dep_keys.iter().map(|k| k.to_hex()).collect();
-        dep_hex.sort();
-        for k in &dep_hex {
-            h.update(k.as_bytes());
+        // dep output content hashes (sorted). The section header changed
+        // from "dep_keys" to "dep_outputs" - old cached entries from a
+        // pre-early-cutoff build are stale and correctly miss.
+        h.update(b"dep_outputs\0");
+        let mut sorted: Vec<[u8; 32]> =
+            dep_output_hashes.iter().map(|h| *h.as_bytes()).collect();
+        sorted.sort();
+        for hb in &sorted {
+            h.update(hb);
             h.update(b"\0");
         }
 

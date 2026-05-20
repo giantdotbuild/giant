@@ -150,6 +150,72 @@ targets:
 }
 
 #[test]
+fn early_cutoff_byte_identical_upstream_doesnt_invalidate_downstream() {
+    // Property under test (TDD-0009 §Early-cutoff): if an upstream target
+    // rebuilds because its inputs changed, but its outputs come out
+    // byte-identical, downstream should *not* rebuild - its cache key is
+    // computed from upstream's output content hash, not upstream's cache
+    // key.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+
+    std::fs::write(ws.join("a.in"), "v1\n").unwrap();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: cutoff
+cache:
+  dir: ./cache
+targets:
+  - id: "a"
+    inputs: ["a.in"]
+    outputs: ["a.out"]
+    command: "echo constant > a.out"   # deterministic output regardless of a.in
+  - id: "b"
+    inputs: ["a.out"]
+    outputs: ["b.out"]
+    deps: ["a"]
+    command: "cat a.out > b.out"
+"#,
+    )
+    .unwrap();
+
+    // First build: both run.
+    let out1 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out1.status.success(), "first build failed");
+    let s1 = String::from_utf8_lossy(&out1.stdout);
+    assert!(s1.contains("built  a"), "expected a built; got: {s1}");
+    assert!(s1.contains("built  b"), "expected b built; got: {s1}");
+
+    // Edit a.in. a's cache key will change (its input content changed)
+    // and a will rebuild. But a's command is `echo constant > a.out`, so
+    // a.out is byte-identical to the previous run. b's dep contribution
+    // is a's outputs_content_hash - unchanged - so b cache-hits.
+    std::fs::write(ws.join("a.in"), "v2\n").unwrap();
+
+    let out2 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out2.status.success(), "second build failed");
+    let s2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        s2.contains("built  a"),
+        "expected a to rebuild (its input changed); got: {s2}"
+    );
+    assert!(
+        s2.contains("cache  b"),
+        "expected b to cache-hit (a's output bytes unchanged); got: {s2}"
+    );
+}
+
+#[test]
 fn cache_miss_when_command_changes() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();
