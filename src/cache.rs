@@ -7,11 +7,11 @@
 //! - Atomic writes via write-then-rename through `tmp/`.
 //! - Action-cache and content-addressed-storage read / write.
 
-use crate::model::{CacheKey, ContentHash};
+use crate::model::{CacheKey, ContentHash, TargetId};
 use crate::paths::AbsPath;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::task::spawn_blocking;
 
@@ -218,30 +218,79 @@ impl LocalCache {
     /// within a filesystem.
     async fn atomic_write(&self, dst: PathBuf, bytes: Vec<u8>) -> Result<(), CacheError> {
         let tmp = self.new_tmp_path()?;
-        spawn_blocking(move || -> Result<(), CacheError> {
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            {
-                let mut f = std::fs::File::create(&tmp)?;
-                f.write_all(&bytes)?;
-                f.sync_all()?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-                }
-            }
-            // rename(2) - atomic within a filesystem (TDD-0007).
-            if let Err(e) = std::fs::rename(&tmp, &dst) {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(e.into());
-            }
-            Ok(())
-        })
-        .await??;
+        spawn_blocking(move || atomic_write_blocking(&tmp, &dst, &bytes)).await??;
         Ok(())
     }
+
+    // -----------------------------------------------------------------
+    // Structural-input sidecar storage (TDD-0002 / TDD-0007).
+    //
+    // The sidecar is a per-target JSON file holding per-file fingerprint
+    // state used to skip re-reads on warm validation. Sidecar path is
+    // sharded by hash of the target ID. Sync because the caller is
+    // already inside spawn_blocking (cache-key computation).
+    // -----------------------------------------------------------------
+
+    fn structural_sidecar_path(&self, target_id: &TargetId) -> PathBuf {
+        let hex = ContentHash::of_bytes(target_id.as_str().as_bytes()).to_hex();
+        let prefix = &hex[..2];
+        self.root
+            .as_path()
+            .join("structural")
+            .join(prefix)
+            .join(format!("{hex}.json"))
+    }
+
+    /// Read the raw bytes of a structural sidecar, or `Ok(None)` if absent.
+    /// Sync helper for use inside `spawn_blocking`.
+    pub fn get_structural_sidecar_raw(
+        &self,
+        target_id: &TargetId,
+    ) -> Result<Option<Vec<u8>>, CacheError> {
+        let path = self.structural_sidecar_path(target_id);
+        match std::fs::read(&path) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Write the raw bytes of a structural sidecar atomically.
+    /// Sync helper for use inside `spawn_blocking`.
+    pub fn put_structural_sidecar_raw(
+        &self,
+        target_id: &TargetId,
+        bytes: &[u8],
+    ) -> Result<(), CacheError> {
+        let path = self.structural_sidecar_path(target_id);
+        let tmp = self.new_tmp_path()?;
+        atomic_write_blocking(&tmp, &path, bytes)
+    }
+}
+
+/// Sync implementation of write-tmp-then-rename. Used by both the async
+/// `atomic_write` (via spawn_blocking) and the sync sidecar helpers
+/// (called from inside another spawn_blocking already).
+fn atomic_write_blocking(tmp: &Path, dst: &Path, bytes: &[u8]) -> Result<(), CacheError> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    {
+        let mut f = std::fs::File::create(tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    // rename(2) - atomic within a filesystem (TDD-0007).
+    if let Err(e) = std::fs::rename(tmp, dst) {
+        let _ = std::fs::remove_file(tmp);
+        return Err(e.into());
+    }
+    Ok(())
 }
 
 /// One action-cache entry. Schema matches TDD-0007.

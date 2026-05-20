@@ -394,7 +394,7 @@ async fn dispatch_target(
     dep_outs: Vec<ContentHash>,
     ctx: TargetCtx,
 ) -> Result<CompletionMsg, ExecutorError> {
-    let key = compute_cache_key(&spec, &ctx.workspace_root, &dep_outs).await?;
+    let key = compute_cache_key(&spec, &ctx.workspace_root, &ctx.cache, &dep_outs).await?;
 
     let _ = ctx
         .events
@@ -481,10 +481,12 @@ fn result_output_hash(r: &TargetResult) -> Option<ContentHash> {
 async fn compute_cache_key(
     spec: &TargetSpec,
     workspace_root: &AbsPath,
+    cache: &LocalCache,
     dep_output_hashes: &[ContentHash],
 ) -> Result<CacheKey, ExecutorError> {
     let spec = spec.clone();
     let workspace_root = workspace_root.clone();
+    let cache = cache.clone();
     let dep_output_hashes = dep_output_hashes.to_vec();
     let hash = tokio::task::spawn_blocking(move || -> Result<ContentHash, std::io::Error> {
         let mut h = ContentHash::hasher();
@@ -588,6 +590,8 @@ async fn compute_cache_key(
             h.update(b"|\0");
             let fp = crate::structural::compute_fingerprint(
                 &workspace_root,
+                &cache,
+                &spec.id,
                 &s.files,
                 &s.lines,
                 &s.scope,
