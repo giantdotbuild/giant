@@ -1523,6 +1523,79 @@ targets:
 }
 
 #[test]
+#[cfg(unix)]
+fn watch_rebuilds_on_file_change() {
+    // Spawn `giant watch` in the background, edit a file, give it time
+    // to rebuild, then SIGINT for a clean exit. Verifies the post-edit
+    // file reflects the new content.
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::write(ws.join("src/in.txt"), "v1\n").unwrap();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: watch_test
+cache:
+  dir: ./cache
+targets:
+  - id: "demo"
+    inputs: ["src/in.txt"]
+    outputs: ["out.txt"]
+    command: "cp src/in.txt out.txt"
+"#,
+    )
+    .unwrap();
+
+    let mut child = Command::new(giant_bin())
+        .arg("watch")
+        .current_dir(ws)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn giant watch");
+    let pid = child.id() as i32;
+
+    // Give it time to complete initial build and start watching.
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(
+        std::fs::read_to_string(ws.join("out.txt")).unwrap().trim(),
+        "v1",
+        "initial build should produce out.txt with v1"
+    );
+
+    // Edit the input.
+    std::fs::write(ws.join("src/in.txt"), "v2_edited\n").unwrap();
+
+    // Wait for the debouncer + rebuild.
+    std::thread::sleep(Duration::from_millis(1200));
+    assert_eq!(
+        std::fs::read_to_string(ws.join("out.txt")).unwrap().trim(),
+        "v2_edited",
+        "watch should have rebuilt after edit"
+    );
+
+    // Clean shutdown via SIGINT.
+    unsafe {
+        libc::kill(pid, libc::SIGINT);
+    }
+    let _ = child.wait();
+
+    // Sanity: stderr should mention watch lifecycle.
+    let mut buf = String::new();
+    let _ = child.stderr.take().unwrap().read_to_string(&mut buf);
+    assert!(
+        buf.contains("watch:"),
+        "expected watch lifecycle on stderr; got: {buf}"
+    );
+}
+
+#[test]
 fn cache_miss_when_command_changes() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();

@@ -1,47 +1,60 @@
-//! File watcher.
+//! Recursive file watcher backed by the `notify` crate.
 //!
-//! See TDD-0008 for the watch-mode design. This module owns the notify
-//! integration and the debouncer.
+//! Bridges notify's sync callback into a tokio mpsc channel. Filters
+//! out paths under known "noise" prefixes (`.git/`, `.giant/`, the
+//! cache directory) at the watcher boundary so the debouncer doesn't
+//! waste cycles on them.
+//!
+//! Caller keeps the returned `WatcherHandle` alive for as long as
+//! they want events; dropping it tears down the OS watch.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use notify::{Event, EventKind, RecursiveMode, Watcher};
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WatcherError {
     #[error("notify: {0}")]
     Notify(#[from] notify::Error),
-
-    #[error("workspace root not absolute: {0:?}")]
-    BadRoot(std::path::PathBuf),
 }
 
-#[derive(Debug, Clone)]
-pub struct WatchConfig {
-    pub workspace_root: PathBuf,
-    pub quiet_window: Duration,
-    pub max_delay: Duration,
+/// Owned watcher handle. The OS watch stays active until this is dropped.
+pub struct WatcherHandle {
+    _watcher: notify::RecommendedWatcher,
 }
 
-impl Default for WatchConfig {
-    fn default() -> Self {
-        Self {
-            workspace_root: PathBuf::from("."),
-            quiet_window: Duration::from_millis(100),
-            max_delay: Duration::from_millis(500),
+/// Spawn a recursive watcher over `root`. Events for paths that start
+/// with any entry in `exclude_prefixes` are silently dropped at the
+/// boundary so they never reach the debouncer.
+///
+/// Returns the handle (keep it alive!) and a receiver of changed paths.
+pub fn spawn(
+    root: &Path,
+    exclude_prefixes: Vec<PathBuf>,
+) -> Result<(WatcherHandle, mpsc::Receiver<PathBuf>), WatcherError> {
+    let (tx, rx) = mpsc::channel::<PathBuf>(1024);
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+        let Ok(event) = res else { return };
+        if !relevant_kind(&event.kind) {
+            return;
         }
-    }
+        for path in event.paths {
+            if exclude_prefixes.iter().any(|p| path.starts_with(p)) {
+                continue;
+            }
+            // try_send: if the queue is full we drop the event. Better
+            // than blocking the watcher thread and risking buildup. The
+            // debouncer will see the next event anyway.
+            let _ = tx.try_send(path);
+        }
+    })?;
+    watcher.watch(root, RecursiveMode::Recursive)?;
+    Ok((WatcherHandle { _watcher: watcher }, rx))
 }
 
-/// One coalesced batch of file events.
-#[derive(Debug, Clone, Default)]
-pub struct WatchBatch {
-    pub paths: Vec<PathBuf>,
-}
-
-/// Spawn a watcher. Returns a receiver that yields debounced batches.
-pub async fn spawn(
-    _cfg: WatchConfig,
-) -> Result<mpsc::Receiver<WatchBatch>, WatcherError> {
-    todo!("TDD-0008: notify -> debouncer -> mpsc<WatchBatch>")
+fn relevant_kind(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+    )
 }

@@ -8,6 +8,7 @@ mod clean;
 mod explain;
 mod graph;
 pub(crate) mod prep;
+mod watch;
 
 #[derive(Parser, Debug)]
 #[command(name = "giant", version, about = "Build orchestration with content-addressed caching")]
@@ -46,6 +47,10 @@ pub enum Commands {
 
     /// Clear the local cache.
     Clean(clean::CleanArgs),
+
+    /// Run an initial build, then continuously rebuild affected
+    /// targets when files change. Ctrl-C to exit.
+    Watch(watch::WatchArgs),
 }
 
 /// Entry point invoked from `main`.
@@ -67,6 +72,7 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Explain(args) => explain::execute(args, &global).await,
         Commands::Graph(args) => graph::execute(args, &global).await,
         Commands::Clean(args) => clean::execute(args, &global).await,
+        Commands::Watch(args) => watch::execute(args, &global).await,
     }
 }
 
