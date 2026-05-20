@@ -530,7 +530,6 @@ pub struct CacheKeyBreakdown {
     /// dep_id → output_content_hash. The caller fills this in *after*
     /// the hash is computed (the inner compose has no view of dep IDs).
     pub dep_outputs: std::collections::BTreeMap<TargetId, ContentHash>,
-    pub sandbox: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -620,7 +619,6 @@ fn empty_breakdown(spec: &TargetSpec) -> CacheKeyBreakdown {
         file_inputs: Vec::new(),
         structural_inputs: Vec::new(),
         dep_outputs: std::collections::BTreeMap::new(),
-        sandbox: spec.sandbox,
     }
 }
 
@@ -773,11 +771,6 @@ fn compose_cache_key_blocking(
         h.update(hb);
         h.update(b"\0");
     }
-
-    // sandbox flag (ADR-0008)
-    h.update(b"sandbox\0");
-    h.update(if spec.sandbox { b"1" } else { b"0" });
-    h.update(b"\0");
 
     Ok(h.finalize())
 }
@@ -1179,7 +1172,6 @@ async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> Target
         duration_ms: started.elapsed().as_millis() as u64,
         built_at: chrono::Utc::now().to_rfc3339(),
         built_by: None,
-        sandboxed: spec.sandbox,
     };
     if let Err(e) = ctx.cache.put_ac(&key, &ac).await {
         return TargetResult::Failed {

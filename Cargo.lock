@@ -772,6 +772,7 @@ dependencies = [
 name = "giant"
 version = "0.1.0"
 dependencies = [
+ "anstyle",
  "anyhow",
  "base64",
  "chrono",
@@ -781,6 +782,7 @@ dependencies = [
  "ctrlc",
  "dashmap",
  "dirs",
+ "filetime",
  "futures-util",
  "gix",
  "glob",

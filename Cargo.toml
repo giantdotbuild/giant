@@ -13,6 +13,9 @@ futures-util = "0.3"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+# anstyle is already in the tree via clap; declaring it directly so we
+# can build Style values for the renderer without paying for it twice.
+anstyle = "1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -97,3 +100,5 @@ tempfile = "3"
 serial_test = "3"
 # Mock HTTP server for the remote-cache integration test.
 wiremock = "0.6"
+# Set mtimes precisely in eviction tests (LRU ordering depends on it).
+filetime = "0.2"

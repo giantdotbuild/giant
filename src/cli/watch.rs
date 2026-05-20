@@ -24,6 +24,7 @@ use crate::events::Event;
 use crate::executor::{BuildJob, build};
 use crate::model::TargetId;
 use crate::paths::AbsPath;
+use crate::renderer::{self, ColorChoice, Mode, Renderer};
 use crate::selection;
 use crate::watcher;
 use clap::Args;
@@ -52,11 +53,30 @@ pub struct WatchArgs {
     /// in it, even if events keep streaming. Default 500.
     #[arg(long, default_value_t = 500)]
     pub max_delay_ms: u64,
+
+    /// Only print failures and the final summary for each cycle.
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+
+    /// When to colorize output. `auto` honors stdout-is-tty and the
+    /// `NO_COLOR` env var.
+    #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
+    pub color: ColorChoice,
+
+    /// Include only targets carrying this tag. Repeatable.
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+
+    /// Exclude targets carrying this tag. Repeatable.
+    #[arg(long = "no-tag", value_name = "TAG")]
+    pub no_tags: Vec<String>,
 }
 
 pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Result<()> {
     let parallelism = args.jobs.unwrap_or_else(prep::num_cpus_estimate);
     let cancel = CancellationToken::new();
+    let mode = renderer::detect_mode(args.color, /* ndjson */ false);
+    let quiet = args.quiet;
 
     // Ctrl-C → cancel.
     {
@@ -67,20 +87,31 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
         .ok();
     }
 
-    // Initial prepare + build. Use a real renderer task during build phases
-    // so users see progress; tear it down between phases so the watch
-    // status banner doesn't fight with stale logs.
-    eprintln!("watch: initial build...");
+    // Initial prepare + build.
+    print_note(mode, "initial build");
     let prepared = run_prepare(global, parallelism, cancel.clone()).await?;
     let workspace_root = prepared.workspace_root.clone();
 
-    let pattern_selection = resolve_pattern_selection(&prepared, &args.patterns)?;
+    let select_opts = selection::SelectionOpts {
+        tags: args.tags.clone(),
+        no_tags: args.no_tags.clone(),
+    };
+    let pattern_selection = resolve_pattern_selection(&prepared, &args.patterns, &select_opts)?;
     if pattern_selection.is_empty() {
-        anyhow::bail!("watch: no targets to watch");
+        anyhow::bail!("no targets to watch");
     }
 
     let initial_outputs = collect_output_paths(&prepared, &workspace_root);
-    run_build(&prepared, &pattern_selection, parallelism, global.fresh, cancel.clone()).await?;
+    run_build(
+        &prepared,
+        &pattern_selection,
+        parallelism,
+        global.fresh,
+        cancel.clone(),
+        mode,
+        quiet,
+    )
+    .await?;
 
     // Now spawn the watcher. Excludes cover .git, .giant, the cache dir,
     // and every declared output path so self-rebuilds don't loop.
@@ -94,18 +125,22 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
 
     let (_handle, mut rx) = watcher::spawn(workspace_root.as_path(), excludes)?;
 
-    eprintln!(
-        "watch: ready. Watching {} target(s). Press Ctrl-C to exit.",
-        pattern_selection.len()
+    print_note(
+        mode,
+        &format!(
+            "watching {} target(s) - Ctrl-C to exit",
+            pattern_selection.len()
+        ),
     );
 
-    let quiet = Duration::from_millis(args.quiet_ms);
+    let quiet_window = Duration::from_millis(args.quiet_ms);
     let max = Duration::from_millis(args.max_delay_ms);
-    let mut debouncer = Debouncer::new(quiet, max);
+    let mut debouncer = Debouncer::new(quiet_window, max);
 
     loop {
         if cancel.is_cancelled() {
-            eprintln!("\nwatch: cancelled.");
+            println!();
+            print_note(mode, "cancelled");
             return Ok(());
         }
 
@@ -128,25 +163,24 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
         // when inputs are unchanged, runs again only when discovery's
         // own inputs (script, deps) changed. New targets discovered in
         // this cycle show up here.
-        eprintln!(
-            "\nwatch: {} file(s) changed; re-evaluating graph...",
-            paths.len()
-        );
+        println!();
+        print_note(mode, &format!("{} file(s) changed", paths.len()));
         let prepared = match run_prepare(global, parallelism, cancel.clone()).await {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("watch: prepare failed: {e}");
+                print_note(mode, &format!("prepare failed: {e}"));
                 continue;
             }
         };
 
-        let pattern_selection = match resolve_pattern_selection(&prepared, &args.patterns) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("watch: selection failed: {e}");
-                continue;
-            }
-        };
+        let pattern_selection =
+            match resolve_pattern_selection(&prepared, &args.patterns, &select_opts) {
+                Ok(s) => s,
+                Err(e) => {
+                    print_note(mode, &format!("selection failed: {e}"));
+                    continue;
+                }
+            };
 
         let changed_refs: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
         let affected = selection::affected_targets(&prepared.graph, &changed_refs);
@@ -156,17 +190,28 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
             .collect();
 
         if selection.is_empty() {
-            eprintln!("watch: no targets affected.");
+            print_note(mode, "no targets affected");
             continue;
         }
 
-        eprintln!("watch: building {} affected target(s)...", selection.len());
-        if let Err(e) =
-            run_build(&prepared, &selection, parallelism, global.fresh, cancel.clone()).await
+        if let Err(e) = run_build(
+            &prepared,
+            &selection,
+            parallelism,
+            global.fresh,
+            cancel.clone(),
+            mode,
+            quiet,
+        )
+        .await
         {
-            eprintln!("watch: build failed: {e}");
+            print_note(mode, &format!("build failed: {e}"));
         }
     }
+}
+
+fn print_note(mode: Mode, msg: &str) {
+    print!("{}", renderer::note(&mode.theme(), msg));
 }
 
 /// Reusable prepare wrapper. The bootstrap pass needs an event sender;
@@ -178,37 +223,33 @@ async fn run_prepare(
     cancel: CancellationToken,
 ) -> anyhow::Result<Prepared> {
     let (tx, sink) = prep::null_event_sink();
-    let result = prep::prepare(global.config.as_deref(), parallelism, global.fresh, tx, cancel)
-        .await;
+    let result = prep::prepare(
+        global.config.as_deref(),
+        parallelism,
+        global.fresh,
+        tx,
+        cancel,
+    )
+    .await;
     let _ = sink.await;
     result
 }
 
-/// Resolve user patterns against the current graph. Empty patterns →
-/// all non-test targets.
+/// Resolve user patterns against the current graph using the shared
+/// selection language (TDD-0011). Re-run each watch cycle so newly-
+/// discovered targets are included or excluded as the patterns dictate.
 fn resolve_pattern_selection(
     prepared: &Prepared,
     patterns: &[String],
+    opts: &selection::SelectionOpts,
 ) -> anyhow::Result<Vec<TargetId>> {
-    if patterns.is_empty() {
-        Ok(prepared
-            .graph
-            .iter()
-            .filter(|(_, spec)| !spec.test)
-            .map(|(id, _)| id.clone())
-            .collect())
-    } else {
-        let mut out = Vec::with_capacity(patterns.len());
-        for p in patterns {
-            let id = TargetId::new(p);
-            if prepared.graph.get(&id).is_some() {
-                out.push(id);
-            } else {
-                anyhow::bail!("no target matches {p:?} (selection-language is v1.1)");
-            }
-        }
-        Ok(out)
-    }
+    selection::resolve_patterns(
+        &prepared.graph,
+        patterns,
+        selection::TestMode::Exclude,
+        opts,
+    )
+    .map_err(Into::into)
 }
 
 /// All declared output absolute paths, used as the watcher exclusion
@@ -231,14 +272,16 @@ async fn run_build(
     parallelism: usize,
     fresh: bool,
     cancel: CancellationToken,
+    mode: Mode,
+    quiet: bool,
 ) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::channel::<Event>(1024);
-    let renderer = tokio::spawn(async move {
+    let renderer_task = tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         let mut out = tokio::io::stdout();
+        let mut r = Renderer::new(mode, 0, quiet);
         while let Some(ev) = rx.recv().await {
-            let line = render_plain(&ev);
-            if !line.is_empty() {
+            if let Some(line) = r.render(&ev) {
                 let _ = out.write_all(line.as_bytes()).await;
                 let _ = out.flush().await;
             }
@@ -276,65 +319,14 @@ async fn run_build(
     #[cfg(not(feature = "remote"))]
     let _ = upload_handle;
 
-    let _ = renderer.await;
+    let _ = renderer_task.await;
 
+    // The renderer already emits the failed-target list in its
+    // summary block; the watch loop just needs a short message to log.
     if summary.counts.failed > 0 {
-        anyhow::bail!(
-            "{} target(s) failed: {}",
-            summary.counts.failed,
-            summary
-                .failed_targets
-                .iter()
-                .map(|t| t.as_str().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        anyhow::bail!("{} target(s) failed", summary.counts.failed);
     }
     Ok(())
-}
-
-fn render_plain(ev: &Event) -> String {
-    use crate::events::TargetResultKind;
-    match ev {
-        Event::TargetFinished {
-            id,
-            result,
-            duration_ms,
-            error,
-            ..
-        } => {
-            let label = match result {
-                TargetResultKind::Built => "built",
-                TargetResultKind::CacheHit => "cache",
-                TargetResultKind::RemoteCacheHit => "remote",
-                TargetResultKind::ExternalCacheHit => "external",
-                TargetResultKind::Skipped => "skipped",
-                TargetResultKind::Failed => "FAILED",
-            };
-            if let Some(e) = error {
-                format!("{label:>8}  {id}  ({duration_ms}ms) - {e}\n")
-            } else {
-                format!("{label:>8}  {id}  ({duration_ms}ms)\n")
-            }
-        }
-        Event::BuildFinished {
-            ok,
-            duration_ms,
-            counts,
-            ..
-        } => {
-            format!(
-                "{} {} built, {} cached, {} failed, {} skipped in {}ms\n",
-                if *ok { "OK" } else { "FAIL" },
-                counts.built,
-                counts.cache_hit,
-                counts.failed,
-                counts.skipped,
-                duration_ms
-            )
-        }
-        _ => String::new(),
-    }
 }
 
 fn relative_to(workspace_root: &AbsPath, p: &Path) -> PathBuf {
@@ -449,10 +441,11 @@ mod tests {
         let mut deb = Debouncer::new(Duration::from_millis(30), Duration::from_millis(500));
         tx.send(PathBuf::from("a")).await.unwrap();
 
-        let batch = tokio::time::timeout(Duration::from_millis(200), deb.next_batch(&mut rx, &cancel))
-            .await
-            .unwrap()
-            .unwrap();
+        let batch =
+            tokio::time::timeout(Duration::from_millis(200), deb.next_batch(&mut rx, &cancel))
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(batch, vec![PathBuf::from("a")]);
     }
 
@@ -464,10 +457,11 @@ mod tests {
         for i in 0..10 {
             tx.send(PathBuf::from(format!("f{i}"))).await.unwrap();
         }
-        let batch = tokio::time::timeout(Duration::from_millis(300), deb.next_batch(&mut rx, &cancel))
-            .await
-            .unwrap()
-            .unwrap();
+        let batch =
+            tokio::time::timeout(Duration::from_millis(300), deb.next_batch(&mut rx, &cancel))
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(batch.len(), 10, "all 10 events should coalesce");
     }
 
@@ -490,7 +484,10 @@ mod tests {
             elapsed.as_millis() < 200,
             "max_delay should bound the batch wait; got {elapsed:?}"
         );
-        assert!(!batch.is_empty(), "should have collected at least one event");
+        assert!(
+            !batch.is_empty(),
+            "should have collected at least one event"
+        );
         send_task.abort();
     }
 
@@ -502,10 +499,11 @@ mod tests {
         for _ in 0..5 {
             tx.send(PathBuf::from("same")).await.unwrap();
         }
-        let batch = tokio::time::timeout(Duration::from_millis(200), deb.next_batch(&mut rx, &cancel))
-            .await
-            .unwrap()
-            .unwrap();
+        let batch =
+            tokio::time::timeout(Duration::from_millis(200), deb.next_batch(&mut rx, &cancel))
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(batch, vec![PathBuf::from("same")]);
     }
 }

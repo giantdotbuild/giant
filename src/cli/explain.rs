@@ -173,7 +173,6 @@ fn print_breakdown(
         bd.cwd.clone()
     };
     let _ = writeln!(w, "cwd:         {cwd_display}");
-    let _ = writeln!(w, "sandbox:     {}", bd.sandbox);
     let _ = writeln!(w);
 
     let total_env = bd.user_env.len() + bd.built_in_env.len();

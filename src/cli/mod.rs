@@ -14,10 +14,15 @@ mod explain;
 mod external;
 mod graph;
 pub(crate) mod prep;
+mod test;
 mod watch;
 
 #[derive(Parser, Debug)]
-#[command(name = "giant", version, about = "Build orchestration with content-addressed caching")]
+#[command(
+    name = "giant",
+    version,
+    about = "Build orchestration with content-addressed caching"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -30,8 +35,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub fresh: bool,
 
-    /// Log filter (RUST_LOG syntax).
-    #[arg(long, global = true, default_value = "warn")]
+    /// Log filter (RUST_LOG syntax). Defaults to errors only - pass
+    /// `--log warn` (or set `RUST_LOG=giant=warn`) when debugging.
+    #[arg(long, global = true, default_value = "error")]
     pub log: String,
 }
 
@@ -39,6 +45,10 @@ pub struct Cli {
 pub enum Commands {
     /// Build targets.
     Build(build::BuildArgs),
+
+    /// Run test targets. Same flags as `build`, but the selection is
+    /// restricted to targets with `test: true`.
+    Test(test::TestArgs),
 
     /// List targets that would rebuild given a set of changed files.
     /// Doesn't actually run anything.
@@ -79,6 +89,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Build(args) => build::execute(args, &global).await,
+        Commands::Test(args) => test::execute(args, &global).await,
         Commands::Affected(args) => affected::execute(args, &global).await,
         Commands::Explain(args) => explain::execute(args, &global).await,
         Commands::Graph(args) => graph::execute(args, &global).await,
@@ -94,3 +105,17 @@ pub struct GlobalFlags {
     pub config: Option<std::path::PathBuf>,
     pub fresh: bool,
 }
+
+/// Returned by a subcommand to exit non-zero without `main` printing
+/// an error banner. Used when the subcommand has already produced
+/// user-facing failure output (e.g., the build summary).
+#[derive(Debug)]
+pub struct SilentExit;
+
+impl std::fmt::Display for SilentExit {
+    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Ok(())
+    }
+}
+
+impl std::error::Error for SilentExit {}

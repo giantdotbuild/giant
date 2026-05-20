@@ -27,9 +27,26 @@ pub struct AffectedArgs {
     #[arg(long, value_name = "PATH")]
     pub file: Vec<PathBuf>,
 
-    /// Restrict to targets matching these IDs (exact match for now;
-    /// glob support lands with the selection-language slice).
+    /// Restrict to targets matching these patterns. Same selection
+    /// language as `giant build`: exact ids, globs (`go:*`, `**:test:*`),
+    /// and exclusions (`!go:test:*`). See TDD-0011.
     pub patterns: Vec<String>,
+
+    /// Include only targets carrying this tag. Repeatable.
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+
+    /// Exclude targets carrying this tag. Repeatable.
+    #[arg(long = "no-tag", value_name = "TAG")]
+    pub no_tags: Vec<String>,
+
+    /// Restrict to test targets (mirrors `giant test --affected ...`).
+    #[arg(long, conflicts_with = "with_tests")]
+    pub tests_only: bool,
+
+    /// Include test targets alongside non-test ones.
+    #[arg(long)]
+    pub with_tests: bool,
 }
 
 pub async fn execute(args: AffectedArgs, global: &super::GlobalFlags) -> anyhow::Result<()> {
@@ -63,19 +80,25 @@ pub async fn execute(args: AffectedArgs, global: &super::GlobalFlags) -> anyhow:
     let changed_refs: Vec<&Path> = changed.iter().map(|p| p.as_path()).collect();
     let affected = selection::affected_targets(&prepared.graph, &changed_refs);
 
-    // Optional pattern intersection. Empty patterns = all affected.
-    let mut out: Vec<TargetId> = if args.patterns.is_empty() {
-        affected.into_iter().collect()
-    } else {
-        let mut acc: Vec<TargetId> = Vec::new();
-        for p in &args.patterns {
-            let exact = TargetId::new(p);
-            if affected.contains(&exact) {
-                acc.push(exact);
-            }
-        }
-        acc
+    // Pattern selection over the full graph, then intersect with the
+    // affected set. The order matters: we want a glob-missing-everything
+    // to be a silent empty, not an error, while a typo'd exact id should
+    // still bail - and `resolve_patterns` already handles that.
+    let opts = selection::SelectionOpts {
+        tags: args.tags.clone(),
+        no_tags: args.no_tags.clone(),
     };
+    let test_mode = match (args.tests_only, args.with_tests) {
+        (true, _) => selection::TestMode::Only,
+        (_, true) => selection::TestMode::Include,
+        _ => selection::TestMode::Exclude,
+    };
+    let pattern_set: Vec<TargetId> =
+        selection::resolve_patterns(&prepared.graph, &args.patterns, test_mode, &opts)?;
+    let mut out: Vec<TargetId> = pattern_set
+        .into_iter()
+        .filter(|id| affected.contains(id))
+        .collect();
     out.sort();
 
     // Plain stdout: one ID per line. Empty result is exit 0 with no

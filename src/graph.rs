@@ -286,7 +286,6 @@ mod tests {
             test: false,
             tags: Default::default(),
             label: None,
-            sandbox: false,
             inferred_deps: Default::default(),
         }
     }

@@ -165,8 +165,6 @@ pub struct TargetSpec {
     pub tags: HashSet<String>,
     #[serde(default)]
     pub label: Option<String>,
-    #[serde(default)]
-    pub sandbox: bool,
 
     /// Runtime-only: the subset of `deps` populated by output-based
     /// inference. Display metadata for `giant explain`; never serialized.

@@ -9,6 +9,20 @@ fn giant_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
+/// True if some line of `out` mentions `verb` and `id` together. Used
+/// to decouple assertions from the exact column widths/spacing the
+/// renderer happens to produce.
+fn line_has(out: &str, verb: &str, id: &str) -> bool {
+    out.lines().any(|l| l.contains(verb) && l.contains(id))
+}
+
+fn built(out: &str, id: &str) -> bool {
+    line_has(out, "BUILD", id)
+}
+fn cached(out: &str, id: &str) -> bool {
+    line_has(out, "CACHE", id)
+}
+
 fn fixture_path(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
@@ -182,7 +196,7 @@ targets:
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("FAILED") || stderr.contains("failed"),
+        stdout.contains("FAIL") || stderr.contains("failed"),
         "expected failure mention; stdout={stdout} stderr={stderr}"
     );
 }
@@ -227,8 +241,8 @@ targets:
         .unwrap();
     assert!(out1.status.success(), "first build failed");
     let s1 = String::from_utf8_lossy(&out1.stdout);
-    assert!(s1.contains("built  a"), "expected a built; got: {s1}");
-    assert!(s1.contains("built  b"), "expected b built; got: {s1}");
+    assert!(built(&s1, "a"), "expected a built; got: {s1}");
+    assert!(built(&s1, "b"), "expected b built; got: {s1}");
 
     // Edit a.in. a's cache key will change (its input content changed)
     // and a will rebuild. But a's command is `echo constant > a.out`, so
@@ -244,11 +258,11 @@ targets:
     assert!(out2.status.success(), "second build failed");
     let s2 = String::from_utf8_lossy(&out2.stdout);
     assert!(
-        s2.contains("built  a"),
+        built(&s2, "a"),
         "expected a to rebuild (its input changed); got: {s2}"
     );
     assert!(
-        s2.contains("cache  b"),
+        cached(&s2, "b"),
         "expected b to cache-hit (a's output bytes unchanged); got: {s2}"
     );
 }
@@ -375,10 +389,14 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("built  a"), "a should build; got: {s}");
-    assert!(s.contains("built  b"), "b should build; got: {s}");
+    assert!(built(&s, "a"), "a should build; got: {s}");
+    assert!(built(&s, "b"), "b should build; got: {s}");
     // Verify b ran after a - b's output depends on a's having run first.
     assert_eq!(
         std::fs::read_to_string(ws.join("out.txt")).unwrap().trim(),
@@ -454,11 +472,17 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(out1.status.success(), "cold build failed: {}", String::from_utf8_lossy(&out1.stderr));
+    assert!(
+        out1.status.success(),
+        "cold build failed: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
     let s1 = String::from_utf8_lossy(&out1.stdout);
-    assert!(s1.contains("built  discover:svc"), "discover should build; {s1}");
-    assert!(s1.contains("built  svc:hello"), "svc:hello should build; {s1}");
-    assert!(s1.contains("built  downstream"), "downstream should build; {s1}");
+    // discover:svc runs as a bootstrap target and the renderer hides
+    // those - the proof it ran is that svc:hello (discovered) and
+    // downstream (inferred dep on svc:hello) both built.
+    assert!(built(&s1, "svc:hello"), "svc:hello should build; {s1}");
+    assert!(built(&s1, "downstream"), "downstream should build; {s1}");
     assert_eq!(
         std::fs::read_to_string(ws.join("combined.txt"))
             .unwrap()
@@ -476,10 +500,9 @@ targets:
         .unwrap();
     assert!(out2.status.success());
     let s2 = String::from_utf8_lossy(&out2.stdout);
-    assert!(s2.contains("cache  discover:svc"));
-    assert!(s2.contains("cache  svc:hello"));
+    assert!(cached(&s2, "svc:hello"));
     assert!(
-        s2.contains("cache  downstream"),
+        cached(&s2, "downstream"),
         "downstream must cache-hit on warm run (deterministic cache key); got: {s2}"
     );
 }
@@ -515,9 +538,13 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("external"), "expected external hit; got: {s}");
+    assert!(s.contains("EXTERNAL"), "expected external hit; got: {s}");
     assert!(
         !ws.join("marker.txt").exists(),
         "build command must not have run when exists: returned 0"
@@ -554,9 +581,11 @@ targets:
         .unwrap();
     assert!(out.status.success(), "build failed");
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("built  docker:img"), "expected build to run; got: {s}");
+    assert!(built(&s, "docker:img"), "expected build to run; got: {s}");
     assert_eq!(
-        std::fs::read_to_string(ws.join("receipt.txt")).unwrap().trim(),
+        std::fs::read_to_string(ws.join("receipt.txt"))
+            .unwrap()
+            .trim(),
         "built"
     );
 }
@@ -591,9 +620,13 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("external"), "expected external hit; got: {s}");
+    assert!(s.contains("EXTERNAL"), "expected external hit; got: {s}");
     assert!(!ws.join("marker.txt").exists());
 }
 
@@ -639,9 +672,13 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(out1.status.success(), "first build failed: {}", String::from_utf8_lossy(&out1.stderr));
+    assert!(
+        out1.status.success(),
+        "first build failed: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
     let s1 = String::from_utf8_lossy(&out1.stdout);
-    assert!(s1.contains("built  discover:go"), "got: {s1}");
+    assert!(built(&s1, "discover:go"), "got: {s1}");
 
     // Edit the function body but not the package/import lines.
     std::fs::write(
@@ -657,7 +694,7 @@ targets:
     assert!(out2.status.success());
     let s2 = String::from_utf8_lossy(&out2.stdout);
     assert!(
-        s2.contains("cache  discover:go"),
+        cached(&s2, "discover:go"),
         "structural input should ignore function-body edits; got: {s2}"
     );
 
@@ -675,7 +712,7 @@ targets:
     assert!(out3.status.success());
     let s3 = String::from_utf8_lossy(&out3.stdout);
     assert!(
-        s3.contains("built  discover:go"),
+        built(&s3, "discover:go"),
         "import edit should invalidate structural input; got: {s3}"
     );
 }
@@ -736,10 +773,18 @@ targets:
     run_git(&["add", "."]);
     run_git(&["commit", "-m", "init"]);
 
-    let out1 = Command::new(giant_bin()).arg("build").current_dir(ws).output().unwrap();
-    assert!(out1.status.success(), "first build failed: {}", String::from_utf8_lossy(&out1.stderr));
+    let out1 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(
+        out1.status.success(),
+        "first build failed: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
     let s1 = String::from_utf8_lossy(&out1.stdout);
-    assert!(s1.contains("built  discover:go"), "got: {s1}");
+    assert!(built(&s1, "discover:go"), "got: {s1}");
 
     // Edit function body - git status reports src/main.go as modified.
     // The fast-path should re-read it, see no matching-line change, and
@@ -749,11 +794,15 @@ targets:
         "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"v2-very-different\") }\n",
     )
     .unwrap();
-    let out2 = Command::new(giant_bin()).arg("build").current_dir(ws).output().unwrap();
+    let out2 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
     assert!(out2.status.success());
     let s2 = String::from_utf8_lossy(&out2.stdout);
     assert!(
-        s2.contains("cache  discover:go"),
+        cached(&s2, "discover:go"),
         "warm fast-path with function-body edit should cache-hit; got: {s2}"
     );
 
@@ -763,10 +812,17 @@ targets:
         "package main\nimport \"fmt\"\nimport \"log\"\nfunc main() { fmt.Println(\"v3\") }\n",
     )
     .unwrap();
-    let out3 = Command::new(giant_bin()).arg("build").current_dir(ws).output().unwrap();
+    let out3 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
     assert!(out3.status.success());
     let s3 = String::from_utf8_lossy(&out3.stdout);
-    assert!(s3.contains("built  discover:go"), "import edit must rebuild; got: {s3}");
+    assert!(
+        built(&s3, "discover:go"),
+        "import edit must rebuild; got: {s3}"
+    );
 }
 
 #[test]
@@ -795,13 +851,12 @@ fn fixture_discover_docker_runs_end_to_end() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
 
-    // Bootstrap built the discovery target.
+    // Bootstrap output is hidden by the renderer; the proof discovery
+    // ran is that the two docker:* targets it emitted show up below.
     assert!(
-        stdout.contains("built  discover:docker") || stdout.contains("cache  discover:docker"),
-        "expected discover:docker to run; got: {stdout}"
+        stdout.contains("docker:api"),
+        "expected docker:api in output; got: {stdout}"
     );
-    // Discovery emitted two docker targets - one per Dockerfile.
-    assert!(stdout.contains("docker:api"), "expected docker:api in output; got: {stdout}");
     assert!(
         stdout.contains("docker:worker"),
         "expected docker:worker in output; got: {stdout}"
@@ -826,7 +881,10 @@ fn fixture_discover_go_runs_end_to_end() {
         // Isolate the Go build cache so test parallelism doesn't fight
         // over $XDG_CACHE_HOME/go-build.
         .env("GOCACHE", ws.join(".gocache").to_string_lossy().to_string())
-        .env("GOMODCACHE", ws.join(".gomodcache").to_string_lossy().to_string())
+        .env(
+            "GOMODCACHE",
+            ws.join(".gomodcache").to_string_lossy().to_string(),
+        )
         .output()
         .expect("spawn giant");
     assert!(
@@ -837,11 +895,8 @@ fn fixture_discover_go_runs_end_to_end() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
 
-    // Bootstrap built (or cache-hit) the discovery target.
-    assert!(
-        stdout.contains("built  discover:go") || stdout.contains("cache  discover:go"),
-        "expected discover:go to run; got: {stdout}"
-    );
+    // Bootstrap output is hidden by the renderer; discovery's proof is
+    // that the two go:pkg targets below show up.
     // Discovery emitted two packages - library (pkg/util) + main (root).
     assert!(
         stdout.contains("go:pkg:pkg/util"),
@@ -894,9 +949,13 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("built  a"), "a should build; got: {s}");
+    assert!(built(&s, "a"), "a should build; got: {s}");
     assert!(!s.contains(" b "), "b should not appear; got: {s}");
     assert!(!ws.join("b.out").exists(), "b.out should not exist");
 }
@@ -963,9 +1022,13 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("built  a"), "a should rebuild; got: {s}");
+    assert!(built(&s, "a"), "a should rebuild; got: {s}");
     assert!(!s.contains(" b "), "b should not appear; got: {s}");
 }
 
@@ -1013,11 +1076,16 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(out.status.success(), "clean build with no changes should exit 0");
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("no affected"),
-        "expected 'no affected' message; got: {stderr}"
+        out.status.success(),
+        "clean build with no changes should exit 0"
+    );
+    // The renderer's `note` helper writes to stdout for consistency
+    // with the rest of the build output.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no affected"),
+        "expected 'no affected' message; got: {stdout}"
     );
 }
 
@@ -1054,10 +1122,14 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("built  a"), "a should build; got: {s}");
-    assert!(s.contains("built  b"), "b should also build (transitive); got: {s}");
+    assert!(built(&s, "a"), "a should build; got: {s}");
+    assert!(built(&s, "b"), "b should also build (transitive); got: {s}");
 }
 
 #[test]
@@ -1099,13 +1171,24 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(out.status.success(), "affected failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "affected failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
     // Sorted: a, c. (b isn't affected; b's input glob doesn't match src/a/**.)
-    assert_eq!(lines, vec!["a", "c"], "expected just 'a' and 'c'; got: {stdout}");
+    assert_eq!(
+        lines,
+        vec!["a", "c"],
+        "expected just 'a' and 'c'; got: {stdout}"
+    );
     // Nothing was built.
-    assert!(!ws.join("a.out").exists(), "a.out must not exist - affected shouldn't build");
+    assert!(
+        !ws.join("a.out").exists(),
+        "a.out must not exist - affected shouldn't build"
+    );
     assert!(!ws.join("c.out").exists(), "c.out must not exist");
 }
 
@@ -1137,9 +1220,15 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(out.status.success(), "affected with no matches should exit 0");
+    assert!(
+        out.status.success(),
+        "affected with no matches should exit 0"
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.trim().is_empty(), "expected empty stdout; got: {stdout:?}");
+    assert!(
+        stdout.trim().is_empty(),
+        "expected empty stdout; got: {stdout:?}"
+    );
 }
 
 #[test]
@@ -1171,20 +1260,40 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(out1.status.success(), "explain failed: {}", String::from_utf8_lossy(&out1.stderr));
+    assert!(
+        out1.status.success(),
+        "explain failed: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
     let s1 = String::from_utf8_lossy(&out1.stdout);
-    assert!(s1.contains("target:      demo"), "missing target header; got: {s1}");
-    assert!(s1.contains("cache key:"), "missing cache key line; got: {s1}");
+    assert!(
+        s1.contains("target:      demo"),
+        "missing target header; got: {s1}"
+    );
+    assert!(
+        s1.contains("cache key:"),
+        "missing cache key line; got: {s1}"
+    );
     assert!(s1.contains("cache state: miss"), "expected miss; got: {s1}");
-    assert!(s1.contains("USER_VAR=hello"), "user env should appear; got: {s1}");
+    assert!(
+        s1.contains("USER_VAR=hello"),
+        "user env should appear; got: {s1}"
+    );
     assert!(
         s1.contains("GIANT_TARGET_TRIPLE="),
         "built-in env should appear; got: {s1}"
     );
-    assert!(s1.contains("in.txt"), "in.txt should be listed as input; got: {s1}");
+    assert!(
+        s1.contains("in.txt"),
+        "in.txt should be listed as input; got: {s1}"
+    );
 
     // Build, then re-explain: should report HIT with outputs metadata.
-    let build = Command::new(giant_bin()).arg("build").current_dir(ws).output().unwrap();
+    let build = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
     assert!(build.status.success());
 
     let out2 = Command::new(giant_bin())
@@ -1195,7 +1304,10 @@ targets:
     assert!(out2.status.success());
     let s2 = String::from_utf8_lossy(&out2.stdout);
     assert!(s2.contains("cache state: HIT"), "expected HIT; got: {s2}");
-    assert!(s2.contains("outputs (from cache,"), "expected outputs section; got: {s2}");
+    assert!(
+        s2.contains("outputs (from cache,"),
+        "expected outputs section; got: {s2}"
+    );
     assert!(s2.contains("out.txt"), "out.txt should appear; got: {s2}");
     assert!(
         s2.contains("outputs_content_hash:"),
@@ -1229,7 +1341,10 @@ targets:
         .unwrap();
     assert!(!out.status.success(), "unknown target should fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("ghost"), "stderr should name the target; got: {stderr}");
+    assert!(
+        stderr.contains("ghost"),
+        "stderr should name the target; got: {stderr}"
+    );
 }
 
 #[test]
@@ -1264,7 +1379,11 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(out.status.success(), "graph failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "graph failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
     // All three IDs present.
     for id in ["a", "b", "c"] {
@@ -1410,9 +1529,16 @@ targets:
     .unwrap();
 
     // Build to populate the cache.
-    let build = Command::new(giant_bin()).arg("build").current_dir(ws).output().unwrap();
+    let build = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
     assert!(build.status.success());
-    assert!(ws.join("cache/version").exists(), "cache should have been initialised");
+    assert!(
+        ws.join("cache/version").exists(),
+        "cache should have been initialised"
+    );
 
     // Dry-run: shows summary, doesn't delete.
     let dry = Command::new(giant_bin())
@@ -1422,7 +1548,10 @@ targets:
         .unwrap();
     assert!(dry.status.success());
     let s = String::from_utf8_lossy(&dry.stdout);
-    assert!(s.contains("entries:"), "summary should show entries; got: {s}");
+    assert!(
+        s.contains("entries:"),
+        "summary should show entries; got: {s}"
+    );
     assert!(s.contains("Dry run"), "should label as dry run; got: {s}");
     // AC entries should still be on disk.
     let ac_count_after_dry = walkdir::WalkDir::new(ws.join("cache/ac"))
@@ -1438,9 +1567,16 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(clean.status.success(), "clean failed: {}", String::from_utf8_lossy(&clean.stderr));
+    assert!(
+        clean.status.success(),
+        "clean failed: {}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
     let s = String::from_utf8_lossy(&clean.stdout);
-    assert!(s.contains("Cleared"), "expected 'Cleared' message; got: {s}");
+    assert!(
+        s.contains("Cleared"),
+        "expected 'Cleared' message; got: {s}"
+    );
 
     // After clean: cache dir exists but is empty (no AC, CAS, etc.).
     let after_count = walkdir::WalkDir::new(ws.join("cache"))
@@ -1504,7 +1640,11 @@ targets:
     )
     .unwrap();
     // Populate cache.
-    let _ = Command::new(giant_bin()).arg("build").current_dir(ws).output().unwrap();
+    let _ = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
 
     // Run with stdin closed (Command::output gives no tty by default) and no -y.
     let out = Command::new(giant_bin())
@@ -1512,7 +1652,10 @@ targets:
         .current_dir(ws)
         .output()
         .unwrap();
-    assert!(!out.status.success(), "clean without -y in non-interactive should fail");
+    assert!(
+        !out.status.success(),
+        "clean without -y in non-interactive should fail"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("pass -y") || stderr.contains("not a terminal"),
@@ -1586,12 +1729,109 @@ targets:
     }
     let _ = child.wait();
 
-    // Sanity: stderr should mention watch lifecycle.
+    // Sanity: stdout should show the initial build's BUILD line for
+    // `demo` (the renderer's output, all on stdout now).
     let mut buf = String::new();
-    let _ = child.stderr.take().unwrap().read_to_string(&mut buf);
+    let _ = child.stdout.take().unwrap().read_to_string(&mut buf);
     assert!(
-        buf.contains("watch:"),
-        "expected watch lifecycle on stderr; got: {buf}"
+        line_has(&buf, "BUILD", "demo"),
+        "expected initial build of demo in watch output; got: {buf}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn watch_respects_pattern_selection() {
+    // Spawn `giant watch go:bin:*` against a fixture with both
+    // `go:bin:server` (matches) and `go:lib:util` (excluded). Editing
+    // the lib's input should NOT trigger a rebuild of the lib; editing
+    // the bin's input should rebuild the bin. Verifies the selection
+    // language is the same one watch enforces per-cycle.
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::write(ws.join("src/bin.txt"), "b1\n").unwrap();
+    std::fs::write(ws.join("src/lib.txt"), "l1\n").unwrap();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: watch_pat
+cache:
+  dir: ./cache
+targets:
+  - id: "go:bin:server"
+    inputs: ["src/bin.txt"]
+    outputs: ["bin.out"]
+    command: "cp src/bin.txt bin.out"
+  - id: "go:lib:util"
+    inputs: ["src/lib.txt"]
+    outputs: ["lib.out"]
+    command: "cp src/lib.txt lib.out"
+"#,
+    )
+    .unwrap();
+
+    let mut child = Command::new(giant_bin())
+        .args(["watch", "go:bin:*"])
+        .current_dir(ws)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn giant watch");
+    let pid = child.id() as i32;
+
+    // Initial build should only touch the bin target.
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(
+        std::fs::read_to_string(ws.join("bin.out")).unwrap().trim(),
+        "b1",
+        "initial build should produce bin.out"
+    );
+    assert!(
+        !ws.join("lib.out").exists(),
+        "lib.out should not be built - go:lib:util is outside the selection"
+    );
+
+    // Edit the lib's input. The watcher will see the change and run a
+    // cycle, but the pattern filter must drop go:lib:util from the
+    // selection, leaving no targets to build.
+    std::fs::write(ws.join("src/lib.txt"), "l2\n").unwrap();
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(
+        !ws.join("lib.out").exists(),
+        "lib.out must still not exist after editing src/lib.txt"
+    );
+
+    // Edit the bin's input. This one IS in the selection - must rebuild.
+    std::fs::write(ws.join("src/bin.txt"), "b2\n").unwrap();
+    std::thread::sleep(Duration::from_millis(1200));
+    assert_eq!(
+        std::fs::read_to_string(ws.join("bin.out")).unwrap().trim(),
+        "b2",
+        "bin should rebuild after its input changed"
+    );
+
+    unsafe {
+        libc::kill(pid, libc::SIGINT);
+    }
+    let _ = child.wait();
+
+    let mut buf = String::new();
+    let _ = child.stdout.take().unwrap().read_to_string(&mut buf);
+    // A `no targets affected` note proves the lib-edit cycle ran with
+    // the filter in place - otherwise we'd see a BUILD for go:lib:util.
+    assert!(
+        buf.contains("no targets affected"),
+        "expected a 'no targets affected' cycle after editing the excluded lib input; got: {buf}"
+    );
+    assert!(
+        !line_has(&buf, "BUILD", "go:lib:util"),
+        "go:lib:util must never appear as built in watch output; got: {buf}"
     );
 }
 
@@ -1652,9 +1892,7 @@ targets:
         "command change should miss cache; got: {stdout}"
     );
     assert_eq!(
-        std::fs::read_to_string(ws.join("out.txt"))
-            .unwrap()
-            .trim(),
+        std::fs::read_to_string(ws.join("out.txt")).unwrap().trim(),
         "second"
     );
 }

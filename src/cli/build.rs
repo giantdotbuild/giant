@@ -4,6 +4,7 @@ use crate::events::Event;
 use crate::executor::{BuildJob, build};
 use crate::git;
 use crate::model::TargetId;
+use crate::renderer::{self, ColorChoice, Renderer};
 use crate::selection;
 use clap::Args;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,27 @@ pub struct BuildArgs {
     /// to invoke git.
     #[arg(long, value_name = "PATH")]
     pub file: Vec<PathBuf>,
+
+    /// Only print failures and the final summary. Useful in CI.
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+
+    /// When to colorize output. `auto` honors stdout-is-tty and the
+    /// `NO_COLOR` env var.
+    #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
+    pub color: ColorChoice,
+
+    /// Include only targets carrying this tag. Repeatable. Multiple
+    /// values are unioned: `--tag release --tag linux` selects targets
+    /// tagged `release` OR `linux`.
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+
+    /// Exclude targets carrying this tag. Repeatable. Composes with
+    /// `--tag` so `--tag release --no-tag flaky` means "release AND
+    /// NOT flaky".
+    #[arg(long = "no-tag", value_name = "TAG")]
+    pub no_tags: Vec<String>,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -50,20 +72,32 @@ pub enum EventsFormat {
 }
 
 pub async fn execute(args: BuildArgs, global: &super::GlobalFlags) -> anyhow::Result<()> {
+    execute_with_mode(args, global, selection::TestMode::Exclude).await
+}
+
+/// Shared core for `giant build` and `giant test`. The only difference
+/// between them is how `test: true` targets are treated.
+pub(super) async fn execute_with_mode(
+    args: BuildArgs,
+    global: &super::GlobalFlags,
+    test_mode: selection::TestMode,
+) -> anyhow::Result<()> {
     // Event channel + renderer. Used by both the bootstrap and the main
-    // build, so we set it up before calling `prep::prepare`.
+    // build, so we set it up before calling `prep::prepare`. id_width
+    // starts at 0 and gets updated once we have a selection; bootstrap
+    // log lines render with width=0 (just the prefix), which is fine.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(1024);
     let ndjson = matches!(args.events, Some(EventsFormat::Ndjson));
-    let renderer = tokio::spawn(async move {
+    let mode = renderer::detect_mode(args.color, ndjson);
+    let quiet = args.quiet;
+    let renderer_task = tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         let mut out = tokio::io::stdout();
+        // id_width starts at 0; it gets recomputed inside the renderer
+        // once `BuildStarted` arrives with the full target list.
+        let mut r = Renderer::new(mode, 0, quiet);
         while let Some(ev) = rx.recv().await {
-            let line = if ndjson {
-                serde_json::to_string(&ev).unwrap_or_default() + "\n"
-            } else {
-                render_plain(&ev)
-            };
-            if !line.is_empty() {
+            if let Some(line) = r.render(&ev) {
                 let _ = out.write_all(line.as_bytes()).await;
                 let _ = out.flush().await;
             }
@@ -86,34 +120,29 @@ pub async fn execute(args: BuildArgs, global: &super::GlobalFlags) -> anyhow::Re
         Ok(p) => p,
         Err(e) => {
             drop(tx);
-            let _ = renderer.await;
+            let _ = renderer_task.await;
             return Err(e);
         }
     };
 
     // Resolve selection over the merged graph: positional patterns →
-    // optional --affected filter → final list.
-    let pattern_selection: Vec<TargetId> = if args.patterns.is_empty() {
-        prepared
-            .graph
-            .iter()
-            .filter(|(_, spec)| !spec.test)
-            .map(|(id, _)| id.clone())
-            .collect()
-    } else {
-        let mut out = Vec::new();
-        for p in &args.patterns {
-            let exact = TargetId::new(p);
-            if prepared.graph.get(&exact).is_some() {
-                out.push(exact);
-                continue;
-            }
-            drop(tx);
-            let _ = renderer.await;
-            anyhow::bail!("no target matches {p:?} (selection-language is v1.1)");
-        }
-        out
+    // optional --affected filter → final list. The pattern language
+    // (globs + exclusions, tags, test mode - TDD-0011) lives in
+    // `selection`. test_mode comes from the caller so `giant build`
+    // and `giant test` share this code with one flag flipped.
+    let opts = selection::SelectionOpts {
+        tags: args.tags.clone(),
+        no_tags: args.no_tags.clone(),
     };
+    let pattern_selection: Vec<TargetId> =
+        match selection::resolve_patterns(&prepared.graph, &args.patterns, test_mode, &opts) {
+            Ok(v) => v,
+            Err(e) => {
+                drop(tx);
+                let _ = renderer_task.await;
+                return Err(e.into());
+            }
+        };
 
     let selection = if args.affected {
         let changed = resolve_changed_files(&args, prepared.workspace_root.as_path())?;
@@ -125,8 +154,8 @@ pub async fn execute(args: BuildArgs, global: &super::GlobalFlags) -> anyhow::Re
             .collect();
         if intersected.is_empty() {
             drop(tx);
-            let _ = renderer.await;
-            eprintln!("no affected targets");
+            let _ = renderer_task.await;
+            print_note(mode, "no affected targets");
             return Ok(());
         }
         intersected
@@ -136,13 +165,19 @@ pub async fn execute(args: BuildArgs, global: &super::GlobalFlags) -> anyhow::Re
 
     if selection.is_empty() {
         drop(tx);
-        let _ = renderer.await;
-        anyhow::bail!("no targets to build");
+        let _ = renderer_task.await;
+        print_note(mode, "no targets to build");
+        return Ok(());
     }
 
     let build_id = format!("b_{}", prep::short_random());
 
     let (remote, upload_tx, upload_handle) = prep::open_remote(&prepared.config)?;
+
+    // Keep a handle to the cache so we can run post-build eviction
+    // after BuildJob consumes its copy.
+    let cache_for_evict = prepared.cache.clone();
+    let cache_cfg = prepared.config.cache.clone();
 
     let job = BuildJob {
         graph: Arc::new(prepared.graph),
@@ -176,74 +211,56 @@ pub async fn execute(args: BuildArgs, global: &super::GlobalFlags) -> anyhow::Re
     #[cfg(not(feature = "remote"))]
     let _ = upload_handle;
 
-    let _ = renderer.await;
+    let _ = renderer_task.await;
 
+    // Post-build cache eviction (TDD-0012). Silent: runs only if the
+    // local cache is over its size limit. Synchronous because the CLI
+    // exits after this call; we don't have a long-lived runtime to
+    // hand the work to.
+    if summary.counts.failed == 0 {
+        let _ = maybe_evict(&cache_for_evict, &cache_cfg).await;
+    }
+
+    // The renderer already prints the failed-target list in the
+    // summary block; just request a non-zero exit, no extra banner.
     if summary.counts.failed > 0 {
-        anyhow::bail!(
-            "{} target(s) failed: {}",
-            summary.counts.failed,
-            summary
-                .failed_targets
-                .iter()
-                .map(|t| t.as_str().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        return Err(super::SilentExit.into());
     }
     Ok(())
 }
 
-fn render_plain(ev: &Event) -> String {
-    use crate::events::TargetResultKind;
-    match ev {
-        Event::TargetFinished {
-            id,
-            result,
-            duration_ms,
-            error,
-            ..
-        } => {
-            let label = match result {
-                TargetResultKind::Built => "built",
-                TargetResultKind::CacheHit => "cache",
-                TargetResultKind::RemoteCacheHit => "remote",
-                TargetResultKind::ExternalCacheHit => "external",
-                TargetResultKind::Skipped => "skipped",
-                TargetResultKind::Failed => "FAILED",
-            };
-            if let Some(e) = error {
-                format!("{label:>8}  {id}  ({duration_ms}ms) - {e}\n")
-            } else {
-                format!("{label:>8}  {id}  ({duration_ms}ms)\n")
-            }
-        }
-        Event::TargetLog {
-            id, stream, line, ..
-        } => {
-            let s = match stream {
-                crate::events::LogStream::Stdout => "out",
-                crate::events::LogStream::Stderr => "err",
-            };
-            format!("{id} | {s} | {line}\n")
-        }
-        Event::BuildFinished {
-            ok,
-            duration_ms,
-            counts,
-            ..
-        } => {
-            format!(
-                "{} {} built, {} cached, {} failed, {} skipped in {}ms\n",
-                if *ok { "OK" } else { "FAIL" },
-                counts.built,
-                counts.cache_hit,
-                counts.failed,
-                counts.skipped,
-                duration_ms
-            )
-        }
-        _ => String::new(),
+/// If the cache is over its configured trigger, evict down to the
+/// configured target. No-op when `max_size_gb` is unset (eviction
+/// disabled) or the cache is comfortably under the trigger.
+async fn maybe_evict(
+    cache: &crate::cache::LocalCache,
+    cfg: &crate::config::CacheConfig,
+) -> Result<(), crate::cache::CacheError> {
+    let Some(max_gb) = cfg.max_size_gb else {
+        return Ok(());
+    };
+    if max_gb == 0 {
+        return Ok(());
     }
+    let max_bytes = max_gb.saturating_mul(1024 * 1024 * 1024);
+    let trigger = max_bytes.saturating_mul(cfg.evict_when_above_pct as u64) / 100;
+    let target = max_bytes.saturating_mul(cfg.evict_target_pct as u64) / 100;
+    let current = cache.total_size().await?;
+    if current <= trigger {
+        return Ok(());
+    }
+    // 5-minute recency buffer per TDD-0012; protects in-flight builds
+    // in other terminals from having their AC entries evicted.
+    let _ = cache
+        .evict_to(target, std::time::Duration::from_secs(5 * 60))
+        .await?;
+    Ok(())
+}
+
+/// One-off informational line outside the event stream - uses the same
+/// theme the renderer would have used so visual style is consistent.
+fn print_note(mode: renderer::Mode, msg: &str) {
+    print!("{}", renderer::note(&mode.theme(), msg));
 }
 
 /// Resolve the list of changed files from `--file` (explicit) or `--base`

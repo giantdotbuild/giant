@@ -10,9 +10,11 @@
 use crate::model::{CacheKey, ContentHash, TargetId};
 use crate::paths::AbsPath;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 use tokio::task::spawn_blocking;
 
 /// Current on-disk schema version. Bumping requires a migration step.
@@ -270,6 +272,237 @@ impl LocalCache {
         let tmp = self.new_tmp_path()?;
         atomic_write_blocking(&tmp, &path, bytes)
     }
+
+    // -----------------------------------------------------------------
+    // Size accounting + LRU eviction (TDD-0012).
+    //
+    // The v1 design is "scan on demand" - no `size.json` counter, no
+    // `refs.json` index. Eviction runs on a background task after a
+    // build if the total exceeds the limit. The index files in the
+    // TDD are a future optimization for >100k-entry caches.
+    // -----------------------------------------------------------------
+
+    /// Total bytes consumed by the cache (ac/ + cas/ + structural/ +
+    /// log/). Excludes tmp/ and version. One filesystem walk; doesn't
+    /// open files.
+    pub async fn total_size(&self) -> Result<u64, CacheError> {
+        let root = self.root.as_path().to_path_buf();
+        let n = spawn_blocking(move || compute_total_size(&root)).await??;
+        Ok(n)
+    }
+
+    /// LRU eviction down to `target_bytes`. Oldest AC entries (by
+    /// file mtime) are evicted first. Each evicted AC entry's referenced
+    /// CAS blobs are removed too - but only if no surviving AC entry
+    /// still references them.
+    ///
+    /// `min_age` is a recency buffer: entries with mtime newer than
+    /// `now - min_age` are skipped. This avoids evicting cache lines
+    /// that another build in another terminal might be actively using.
+    /// (TDD-0012 §"Concurrent builds during eviction".)
+    pub async fn evict_to(
+        &self,
+        target_bytes: u64,
+        min_age: Duration,
+    ) -> Result<EvictionReport, CacheError> {
+        let root = self.root.as_path().to_path_buf();
+        spawn_blocking(move || evict_to_blocking(&root, target_bytes, min_age)).await?
+    }
+}
+
+/// Result of one `evict_to` call. Counts approximate (over-eviction
+/// possible by a few percent) but never over-reports.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EvictionReport {
+    pub entries_evicted: u64,
+    pub bytes_freed: u64,
+    pub bytes_remaining: u64,
+}
+
+/// Sum the file sizes under the cache's tracked subdirs.
+fn compute_total_size(root: &Path) -> Result<u64, CacheError> {
+    let mut total = 0u64;
+    for sub in ["ac", "cas", "structural", "log"] {
+        let dir = root.join(sub);
+        if dir.exists() {
+            total = total.saturating_add(dir_size(&dir)?);
+        }
+    }
+    Ok(total)
+}
+
+fn dir_size(p: &Path) -> Result<u64, CacheError> {
+    let mut total = 0u64;
+    for entry in walkdir::WalkDir::new(p).into_iter().filter_map(Result::ok) {
+        if entry.file_type().is_file()
+            && let Ok(m) = entry.metadata()
+        {
+            total = total.saturating_add(m.len());
+        }
+    }
+    Ok(total)
+}
+
+/// Concrete content hashes (hex strings) an AC entry references in CAS.
+fn referenced_hashes(entry: &AcEntry) -> Vec<String> {
+    let mut out = Vec::with_capacity(entry.outputs.len() + 2);
+    for o in &entry.outputs {
+        out.push(o.content_hash.clone());
+    }
+    if let Some(h) = &entry.stdout_blob {
+        out.push(h.clone());
+    }
+    if let Some(h) = &entry.stderr_blob {
+        out.push(h.clone());
+    }
+    out
+}
+
+fn cas_path_for_hex(root: &Path, hex: &str) -> Option<PathBuf> {
+    if hex.len() < 2 {
+        return None;
+    }
+    Some(root.join("cas").join(&hex[..2]).join(hex))
+}
+
+fn evict_to_blocking(
+    root: &Path,
+    target: u64,
+    min_age: Duration,
+) -> Result<EvictionReport, CacheError> {
+    let initial_size = compute_total_size(root)?;
+    if initial_size <= target {
+        return Ok(EvictionReport {
+            entries_evicted: 0,
+            bytes_freed: 0,
+            bytes_remaining: initial_size,
+        });
+    }
+
+    let now = SystemTime::now();
+    let ac_dir = root.join("ac");
+
+    // (mtime, path, ac_file_size, referenced_hashes)
+    let mut entries: Vec<(SystemTime, PathBuf, u64, Vec<String>)> = Vec::new();
+    for entry in walkdir::WalkDir::new(&ac_dir)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path().to_path_buf();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let mtime = meta.modified().unwrap_or(now);
+        let size = meta.len();
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let parsed: AcEntry = match serde_json::from_slice(&bytes) {
+            Ok(e) => e,
+            Err(_) => {
+                // Corrupt AC - TDD-0012 says delete unconditionally.
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+        };
+        let refs = referenced_hashes(&parsed);
+        entries.push((mtime, path, size, refs));
+    }
+    entries.sort_by_key(|(mtime, _, _, _)| *mtime);
+
+    // Count references per hash across ALL AC entries; we'll decrement
+    // as we add candidates to the evict set. A blob becomes "freeable"
+    // when its count drops to 0.
+    let mut ref_count: HashMap<String, u32> = HashMap::new();
+    for entry in &entries {
+        for r in &entry.3 {
+            *ref_count.entry(r.clone()).or_insert(0) += 1;
+        }
+    }
+
+    // Pre-stat referenced CAS blob sizes so the "stop" condition is
+    // accurate. Missing blobs (already gone) contribute 0.
+    let mut blob_size: HashMap<String, u64> = HashMap::new();
+    for hash in ref_count.keys() {
+        let Some(path) = cas_path_for_hex(root, hash) else {
+            continue;
+        };
+        if let Ok(m) = path.metadata() {
+            blob_size.insert(hash.clone(), m.len());
+        }
+    }
+
+    // Plan eviction: walk oldest-first, skip the recency buffer.
+    let mut evict_indices: Vec<usize> = Vec::new();
+    let mut estimated_freed: u64 = 0;
+    for (i, entry) in entries.iter().enumerate() {
+        if initial_size.saturating_sub(estimated_freed) <= target {
+            break;
+        }
+        if let Ok(age) = now.duration_since(entry.0)
+            && age < min_age
+        {
+            continue;
+        }
+        // Tentatively evict: AC + each blob whose ref count drops to 0.
+        estimated_freed = estimated_freed.saturating_add(entry.2);
+        for r in &entry.3 {
+            if let Some(c) = ref_count.get_mut(r) {
+                *c = c.saturating_sub(1);
+                if *c == 0
+                    && let Some(sz) = blob_size.get(r)
+                {
+                    estimated_freed = estimated_freed.saturating_add(*sz);
+                }
+            }
+        }
+        evict_indices.push(i);
+    }
+
+    // Apply the plan. `ref_count` is now post-decrement, so an entry
+    // with count 0 is freeable; non-zero means a surviving AC entry
+    // still wants it.
+    let mut bytes_freed: u64 = 0;
+    let mut entries_evicted: u64 = 0;
+    for i in evict_indices {
+        let (_, path, size, refs) = &entries[i];
+        if std::fs::remove_file(path).is_err() {
+            continue;
+        }
+        bytes_freed = bytes_freed.saturating_add(*size);
+        entries_evicted += 1;
+        for hash in refs {
+            // If another AC still references it, leave the blob alone.
+            if ref_count.get(hash).copied().unwrap_or(1) != 0 {
+                continue;
+            }
+            let Some(blob) = cas_path_for_hex(root, hash) else {
+                continue;
+            };
+            if let Ok(m) = blob.metadata() {
+                let sz = m.len();
+                if std::fs::remove_file(&blob).is_ok() {
+                    bytes_freed = bytes_freed.saturating_add(sz);
+                    // Mark as deleted so a sibling AC referencing the
+                    // same blob doesn't try to delete it again next
+                    // iteration.
+                    if let Some(c) = ref_count.get_mut(hash) {
+                        *c = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(EvictionReport {
+        entries_evicted,
+        bytes_freed,
+        bytes_remaining: initial_size.saturating_sub(bytes_freed),
+    })
 }
 
 /// Sync implementation of write-tmp-then-rename. Used by both the async
@@ -316,8 +549,6 @@ pub struct AcEntry {
     pub built_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub built_by: Option<String>,
-    #[serde(default)]
-    pub sandboxed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,7 +661,6 @@ mod tests {
             duration_ms: 10,
             built_at: "2026-05-20T00:00:00Z".into(),
             built_by: None,
-            sandboxed: false,
         };
         cache.put_ac(&key, &entry).await.unwrap();
         let got = cache.get_ac(&key).await.unwrap().unwrap();
@@ -476,5 +706,173 @@ mod tests {
         let _ = cache.put_cas(b"some bytes".to_vec()).await.unwrap();
         let entries: Vec<_> = std::fs::read_dir(dir.path().join("tmp")).unwrap().collect();
         assert!(entries.is_empty(), "tmp/ should be empty after write");
+    }
+
+    // -------- eviction (TDD-0012) --------
+
+    /// Build an AC entry that references a list of CAS blobs (which
+    /// the caller must have put_cas'd already). Doesn't model
+    /// outputs_content_hash specially - that field isn't itself a CAS
+    /// blob, so it doesn't affect eviction accounting.
+    async fn put_ac_with_blobs(
+        cache: &LocalCache,
+        id: &str,
+        blob_hashes: &[ContentHash],
+    ) -> CacheKey {
+        let key = CacheKey::new(ContentHash::of_bytes(id.as_bytes()));
+        let outputs: Vec<OutputEntry> = blob_hashes
+            .iter()
+            .enumerate()
+            .map(|(i, h)| OutputEntry {
+                path: format!("out-{i}"),
+                content_hash: h.to_hex(),
+                size: 0,
+                executable: false,
+                mode: "0644".into(),
+                symlink_target: None,
+            })
+            .collect();
+        let entry = AcEntry {
+            schema: AC_SCHEMA,
+            target_id: id.into(),
+            cache_key: key.to_hex(),
+            command: "true".into(),
+            cwd: "".into(),
+            outputs,
+            outputs_content_hash: "".into(),
+            stdout_blob: None,
+            stderr_blob: None,
+            exit_code: 0,
+            duration_ms: 1,
+            built_at: "2026-01-01T00:00:00Z".into(),
+            built_by: None,
+        };
+        cache.put_ac(&key, &entry).await.unwrap();
+        key
+    }
+
+    /// Force an AC file's mtime so eviction sees it as old.
+    fn set_mtime_secs_ago(path: &Path, secs: u64) {
+        let when = std::time::SystemTime::now() - Duration::from_secs(secs);
+        let ft = filetime::FileTime::from_system_time(when);
+        filetime::set_file_mtime(path, ft).expect("set mtime");
+    }
+
+    #[tokio::test]
+    async fn total_size_zero_for_empty_cache() {
+        let (cache, _dir) = temp_cache().await;
+        assert_eq!(cache.total_size().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn total_size_counts_ac_and_cas() {
+        let (cache, _dir) = temp_cache().await;
+        let h = cache.put_cas(b"hello there".to_vec()).await.unwrap();
+        let _ = put_ac_with_blobs(&cache, "t", &[h]).await;
+        let size = cache.total_size().await.unwrap();
+        assert!(
+            size > 11,
+            "should include both AC json and CAS blob: {size}"
+        );
+    }
+
+    #[tokio::test]
+    async fn evict_noop_when_under_target() {
+        let (cache, _dir) = temp_cache().await;
+        let h = cache.put_cas(b"x".to_vec()).await.unwrap();
+        let _ = put_ac_with_blobs(&cache, "t", &[h]).await;
+        let r = cache.evict_to(1_000_000, Duration::ZERO).await.unwrap();
+        assert_eq!(r.entries_evicted, 0);
+        assert_eq!(r.bytes_freed, 0);
+        // Cache still intact.
+        assert!(cache.total_size().await.unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn evict_drops_oldest_first() {
+        let (cache, dir) = temp_cache().await;
+        // Three independent AC entries, each with its own blob.
+        let h_old = cache.put_cas(vec![b'a'; 1024]).await.unwrap();
+        let k_old = put_ac_with_blobs(&cache, "old", &[h_old]).await;
+        let h_mid = cache.put_cas(vec![b'b'; 1024]).await.unwrap();
+        let k_mid = put_ac_with_blobs(&cache, "mid", &[h_mid]).await;
+        let h_new = cache.put_cas(vec![b'c'; 1024]).await.unwrap();
+        let _k_new = put_ac_with_blobs(&cache, "new", std::slice::from_ref(&h_new)).await;
+
+        // Backdate the first two so they're outside the recency buffer.
+        set_mtime_secs_ago(&cache.ac_path(&k_old), 3600);
+        set_mtime_secs_ago(&cache.ac_path(&k_mid), 1800);
+
+        // Aim well below current size - should evict old + mid; keep new.
+        let r = cache.evict_to(1000, Duration::from_secs(60)).await.unwrap();
+        assert!(
+            r.entries_evicted >= 2,
+            "evicted {} entries",
+            r.entries_evicted
+        );
+        assert!(
+            cache.get_ac(&k_old).await.unwrap().is_none(),
+            "old should be gone"
+        );
+        assert!(
+            cache.get_ac(&k_mid).await.unwrap().is_none(),
+            "mid should be gone"
+        );
+        // The blobs that only the evicted entries referenced should be gone too.
+        assert!(!cache.has_cas(&h_old).await, "old's blob should be gone");
+        assert!(!cache.has_cas(&h_mid).await, "mid's blob should be gone");
+        // new is within the buffer → safe.
+        assert!(cache.has_cas(&h_new).await, "new's blob must survive");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn evict_respects_recency_buffer() {
+        let (cache, _dir) = temp_cache().await;
+        let h = cache.put_cas(vec![b'z'; 4096]).await.unwrap();
+        let _ = put_ac_with_blobs(&cache, "fresh", std::slice::from_ref(&h)).await;
+        // No mtime backdating; everything is "right now".
+        let r = cache.evict_to(0, Duration::from_secs(60)).await.unwrap();
+        assert_eq!(r.entries_evicted, 0, "buffer should skip everything");
+        assert!(cache.has_cas(&h).await);
+    }
+
+    #[tokio::test]
+    async fn evict_keeps_shared_blobs() {
+        // Two AC entries reference the same CAS blob. Evicting the old
+        // one must not delete the blob - the newer one still needs it.
+        let (cache, _dir) = temp_cache().await;
+        let shared = cache.put_cas(vec![b's'; 2048]).await.unwrap();
+        let k_old = put_ac_with_blobs(&cache, "old", std::slice::from_ref(&shared)).await;
+        let _k_new = put_ac_with_blobs(&cache, "new", std::slice::from_ref(&shared)).await;
+
+        set_mtime_secs_ago(&cache.ac_path(&k_old), 3600);
+
+        let _ = cache.evict_to(1000, Duration::from_secs(60)).await.unwrap();
+        assert!(
+            cache.get_ac(&k_old).await.unwrap().is_none(),
+            "old AC should be evicted"
+        );
+        assert!(cache.has_cas(&shared).await, "shared blob must survive");
+    }
+
+    #[tokio::test]
+    async fn evict_handles_corrupt_ac_during_real_pass() {
+        // When eviction does run, it sweeps corrupt AC entries it
+        // encounters along the way. (No unconditional sweep - we only
+        // scan when over-limit, by design.)
+        let (cache, dir) = temp_cache().await;
+        let h_good = cache.put_cas(vec![b'g'; 4096]).await.unwrap();
+        let k_good = put_ac_with_blobs(&cache, "good", std::slice::from_ref(&h_good)).await;
+        // Backdate the good one so it's the eviction candidate.
+        set_mtime_secs_ago(&cache.ac_path(&k_good), 3600);
+        // Plant a corrupt AC file alongside.
+        let bogus_path = dir.path().join("ac").join("ab").join("abadbabe.json");
+        std::fs::create_dir_all(bogus_path.parent().unwrap()).unwrap();
+        std::fs::write(&bogus_path, b"{ not json").unwrap();
+
+        // Target below current size → real eviction pass runs.
+        let _ = cache.evict_to(0, Duration::from_secs(60)).await.unwrap();
+        assert!(!bogus_path.exists(), "corrupt AC should be deleted in-pass");
     }
 }
