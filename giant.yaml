@@ -1,0 +1,137 @@
+workspace:
+  name: giant
+
+# Local cache lives at the workspace root so it's easy to inspect /
+# clear. ~/.cache/giant is fine for personal use; we override to
+# keep CI / contributor environments self-contained.
+cache:
+  dir: .giant/cache
+
+# -----------------------------------------------------------------------------
+# Targets - content-addressed cached commands.
+#
+# Cargo manages its own build cache, so the bin:* targets here aren't trying
+# to cache the build itself - they cache the "copy into ./bin/" step so
+# the workspace's giant + giant-task binaries refresh whenever the sources
+# change. ./bin is on PATH via devenv's enterShell, so a fresh `giant build`
+# means the next `giant task ...` uses the just-built version. (Unix
+# happily replaces a running binary; the in-flight process keeps the old
+# inode.)
+#
+# Bootstrap: `cargo install --path .` once, then giant builds giant.
+# -----------------------------------------------------------------------------
+targets:
+  - id: "bin:giant"
+    inputs:
+      - "src/**/*.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+    outputs: ["bin/giant"]
+    command: "cargo build --release --bin giant && install -m 0755 target/release/giant bin/giant"
+    timeout: 600
+
+  - id: "bin:giant-task"
+    inputs:
+      - "crates/giant-task/src/**/*.rs"
+      - "crates/giant-task/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+    outputs: ["bin/giant-task"]
+    # -p selects the workspace member; --bin disambiguates within it.
+    command: "cargo build --release -p giant-task --bin giant-task && install -m 0755 target/release/giant-task bin/giant-task"
+    timeout: 600
+
+  - id: "docs:install"
+    inputs:
+      - "docs-site/package.json"
+      - "docs-site/package-lock.json"
+    outputs:
+      - "docs-site/node_modules/.package-lock.json"
+    cwd: "docs-site"
+    command: "npm ci"
+    timeout: 180
+
+  - id: "docs:build"
+    # Explicit input list - input globs don't (yet) support `!exclude`,
+    # so we list the source dirs + top-level files rather than `**/*`
+    # which would pick up node_modules/, dist/, and .astro/.
+    inputs:
+      - "docs-site/src/**/*"
+      - "docs-site/public/**/*"
+      - "docs-site/astro.config.mjs"
+      - "docs-site/tsconfig.json"
+      - "docs-site/package.json"
+      - "docs-site/package-lock.json"
+    outputs:
+      - "docs-site/dist/index.html"
+      - "docs-site/dist/sitemap-index.xml"
+    cwd: "docs-site"
+    command: "npx astro build"
+    timeout: 120
+    deps: ["docs:install"]
+
+# -----------------------------------------------------------------------------
+# Tasks - named commands. Most are `cargo X` wrappers; the docs pipeline
+# strings together the install + build via `deps:`.
+#
+# Why have these at all when `cargo X` is right there? Two reasons:
+# 1. `giant task list` is one place to see everything you can do.
+# 2. `check` ties together fmt-check + clippy + test in one invocation,
+#    which is what CI runs and what you want before a tag.
+# -----------------------------------------------------------------------------
+tasks:
+  fmt:
+    command: "cargo fmt --all"
+    description: "format all Rust code"
+
+  fmt-check:
+    command: "cargo fmt --all -- --check"
+    description: "fail if anything would be reformatted"
+
+  lint:
+    command: "cargo clippy --workspace --all-targets -- -D warnings"
+    description: "clippy with warnings-as-errors"
+
+  test-all:
+    command: "cargo test --workspace"
+    description: "the full workspace test suite (core + giant-task)"
+
+  perf:
+    command: "cargo test --release --test perf -- --ignored --nocapture"
+    description: "run the perf benchmarks against CLAUDE.md budgets"
+
+  check:
+    command: "echo all checks passed"
+    description: "validation pipeline - runs before a release"
+    needs: ["fmt-check", "lint", "test-all"]
+
+  release-build:
+    command: "cargo build --release --workspace"
+    description: "release-mode build of giant + giant-task"
+
+  release:
+    command: "echo ready to tag"
+    description: "everything green for a release tag"
+    needs: ["check", "release-build", "docs"]
+
+  bin:
+    command: "echo refreshed bin/giant and bin/giant-task"
+    description: "build the binaries and install them into ./bin"
+    deps: ["bin:giant", "bin:giant-task"]
+
+  docs:
+    command: "echo docs built to docs-site/dist/"
+    description: "build the static docs site"
+    deps: ["docs:build"]
+
+  docs-dev:
+    command: "npx astro dev"
+    description: "serve the docs site at localhost:4321 (blocks)"
+    deps: ["docs:install"]
+    cwd: "docs-site"
+
+  docs-preview:
+    command: "npx astro preview"
+    description: "preview the production-built docs site"
+    deps: ["docs:build"]
+    cwd: "docs-site"

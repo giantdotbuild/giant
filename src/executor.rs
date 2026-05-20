@@ -839,17 +839,10 @@ async fn try_cache_hit(
             return Ok(None);
         };
         let path = workspace_root.as_path().join(out.rel_path_string());
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(&path, &blob).await?;
-        #[cfg(unix)]
-        if out.executable {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = tokio::fs::metadata(&path).await?.permissions();
-            perms.set_mode(0o755);
-            tokio::fs::set_permissions(&path, perms).await?;
-        }
+        // `atomic_write_output` does the create_dir_all + tmp-then-rename
+        // dance so a target writing over its own running binary works
+        // (Linux ETXTBSY blocks open-for-write but allows rename-over).
+        crate::cache::atomic_write_output(path, blob, out.executable).await?;
     }
 
     // Read the outputs_content_hash from the entry; this is the value
@@ -922,17 +915,7 @@ async fn try_remote_hit(
         ctx.cache.put_cas(blob.clone()).await?;
 
         let dst = ctx.workspace_root.as_path().join(&out.path);
-        if let Some(parent) = dst.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(&dst, &blob).await?;
-        #[cfg(unix)]
-        if out.executable {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = tokio::fs::metadata(&dst).await?.permissions();
-            perms.set_mode(0o755);
-            tokio::fs::set_permissions(&dst, perms).await?;
-        }
+        crate::cache::atomic_write_output(dst, blob, out.executable).await?;
     }
 
     // Write the AC entry to local cache too so the next run goes

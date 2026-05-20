@@ -209,15 +209,54 @@ A short tour of what's where:
 
 Design docs are in `docs/adr/` (decisions) and `docs/tdd/` (technical specs).
 
+## Dogfood
+
+Giant uses its own `giant.yaml` for everything in this repo that isn't
+the cargo build of the engine itself.
+
+**Bootstrap once:**
+
+```bash
+cargo install --path .        # gives you a `giant` on PATH
+giant task bin                # builds bin/giant + bin/giant-task
+```
+
+The `bin/` directory is on PATH inside the devenv shell (via
+`enterShell`), so once `giant task bin` runs once, the freshly-built
+binaries replace whatever the devenv shell would otherwise pick. From
+then on giant builds itself - the next `giant task bin` runs the
+just-built giant, which rebuilds itself if sources changed and copies
+the new binary back into `bin/`. Unix is happy to replace a running
+binary; the in-flight process keeps the old inode.
+
+**Day-to-day:**
+
+```bash
+giant task list             # see every command this repo defines
+giant task fmt              # cargo fmt --all
+giant task check            # fmt-check + clippy + test-all
+giant task docs             # builds the static docs site
+giant task docs-dev         # serves the docs site at :4321
+giant task release          # check + release-build + docs
+giant task bin              # refresh bin/giant + bin/giant-task
+giant build docs:build      # the docs-site cache layer (npm install + astro build)
+```
+
+`giant build docs:build` is the interesting one - npm install + astro
+build take ~5 s cold and 0 ms warm, because giant caches the directory
+contents.
+
 ## Status
 
 Working: build, test, watch, affected, graph, explain, clean, porcelain dispatch,
 local + remote cache, discovery, structural inputs with git fast-path, NDJSON event
-stream, LRU cache eviction.
+stream, LRU cache eviction. `giant-task` ships in `crates/giant-task/` and handles
+tasks, services with readiness probes, needs/finally, args, shell completions
+across six shells.
 
 Not yet built: command channel for porcelains to send commands back to the engine
-(`giant serve`), tags-as-toggleable surface in a TUI, `giant-task` and `giant-tui`
-porcelains themselves.
+(`giant serve`), tags-as-toggleable surface in a TUI, the `giant-tui` porcelain
+itself.
 
 ## License
 

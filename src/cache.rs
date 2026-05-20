@@ -505,6 +505,63 @@ fn evict_to_blocking(
     })
 }
 
+/// Atomically write `bytes` to an arbitrary destination path. Uses a
+/// sibling temp file in `dst`'s directory (so rename stays on one
+/// filesystem) and applies the executable bit before the rename - so
+/// `dst` goes from non-existent to fully-formed in one step.
+///
+/// Critically, this is the *only safe way* to overwrite a
+/// currently-executing binary on Linux: open-for-write fails with
+/// ETXTBSY, but rename-over the running binary is fine (the running
+/// process keeps the old inode; future invocations get the new one).
+/// Used by the executor's cache-restore paths so `bin:giant`-style
+/// targets self-replace cleanly when warm-cache-restoring.
+pub async fn atomic_write_output(
+    dst: PathBuf,
+    bytes: Vec<u8>,
+    executable: bool,
+) -> std::io::Result<()> {
+    spawn_blocking(move || atomic_write_output_blocking(&dst, &bytes, executable))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+fn atomic_write_output_blocking(dst: &Path, bytes: &[u8], executable: bool) -> std::io::Result<()> {
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let tmp_name = format!(
+        ".{}.tmp-{}-{}",
+        dst.file_name().and_then(|n| n.to_str()).unwrap_or("write"),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0),
+    );
+    let tmp = parent.join(tmp_name);
+    let staged = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if executable { 0o755 } else { 0o644 };
+            f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = staged {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, dst) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Sync implementation of write-tmp-then-rename. Used by both the async
 /// `atomic_write` (via spawn_blocking) and the sync sidecar helpers
 /// (called from inside another spawn_blocking already).
