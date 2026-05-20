@@ -1061,6 +1061,88 @@ targets:
 }
 
 #[test]
+fn affected_subcommand_lists_targets_without_building() {
+    // `giant affected --file <path>` should print sorted target IDs and
+    // NOT actually run any commands. We assert no output files appeared.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir_all(ws.join("src/a")).unwrap();
+    std::fs::create_dir_all(ws.join("src/b")).unwrap();
+    std::fs::write(ws.join("src/a/main.go"), "package main\n").unwrap();
+    std::fs::write(ws.join("src/b/main.go"), "package main\n").unwrap();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: aff_cmd
+cache:
+  dir: ./cache
+targets:
+  - id: "a"
+    inputs: ["src/a/**/*"]
+    outputs: ["a.out"]
+    command: "echo a > a.out"
+  - id: "b"
+    inputs: ["src/b/**/*"]
+    outputs: ["b.out"]
+    command: "echo b > b.out"
+  - id: "c"
+    inputs: ["a.out"]
+    outputs: ["c.out"]
+    command: "cp a.out c.out"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .args(["affected", "--file", "src/a/main.go"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "affected failed: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    // Sorted: a, c. (b isn't affected; b's input glob doesn't match src/a/**.)
+    assert_eq!(lines, vec!["a", "c"], "expected just 'a' and 'c'; got: {stdout}");
+    // Nothing was built.
+    assert!(!ws.join("a.out").exists(), "a.out must not exist - affected shouldn't build");
+    assert!(!ws.join("c.out").exists(), "c.out must not exist");
+}
+
+#[test]
+fn affected_subcommand_empty_is_clean_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::write(ws.join("src/main.go"), "package main\n").unwrap();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: aff_empty
+cache:
+  dir: ./cache
+targets:
+  - id: "a"
+    inputs: ["src/**/*"]
+    outputs: ["a.out"]
+    command: "echo a > a.out"
+"#,
+    )
+    .unwrap();
+
+    // --file pointing at something that matches no target.
+    let out = Command::new(giant_bin())
+        .args(["affected", "--file", "README.md"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "affected with no matches should exit 0");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.trim().is_empty(), "expected empty stdout; got: {stdout:?}");
+}
+
+#[test]
 fn cache_miss_when_command_changes() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();

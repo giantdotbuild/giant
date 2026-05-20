@@ -2,7 +2,9 @@
 
 use clap::{Parser, Subcommand};
 
+mod affected;
 mod build;
+pub(crate) mod prep;
 
 #[derive(Parser, Debug)]
 #[command(name = "giant", version, about = "Build orchestration with content-addressed caching")]
@@ -27,6 +29,10 @@ pub struct Cli {
 pub enum Commands {
     /// Build targets.
     Build(build::BuildArgs),
+
+    /// List targets that would rebuild given a set of changed files.
+    /// Doesn't actually run anything.
+    Affected(affected::AffectedArgs),
 }
 
 /// Entry point invoked from `main`.
@@ -44,6 +50,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Build(args) => build::execute(args, &global).await,
+        Commands::Affected(args) => affected::execute(args, &global).await,
     }
 }
 

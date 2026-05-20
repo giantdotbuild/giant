@@ -1,0 +1,6 @@
+# Anything giant produces if you run it against this fixture directly
+# (instead of via the integration test, which uses a tempdir copy).
+cache/
+bin/
+.giant/
+go.sum
