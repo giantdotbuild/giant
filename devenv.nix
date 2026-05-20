@@ -25,6 +25,13 @@
   # Go is available for discovery-script testing in fixtures.
   languages.go.enable = true;
 
+  # Node is used to build the docs site (docs-site/, Astro + Starlight).
+  # Doesn't affect the giant binary at all - pure static-site generator.
+  languages.javascript = {
+    enable = true;
+    npm.enable = true;
+  };
+
   enterShell = ''
     export PATH="$DEVENV_ROOT"/bin:$PATH
   '';

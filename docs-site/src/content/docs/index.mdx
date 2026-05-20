@@ -1,0 +1,137 @@
+---
+title: Giant
+description: Build orchestration with content-addressed caching for monorepos.
+template: splash
+editUrl: false
+lastUpdated: false
+---
+
+import { Image } from 'astro:assets';
+import giantAndRobots from '../../assets/giant-and-robots.png';
+import giantGarden from '../../assets/giant-garden.png';
+
+<div class="landing">
+
+<section class="hero">
+  <div>
+    <span class="eyebrow">Build orchestration · v0.1</span>
+    <h1 class="hero-title">A build tool that grows your monorepo, not your headaches.</h1>
+    <p class="hero-tag">
+      Giant tracks dependencies across language boundaries, builds in parallel,
+      and caches outputs locally and remotely. Tiny core, language-agnostic engine,
+      one config file.
+    </p>
+    <div class="cta-row">
+      <a class="cta cta-primary" href="/start/quickstart/">Get started →</a>
+      <a class="cta cta-secondary" href="https://github.com/johnae/giant/releases">Download</a>
+      <a class="cta cta-secondary" href="https://github.com/johnae/giant">GitHub</a>
+    </div>
+    <div class="install-snippet">
+      <span>$</span> curl -fsSL giant.build/install.sh | sh
+    </div>
+  </div>
+  <div class="hero-art">
+    <Image src={giantAndRobots} alt="A green moss-covered giant tending a city of small robots, with a sign reading 'We grow together - built to serve, programmed to care.'" />
+  </div>
+</section>
+
+<section class="terminal">
+  <div class="terminal-bar">
+    <span></span><span></span><span></span>
+  </div>
+  <pre set:html={`<code><span class="prompt">$</span> giant build
+<span class="ok">✓ BUILD</span>    proto:api                <span class="dim">340ms</span>
+<span class="cache">✓ CACHE</span>    go:lib:auth                <span class="dim">2ms</span>
+<span class="remote">↓ REMOTE</span>   rust:lib:core            <span class="dim">120ms</span>
+<span class="ok">✓ BUILD</span>    go:bin:server           <span class="dim">1.24s</span>
+
+  <span class="ok">OK</span>    1 built · 2 cached · 1 remote  in <span class="dim">1.27s</span></code>`} />
+</section>
+
+<section class="pillars">
+  <div class="pillar">
+    <h3>Language-agnostic</h3>
+    <p>
+      The engine knows nothing about Go, Rust, or Docker. Targets are just
+      <code>inputs → command → outputs</code>. Discovery scripts materialize
+      the rest at config time.
+    </p>
+  </div>
+  <div class="pillar">
+    <h3>Content-addressed cache</h3>
+    <p>
+      SHA-256 keys over inputs, environment, and dependency hashes. Local
+      cache by default; bring your own bazel-remote, sccache, or S3
+      backend for shared builds.
+    </p>
+  </div>
+  <div class="pillar">
+    <h3>Tiny core</h3>
+    <p>
+      One static binary. No JVM, no daemon, no plugins loaded into your
+      process. Optional porcelains extend the CLI via PATH, the
+      git/cargo model.
+    </p>
+  </div>
+</section>
+
+<section class="belief">
+  <Image src={giantGarden} alt="The Giant kneeling in a forest clearing, tending small robot saplings." />
+  <div>
+    <h2>Built to serve, programmed to care.</h2>
+    <p>
+      Giant is a quiet build tool. It doesn't run a daemon. It doesn't
+      take over your terminal. It doesn't ship a TUI you didn't ask for.
+      You run <code>giant build</code> and it finishes. You run it again
+      and the cache holds.
+    </p>
+    <p>
+      The whole engine is small enough to read in an afternoon -
+      no plugin DLLs, no embedded scripting, no language-specific
+      special cases. Every behaviour comes from one of three places:
+      your <code>giant.yaml</code>, a discovery script, or a porcelain
+      binary on your PATH.
+    </p>
+  </div>
+</section>
+
+<section class="feature-grid">
+  <div class="feature">
+    <h4>Affected detection</h4>
+    <p>Builds only what changed since <code>main</code>, via git diff or an explicit file list.</p>
+  </div>
+  <div class="feature">
+    <h4>Structural inputs</h4>
+    <p>Function-body edits don't invalidate Go package discovery. Only <code>package</code>/<code>import</code> lines do.</p>
+  </div>
+  <div class="feature">
+    <h4>Early cutoff</h4>
+    <p>Upstream rebuild with byte-identical outputs leaves downstream cache-warm.</p>
+  </div>
+  <div class="feature">
+    <h4>Watch mode</h4>
+    <p>Continuous rebuilds with a debouncer that honors your selection patterns.</p>
+  </div>
+  <div class="feature">
+    <h4>Globs + exclusion</h4>
+    <p><code>giant build 'go:**' '!go:test:*'</code> - same language across build, test, watch, affected.</p>
+  </div>
+  <div class="feature">
+    <h4>Tags</h4>
+    <p>Mark targets with <code>release</code>, <code>flaky</code>, anything. Filter via <code>--tag</code> / <code>--no-tag</code>.</p>
+  </div>
+  <div class="feature">
+    <h4>NDJSON event stream</h4>
+    <p>Every build emits machine-readable events. Pipe into <code>jq</code>, IDE plugins, or your own TUI.</p>
+  </div>
+  <div class="feature">
+    <h4>LRU cache eviction</h4>
+    <p>Cache stays under a configured size limit. No <code>giant gc</code> needed; it just works.</p>
+  </div>
+</section>
+
+<div class="footnote">
+  MIT-licensed · <a href="https://github.com/johnae/giant">github.com/johnae/giant</a>
+</div>
+
+</div>

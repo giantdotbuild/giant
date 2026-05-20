@@ -23,7 +23,7 @@ the engine runs to materialize targets at config time.
 From source:
 
 ```bash
-git clone https://github.com/youruser/giant
+git clone https://github.com/johnae/giant
 cd giant
 cargo install --path .
 ```
