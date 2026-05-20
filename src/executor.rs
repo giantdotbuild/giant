@@ -82,6 +82,14 @@ enum TargetResult {
         /// Carried out of try_cache_hit so the dispatcher doesn't re-read AC.
         output_hash: ContentHash,
     },
+    /// `exists:` check returned 0 - the artifact lives outside the local
+    /// filesystem (registry, S3, etc.). No local outputs were produced or
+    /// restored; downstream consumers see the empty-outputs hash for this
+    /// target.
+    ExternalCacheHit {
+        key: CacheKey,
+        output_hash: ContentHash,
+    },
     Failed {
         key: Option<CacheKey>,
         error: String,
@@ -91,7 +99,9 @@ enum TargetResult {
 impl TargetResult {
     fn key(&self) -> Option<CacheKey> {
         match self {
-            Self::Built { key, .. } | Self::CacheHit { key, .. } => Some(*key),
+            Self::Built { key, .. }
+            | Self::CacheHit { key, .. }
+            | Self::ExternalCacheHit { key, .. } => Some(*key),
             Self::Failed { key, .. } => *key,
         }
     }
@@ -100,6 +110,7 @@ impl TargetResult {
         match self {
             Self::Built { .. } => TargetResultKind::Built,
             Self::CacheHit { .. } => TargetResultKind::CacheHit,
+            Self::ExternalCacheHit { .. } => TargetResultKind::ExternalCacheHit,
             Self::Failed { .. } => TargetResultKind::Failed,
         }
     }
@@ -312,7 +323,12 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
 
         match &next.result {
             TargetResult::Built { .. } => counts.built += 1,
-            TargetResult::CacheHit { .. } => counts.cache_hit += 1,
+            TargetResult::CacheHit { .. } | TargetResult::ExternalCacheHit { .. } => {
+                // External hits get bundled into cache_hit for the summary.
+                // The TargetResultKind in the event is still distinct, so
+                // consumers can break them out if they care.
+                counts.cache_hit += 1;
+            }
             TargetResult::Failed { error, .. } => {
                 counts.failed += 1;
                 failed_or_skipped.insert(next.id.clone());
@@ -390,14 +406,23 @@ async fn dispatch_target(
         })
         .await;
 
+    // Lookup chain when not --fresh:
+    //   1. local AC cache (try_cache_hit)
+    //   2. `exists:` check - for artifacts that live elsewhere (Docker
+    //      registry, S3, etc.). The command runs with $GIANT_CACHE_KEY in
+    //      env. Exit 0 → ExternalCacheHit, skip the build.
+    //   3. run the target's command.
     let (result, output_hash) = if !ctx.fresh {
         match try_cache_hit(&ctx.cache, &ctx.workspace_root, &key).await? {
             Some((r, oh)) => (r, Some(oh)),
-            None => {
-                let r = run_target(&ctx, &spec, key).await;
-                let oh = result_output_hash(&r);
-                (r, oh)
-            }
+            None => match try_exists_check(&ctx, &spec, key).await {
+                Some((r, oh)) => (r, Some(oh)),
+                None => {
+                    let r = run_target(&ctx, &spec, key).await;
+                    let oh = result_output_hash(&r);
+                    (r, oh)
+                }
+            },
         }
     } else {
         let r = run_target(&ctx, &spec, key).await;
@@ -442,7 +467,8 @@ async fn dispatch_target(
 fn result_output_hash(r: &TargetResult) -> Option<ContentHash> {
     match r {
         TargetResult::Built { outputs, .. } => Some(compute_outputs_content_hash(outputs)),
-        TargetResult::CacheHit { output_hash, .. } => Some(*output_hash),
+        TargetResult::CacheHit { output_hash, .. }
+        | TargetResult::ExternalCacheHit { output_hash, .. } => Some(*output_hash),
         TargetResult::Failed { .. } => None,
     }
 }
@@ -634,6 +660,87 @@ async fn try_cache_hit(
     };
 
     Ok(Some((TargetResult::CacheHit { key: *key, output_hash }, output_hash)))
+}
+
+/// Run the target's `exists:` shell command, if any, to ask "does this
+/// artifact already live somewhere external?" (registry, S3, …).
+///
+/// - No `exists:` declared → return `None` (the dispatcher falls through
+///   to `run_target`).
+/// - `exists:` exits 0 → external cache hit; the build is skipped.
+/// - `exists:` exits non-zero → cache miss; the dispatcher runs the
+///   target normally.
+/// - The command failing to spawn → log a warning and fall through; we
+///   prefer a clean miss over a confusing skipped/failed signal.
+///
+/// `$GIANT_CACHE_KEY` is in env so users can craft commands like
+/// `docker manifest inspect reg.io/img:$GIANT_CACHE_KEY` that key the
+/// artifact name on Giant's cache identity.
+async fn try_exists_check(
+    ctx: &TargetCtx,
+    spec: &TargetSpec,
+    key: CacheKey,
+) -> Option<(TargetResult, ContentHash)> {
+    let exists_cmd = spec.exists.as_deref()?;
+
+    let cwd = ctx.workspace_root.as_path().join(spec.cwd.as_path());
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(exists_cmd)
+        .current_dir(&cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("GIANT_CACHE_KEY", key.to_hex())
+        .env("GIANT_WORKSPACE_ROOT", ctx.workspace_root.as_path());
+    apply_color_env(&mut cmd);
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(target=%spec.id, error=%e, "exists: command failed to spawn");
+            return None;
+        }
+    };
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let pump_o = pump_lines(
+        stdout,
+        ctx.events.clone(),
+        ctx.build_id.clone(),
+        spec.id.clone(),
+        LogStream::Stdout,
+    );
+    let pump_e = pump_lines(
+        stderr,
+        ctx.events.clone(),
+        ctx.build_id.clone(),
+        spec.id.clone(),
+        LogStream::Stderr,
+    );
+
+    let status = tokio::select! {
+        s = child.wait() => s,
+        _ = ctx.cancel.cancelled() => {
+            let _ = child.kill().await;
+            return None;
+        }
+    };
+    let (_, _) = tokio::join!(pump_o, pump_e);
+
+    match status {
+        Ok(s) if s.success() => {
+            // The artifact lives elsewhere; we contribute the empty-outputs
+            // hash to downstream cache keys. If a future use case needs
+            // local outputs *and* an exists check, we can extend this.
+            let oh = compute_outputs_content_hash(&[]);
+            Some((TargetResult::ExternalCacheHit { key, output_hash: oh }, oh))
+        }
+        _ => None,
+    }
 }
 
 /// Run a target's command end-to-end and store outputs.

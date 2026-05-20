@@ -447,6 +447,119 @@ targets:
 }
 
 #[test]
+fn exists_check_succeeding_skips_build_command() {
+    // `exists:` says "yes, it's already there" → build command must not
+    // run. We prove the command didn't run by having it write a marker
+    // file and asserting the file's absence.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: existscheck
+cache:
+  dir: ./cache
+targets:
+  - id: "docker:img"
+    inputs: ["Dockerfile"]
+    outputs: []
+    cache: false
+    command: "echo SHOULD_NOT_RUN > marker.txt"
+    exists: "true"
+"#,
+    )
+    .unwrap();
+    std::fs::write(ws.join("Dockerfile"), "FROM scratch\n").unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("external"), "expected external hit; got: {s}");
+    assert!(
+        !ws.join("marker.txt").exists(),
+        "build command must not have run when exists: returned 0"
+    );
+}
+
+#[test]
+fn exists_check_failing_falls_through_to_build() {
+    // `exists:` says "no, not there" → build command runs normally.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: existsmiss
+cache:
+  dir: ./cache
+targets:
+  - id: "docker:img"
+    inputs: ["Dockerfile"]
+    outputs: ["receipt.txt"]
+    command: "echo built > receipt.txt"
+    exists: "false"
+"#,
+    )
+    .unwrap();
+    std::fs::write(ws.join("Dockerfile"), "FROM scratch\n").unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "build failed");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("built  docker:img"), "expected build to run; got: {s}");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("receipt.txt")).unwrap().trim(),
+        "built"
+    );
+}
+
+#[test]
+fn exists_check_sees_cache_key_in_env() {
+    // The exists command can reference $GIANT_CACHE_KEY (this is the
+    // whole point - registry tag the artifact by Giant's identity).
+    // We assert succeess when $GIANT_CACHE_KEY is non-empty and 64 hex
+    // chars.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: existsenv
+cache:
+  dir: ./cache
+targets:
+  - id: "docker:img"
+    inputs: []
+    outputs: []
+    cache: false
+    command: "echo SHOULD_NOT_RUN > marker.txt"
+    exists: 'test "${#GIANT_CACHE_KEY}" = 64'
+"#,
+    )
+    .unwrap();
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("external"), "expected external hit; got: {s}");
+    assert!(!ws.join("marker.txt").exists());
+}
+
+#[test]
 fn cache_miss_when_command_changes() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();
