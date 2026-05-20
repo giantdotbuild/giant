@@ -22,8 +22,8 @@ pub struct Prepared {
     pub graph: BuildGraph,
     pub cache: LocalCache,
     pub workspace_root: AbsPath,
-    /// Loaded config. Kept around for subcommands that need to see e.g.
-    /// `tasks:` (none today) or remote cache settings (future).
+    /// Loaded config. Kept around for subcommands that need cache or
+    /// remote-cache settings.
     #[allow(dead_code)]
     pub config: Config,
 }

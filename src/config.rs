@@ -3,10 +3,8 @@
 //! See TDD-0001 for the schema, ADR-0007 for YAML-as-sugar policy.
 
 use crate::model::TargetSpec;
-use crate::paths::WsRelPath;
-use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -27,8 +25,11 @@ pub enum ConfigError {
     Validation(String),
 }
 
+/// Top-level config. NOT `deny_unknown_fields` - porcelains (giant-task,
+/// future giant-deploy, etc.) own their own top-level sections like
+/// `tasks:`. Core silently accepts them; the porcelain re-parses the
+/// same file with its own schema. (ADR-0010.)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -40,9 +41,6 @@ pub struct Config {
 
     #[serde(default)]
     pub targets: Vec<TargetSpec>,
-
-    #[serde(default)]
-    pub tasks: IndexMap<String, TaskSpec>,
 
     #[serde(default)]
     pub cache: CacheConfig,
@@ -154,40 +152,6 @@ pub struct TlsConfig {
     pub skip_verify: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TaskSpec {
-    pub command: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub deps: Vec<String>,
-    #[serde(default)]
-    pub args: IndexMap<String, TaskArg>,
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-    #[serde(default)]
-    pub cwd: Option<WsRelPath>,
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TaskArg {
-    #[serde(default)]
-    pub default: Option<String>,
-    #[serde(default)]
-    pub choices: Option<Vec<String>>,
-    #[serde(default)]
-    pub description: Option<String>,
-}
-
-/// Task names that shadow built-in subcommands. Validated at load.
-const RESERVED_TASK_NAMES: &[&str] = &[
-    "build", "affected", "graph", "clean", "explain", "serve", "verify", "watch", "test", "help",
-];
-
 impl Config {
     /// Load a config from a file. Detects YAML vs JSON by extension.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
@@ -246,44 +210,6 @@ impl Config {
             }
         }
 
-        // tasks: reserved names + non-empty commands
-        for name in self.tasks.keys() {
-            if RESERVED_TASK_NAMES.contains(&name.as_str()) {
-                return Err(ConfigError::Validation(format!(
-                    "task name '{name}' shadows a reserved subcommand"
-                )));
-            }
-            if name.is_empty() || !is_valid_task_name(name) {
-                return Err(ConfigError::Validation(format!(
-                    "task name '{name}' is invalid (alphanumeric, '-', '_'; no leading digit)"
-                )));
-            }
-        }
-        for (name, task) in &self.tasks {
-            if task.command.is_empty() {
-                return Err(ConfigError::Validation(format!(
-                    "task '{name}' has empty command"
-                )));
-            }
-            // arg defaults must be in choices if choices are declared
-            for (arg_name, arg) in &task.args {
-                if let (Some(default), Some(choices)) = (&arg.default, &arg.choices)
-                    && !choices.contains(default)
-                {
-                    return Err(ConfigError::Validation(format!(
-                        "task '{name}' arg '{arg_name}' default '{default}' not in choices {choices:?}"
-                    )));
-                }
-                if let Some(choices) = &arg.choices
-                    && choices.is_empty()
-                {
-                    return Err(ConfigError::Validation(format!(
-                        "task '{name}' arg '{arg_name}' has empty choices list"
-                    )));
-                }
-            }
-        }
-
         Ok(())
     }
 }
@@ -292,17 +218,6 @@ fn is_valid_workspace_name(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-fn is_valid_task_name(s: &str) -> bool {
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 #[cfg(test)]
@@ -475,65 +390,21 @@ targets:
     }
 
     #[test]
-    fn reject_reserved_task_name() {
-        let f = write_yaml(
-            r#"
-workspace: { name: p }
-tasks:
-  build:
-    command: "echo hi"
-"#,
-        );
-        let err = Config::load(f.path()).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("reserved subcommand"), "got: {msg}");
-    }
-
-    #[test]
-    fn reject_task_with_invalid_name() {
-        let f = write_yaml(
-            r#"
-workspace: { name: p }
-tasks:
-  "1bad":
-    command: "echo hi"
-"#,
-        );
-        let err = Config::load(f.path()).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid"), "got: {msg}");
-    }
-
-    #[test]
-    fn reject_task_default_not_in_choices() {
+    fn accept_unknown_top_level_field() {
+        // Porcelains (giant-task, future giant-deploy, etc.) own their
+        // own top-level sections. Core silently accepts unknown fields
+        // so they don't have to coordinate with us to ship.
         let f = write_yaml(
             r#"
 workspace: { name: p }
 tasks:
   deploy:
-    command: "kubectl"
-    args:
-      env:
-        default: "prod"
-        choices: ["staging"]
+    command: "kubectl apply -f k8s/"
+giant_deploy_settings:
+  whatever: true
 "#,
         );
-        let err = Config::load(f.path()).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("not in choices"), "got: {msg}");
-    }
-
-    #[test]
-    fn reject_unknown_top_level_field() {
-        let f = write_yaml(
-            r#"
-workspace: { name: p }
-typo_here: "no"
-"#,
-        );
-        let err = Config::load(f.path()).unwrap_err();
-        // deny_unknown_fields on Config catches this
-        assert!(matches!(err, ConfigError::Yaml(_)));
+        Config::load(f.path()).expect("unknown top-level keys must parse");
     }
 
     #[test]

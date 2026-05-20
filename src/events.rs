@@ -28,7 +28,6 @@ pub enum Event {
     ConfigLoaded {
         workspace_name: String,
         target_count: usize,
-        task_count: usize,
     },
 
     #[serde(rename = "config.error")]
@@ -115,7 +114,6 @@ pub enum Event {
         build: String,
         id: TargetId,
         added_targets: Vec<TargetId>,
-        added_tasks: Vec<String>,
     },
 
     #[serde(rename = "protocol.dropped")]

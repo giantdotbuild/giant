@@ -36,11 +36,6 @@ pub struct DiscoveryFragment {
     #[serde(default)]
     pub targets: Vec<TargetSpec>,
 
-    /// Discovered tasks. Engine doesn't have tasks-from-discovery wired in
-    /// v0.1 yet (TDD-0005); accept and ignore for forward compatibility.
-    #[serde(default)]
-    pub tasks: indexmap::IndexMap<String, crate::config::TaskSpec>,
-
     /// Optional fingerprint-input list (TDD-0001 / TDD-0003): files the
     /// discovery script actually read. Reserved for future use in tighter
     /// cache invalidation than declared inputs alone.
