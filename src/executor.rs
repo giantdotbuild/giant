@@ -191,14 +191,15 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
     let mut failed_targets: Vec<TargetId> = Vec::new();
 
     for id in &order {
-        let spec = job
+        // `graph.direct_deps` returns the union of explicit and
+        // inferred deps. Inferred-only deps must gate dispatch too,
+        // otherwise downstream races ahead before its upstream's
+        // outputs exist on disk.
+        let unmet = job
             .graph
-            .get(id)
-            .ok_or_else(|| ExecutorError::TargetNotFound(id.clone()))?;
-        let unmet = spec
-            .deps
-            .iter()
-            .filter(|d| in_subgraph.contains(*d))
+            .direct_deps(id)
+            .into_iter()
+            .filter(|d| in_subgraph.contains(d))
             .count();
         pending_deps.insert(id.clone(), unmet);
         if unmet == 0 {
@@ -243,8 +244,11 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
                 None => return Err(ExecutorError::TargetNotFound(tid)),
             };
 
+            // Direct deps (explicit ∪ inferred), via the graph.
+            let direct = job.graph.direct_deps(&tid);
+
             // Check: did any of this target's deps fail / get skipped?
-            if let Some(bad) = spec.deps.iter().find(|d| failed_or_skipped.contains(*d)) {
+            if let Some(bad) = direct.iter().find(|d| failed_or_skipped.contains(*d)) {
                 let reason = format!("dep '{bad}' failed");
                 failed_or_skipped.insert(tid.clone());
                 counts.skipped += 1;
@@ -264,8 +268,7 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
             }
 
             // Build dep_outs from already-completed deps.
-            let dep_outs: Vec<ContentHash> = spec
-                .deps
+            let dep_outs: Vec<ContentHash> = direct
                 .iter()
                 .map(|d| {
                     dep_output_hashes

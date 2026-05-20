@@ -308,6 +308,145 @@ targets:
 }
 
 #[test]
+fn output_based_inference_links_static_targets() {
+    // 'b' has input matching 'a's output. Engine infers b depends on a
+    // without an explicit deps: declaration.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: inferlinks
+cache:
+  dir: ./cache
+targets:
+  - id: "a"
+    inputs: []
+    outputs: ["gen.txt"]
+    command: "echo from-a > gen.txt"
+  - id: "b"
+    inputs: ["gen.txt"]
+    outputs: ["out.txt"]
+    command: "cat gen.txt > out.txt"
+"#,
+    )
+    .unwrap();
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "build failed: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("built  a"), "a should build; got: {s}");
+    assert!(s.contains("built  b"), "b should build; got: {s}");
+    // Verify b ran after a - b's output depends on a's having run first.
+    assert_eq!(
+        std::fs::read_to_string(ws.join("out.txt")).unwrap().trim(),
+        "from-a"
+    );
+}
+
+#[test]
+fn discovery_include_bootstraps_and_merges() {
+    // A discovery target emits JSON, the engine merges it, and a static
+    // downstream target ends up correctly depending on the discovered
+    // target via output-based inference.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir(ws.join("tools")).unwrap();
+    std::fs::write(
+        ws.join("tools/discover.sh"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p .giant/d
+cat > .giant/d/svc.json <<'JSON'
+{
+  "targets": [
+    {
+      "id": "svc:hello",
+      "inputs": [],
+      "outputs": ["svc-hello.txt"],
+      "command": "echo discovered_hello > svc-hello.txt"
+    }
+  ]
+}
+JSON
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::fs::metadata(ws.join("tools/discover.sh"))
+            .unwrap()
+            .permissions();
+        let mut p = p;
+        p.set_mode(0o755);
+        std::fs::set_permissions(ws.join("tools/discover.sh"), p).unwrap();
+    }
+
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: discovery
+cache:
+  dir: ./cache
+include:
+  - id: "discover:svc"
+    inputs: ["tools/discover.sh"]
+    outputs: [".giant/d/svc.json"]
+    command: "./tools/discover.sh"
+targets:
+  - id: "downstream"
+    inputs: ["svc-hello.txt"]
+    outputs: ["combined.txt"]
+    command: "echo combined: > combined.txt && cat svc-hello.txt >> combined.txt"
+"#,
+    )
+    .unwrap();
+
+    // Cold run: bootstrap builds discover:svc, merge picks up svc:hello,
+    // inference wires downstream -> svc:hello via the input/output match,
+    // main build runs svc:hello and downstream in dep order.
+    let out1 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out1.status.success(), "cold build failed: {}", String::from_utf8_lossy(&out1.stderr));
+    let s1 = String::from_utf8_lossy(&out1.stdout);
+    assert!(s1.contains("built  discover:svc"), "discover should build; {s1}");
+    assert!(s1.contains("built  svc:hello"), "svc:hello should build; {s1}");
+    assert!(s1.contains("built  downstream"), "downstream should build; {s1}");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("combined.txt"))
+            .unwrap()
+            .trim(),
+        "combined:\ndiscovered_hello"
+    );
+
+    // Warm run: everything cache-hits. Proves the inferred dep doesn't
+    // race with svc:hello's restore (downstream's cache key must remain
+    // stable across runs).
+    let out2 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out2.status.success());
+    let s2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(s2.contains("cache  discover:svc"));
+    assert!(s2.contains("cache  svc:hello"));
+    assert!(
+        s2.contains("cache  downstream"),
+        "downstream must cache-hit on warm run (deterministic cache key); got: {s2}"
+    );
+}
+
+#[test]
 fn cache_miss_when_command_changes() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();

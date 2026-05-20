@@ -2,6 +2,7 @@
 
 use crate::cache::LocalCache;
 use crate::config::Config;
+use crate::discovery;
 use crate::events::Event;
 use crate::executor::{BuildJob, build};
 use crate::graph::BuildGraph;
@@ -35,47 +36,25 @@ pub enum EventsFormat {
 pub async fn execute(args: BuildArgs, global: &super::GlobalFlags) -> anyhow::Result<()> {
     // 1. Locate + load the config.
     let (config, workspace_root) = load_config(global.config.as_deref())?;
+    let workspace_abs = AbsPath::new(workspace_root);
 
-    // 2. Build the graph from inline targets (discovery + structural inputs
-    //    land in later slices).
+    // 2. Build initial graph from include + targets. Inference runs over
+    //    this pre-merge set first so any inter-include edges (e.g.
+    //    discover:docker depending on discover:go's output) are correct
+    //    before the bootstrap pass schedules them.
     let mut graph = BuildGraph::new();
-    for target in config.targets.iter().cloned() {
+    for target in config.include.iter().chain(config.targets.iter()).cloned() {
         graph.add_target(target)?;
     }
-    graph.resolve_explicit_deps()?;
-    graph.validate_acyclic()?;
+    graph.build_edges_and_validate()?;
 
-    // 3. Resolve selection. If no patterns given, build everything that's
-    //    not a test target.
-    let selection: Vec<TargetId> = if args.patterns.is_empty() {
-        graph
-            .iter()
-            .filter(|(_, spec)| !spec.test)
-            .map(|(id, _)| id.clone())
-            .collect()
-    } else {
-        let mut out = Vec::new();
-        for p in &args.patterns {
-            let exact = TargetId::new(p);
-            if graph.get(&exact).is_some() {
-                out.push(exact);
-                continue;
-            }
-            anyhow::bail!("no target matches {p:?} (selection-language is v1.1)");
-        }
-        out
-    };
-
-    if selection.is_empty() {
-        anyhow::bail!("no targets to build");
-    }
-
-    // 4. Open the local cache.
+    // 3. Open the local cache.
     let cache_root = resolve_cache_dir(&config.cache.dir)?;
     std::fs::create_dir_all(&cache_root)?;
     let cache = LocalCache::open(AbsPath::new(cache_root)).await?;
 
-    // 5. Set up event channel and the renderer task.
+    // 4. Event channel + renderer. Used by both the bootstrap and the
+    //    main build.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(1024);
     let ndjson = matches!(args.events, Some(EventsFormat::Ndjson));
     let renderer = tokio::spawn(async move {
@@ -94,15 +73,92 @@ pub async fn execute(args: BuildArgs, global: &super::GlobalFlags) -> anyhow::Re
         }
     });
 
-    // 6. Run the build.
     let cancel = CancellationToken::new();
     let parallelism = args.jobs.unwrap_or_else(num_cpus_estimate);
+
+    // 5. Bootstrap pass - if any include: targets exist, build them first,
+    //    then read their JSON outputs and merge discovered targets into
+    //    the graph. Re-run edge construction so inferred deps connect
+    //    static targets to discovered ones.
+    if !config.include.is_empty() {
+        let include_ids: Vec<TargetId> =
+            config.include.iter().map(|t| t.id.clone()).collect();
+        let bootstrap_job = BuildJob {
+            graph: Arc::new(graph.clone()),
+            selection: include_ids.clone(),
+            cache: cache.clone(),
+            workspace_root: workspace_abs.clone(),
+            parallelism,
+            fresh: global.fresh,
+            events: tx.clone(),
+            cancel: cancel.clone(),
+            build_id: format!("bootstrap_{}", short_random()),
+        };
+        let bootstrap = build(bootstrap_job).await?;
+        if bootstrap.counts.failed > 0 {
+            drop(tx);
+            let _ = renderer.await;
+            anyhow::bail!(
+                "discovery failed: {} include target(s) failed",
+                bootstrap.counts.failed
+            );
+        }
+
+        // Merge each discovery target's output JSON. We collect the
+        // (id, output-paths) pairs first to release the immutable borrow
+        // of `graph` before calling `merge_into` (which needs &mut).
+        let outputs_to_read: Vec<PathBuf> = include_ids
+            .iter()
+            .flat_map(|id| {
+                let spec = graph.get(id).expect("present in initial graph");
+                spec.outputs
+                    .iter()
+                    .map(|p| workspace_abs.as_path().join(p.as_path()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for abs in outputs_to_read {
+            let fragment = discovery::parse_fragment(&abs)?;
+            discovery::merge_into(&mut graph, fragment)?;
+        }
+        graph.build_edges_and_validate()?;
+    }
+
+    // 6. Resolve selection over the merged graph.
+    let selection: Vec<TargetId> = if args.patterns.is_empty() {
+        graph
+            .iter()
+            .filter(|(_, spec)| !spec.test)
+            .map(|(id, _)| id.clone())
+            .collect()
+    } else {
+        let mut out = Vec::new();
+        for p in &args.patterns {
+            let exact = TargetId::new(p);
+            if graph.get(&exact).is_some() {
+                out.push(exact);
+                continue;
+            }
+            drop(tx);
+            let _ = renderer.await;
+            anyhow::bail!("no target matches {p:?} (selection-language is v1.1)");
+        }
+        out
+    };
+
+    if selection.is_empty() {
+        drop(tx);
+        let _ = renderer.await;
+        anyhow::bail!("no targets to build");
+    }
+
+    // 7. Main build.
     let build_id = format!("b_{}", short_random());
     let job = BuildJob {
         graph: Arc::new(graph),
         selection,
         cache,
-        workspace_root: AbsPath::new(workspace_root),
+        workspace_root: workspace_abs,
         parallelism,
         fresh: global.fresh,
         events: tx,
@@ -111,8 +167,7 @@ pub async fn execute(args: BuildArgs, global: &super::GlobalFlags) -> anyhow::Re
     };
     let summary = build(job).await?;
 
-    // Drop the sender side; renderer drains and exits.
-    drop(renderer.await);
+    let _ = renderer.await;
 
     if summary.counts.failed > 0 {
         anyhow::bail!(
@@ -182,13 +237,13 @@ fn render_plain(ev: &Event) -> String {
     }
 }
 
-/// Walk up from cwd looking for `giant.yaml` / `giant.json`. Returns the
-/// loaded `Config` and the workspace root (the directory containing the
-/// config file).
+/// Walk up from cwd looking for `giant.yaml` / `giant.json`.
 fn load_config(explicit: Option<&std::path::Path>) -> anyhow::Result<(Config, PathBuf)> {
     if let Some(path) = explicit {
         let abs = std::fs::canonicalize(path)?;
-        let dir = abs.parent().ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
+        let dir = abs
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
         let cfg = Config::load(&abs)?;
         return Ok((cfg, dir.to_path_buf()));
     }
