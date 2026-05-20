@@ -78,10 +78,7 @@ We **do not implement** REAPI gRPC (Action/Directory/Tree wire types).
 
   (bazel-remote *also* speaks HTTP, so teams using bazel-remote
   remain fully compatible.)
-- No remote execution. We never had that anyway; HTTP cache protocol
-  is cache-only by design.
-- Hash algorithm is sha256, matching Bazel - no algorithm mismatch
-  with the broader ecosystem.
+- No remote execution. HTTP cache protocol is cache-only by design.
 
 ### What we're committing to maintaining
 
