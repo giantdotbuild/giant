@@ -23,11 +23,13 @@ cache:
 targets:
   - id: "bin:giant"
     inputs:
-      - "src/**/*.rs"
+      - "crates/giant/src/**/*.rs"
+      - "crates/giant/build.rs"
+      - "crates/giant/Cargo.toml"
       - "Cargo.toml"
       - "Cargo.lock"
     outputs: ["bin/giant"]
-    command: "cargo build --release --bin giant && install -m 0755 target/release/giant bin/giant"
+    command: "cargo build --release -p giant --bin giant && install -m 0755 target/release/giant bin/giant"
     timeout: 600
 
   - id: "bin:giant-task"

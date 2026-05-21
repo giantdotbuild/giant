@@ -14,7 +14,7 @@ path = "src/main.rs"
 # to re-implement: config loading + workspace-root walk + path types.
 # We do NOT touch internals (executor, cache, etc.) - builds happen via
 # `giant build` subprocess, the documented porcelain contract (ADR-0010).
-giant = { path = "../.." }
+giant = { path = "../giant" }
 
 # Async runtime - Command::status is fine sync, but we use tokio so we
 # can stream subprocess stdout/stderr without blocking.

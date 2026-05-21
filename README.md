@@ -196,16 +196,19 @@ targets:
 
 A short tour of what's where:
 
-- `src/executor.rs` - parallel dispatch, cache key composition, early-cutoff,
-  remote-cache fallback chain.
-- `src/cache.rs` - local content-addressed cache; LRU eviction.
-- `src/structural.rs` - three-stage structural input fingerprinting
+- `crates/giant/src/executor.rs` - parallel dispatch, cache key composition,
+  early-cutoff, remote-cache fallback chain.
+- `crates/giant/src/cache.rs` - local content-addressed cache; LRU eviction.
+- `crates/giant/src/structural.rs` - three-stage structural input fingerprinting
   (cold filesystem walk → mtime-skip warm validation → git fast-path).
-- `src/discovery.rs` - discovery target bootstrap and merge.
-- `src/graph.rs` - dependency graph, output-based dep inference.
-- `src/selection.rs` - pattern language (globs, exclusions, tags, test mode).
-- `src/renderer.rs` - colored line-streaming output + NDJSON pass-through.
-- `src/cli/` - subcommand handlers.
+- `crates/giant/src/discovery.rs` - discovery target bootstrap and merge.
+- `crates/giant/src/graph.rs` - dependency graph, output-based dep inference.
+- `crates/giant/src/selection.rs` - pattern language (globs, exclusions, tags,
+  test mode).
+- `crates/giant/src/renderer.rs` - colored line-streaming output + NDJSON
+  pass-through.
+- `crates/giant/src/cli/` - subcommand handlers.
+- `crates/giant-task/` - task-runner porcelain ([docs](docs-site/src/content/docs/extending/giant-task.md)).
 
 Design docs are in `docs/adr/` (decisions) and `docs/tdd/` (technical specs).
 

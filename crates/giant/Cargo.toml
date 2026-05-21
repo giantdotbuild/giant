@@ -1,0 +1,101 @@
+[package]
+name = "giant"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Build orchestration with content-addressed caching"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+futures-util = "0.3"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
+clap_complete_nushell = "4"
+# anstyle is already in the tree via clap; declaring it directly so we
+# can build Style values for the renderer without paying for it twice.
+anstyle = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml_ng = "0.10"
+indexmap = { version = "2", features = ["serde"] }
+
+# Hashing - sha256 for ecosystem fit (bazel-remote, sccache, sha256sum).
+# Modern x86_64 has SHA-NI (~1.5 GB/s single-threaded); not a bottleneck
+# for our many-small-files workload. ARM has its own SHA crypto extensions.
+sha2 = { version = "0.10", features = ["asm"] }
+const-hex = "1"
+
+# Graph algorithms
+petgraph = "0.8"
+
+# Concurrent data structures
+dashmap = "6"
+rayon = "1"
+
+# Git (for structural input fast-path)
+gix = { version = "0.68", default-features = false, features = [
+    "status",
+    "dirwalk",
+    "parallel",
+] }
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+miette = { version = "7", features = ["fancy"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Filesystem
+glob = "0.3"
+ignore = "0.4"
+walkdir = "2"
+dirs = "6"
+notify = "8"
+tempfile = "3"
+shell-escape = "0.1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Terminal
+crossterm = "0.28"
+unicode-width = "0.2"
+
+# Cross-platform signal handling
+ctrlc = "3"
+
+# Unix process group control for clean termination
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Optional remote cache support
+[features]
+default = []
+remote = ["dep:reqwest", "dep:base64"]
+
+[dependencies.reqwest]
+version = "0.12"
+optional = true
+default-features = false
+features = ["rustls-tls", "stream"]
+
+[dependencies.base64]
+version = "0.22"
+optional = true
+
+[dev-dependencies]
+tempfile = "3"
+serial_test = "3"
+# Mock HTTP server for the remote-cache integration test.
+wiremock = "0.6"
+# Set mtimes precisely in eviction tests (LRU ordering depends on it).
+filetime = "0.2"
