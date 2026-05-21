@@ -1,0 +1,43 @@
+[package]
+name = "giant-tui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Interactive target browser + build runner for Giant. Dispatched via `giant tui`."
+
+[[bin]]
+name = "giant-tui"
+path = "src/main.rs"
+
+[dependencies]
+# Engine: for the Event / Command protocol types only. The TUI talks
+# to a `giant session` subprocess for everything else.
+giant = { path = "../giant" }
+
+# Async runtime - single-process tokio app.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "fs", "signal", "time", "sync"] }
+futures-util = "0.3"
+
+# TUI framework + terminal backend.
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Pipe NDJSON in/out of the session subprocess.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI parsing.
+clap = { version = "4", features = ["derive"] }
+
+# Errors.
+anyhow = "1"
+
+# Hashed colors for the per-target log prefix - same FNV-1a scheme
+# the core renderer uses.
+anstyle = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

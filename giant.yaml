@@ -43,6 +43,16 @@ targets:
     command: "cargo build --release -p giant-task --bin giant-task && install -m 0755 target/release/giant-task bin/giant-task"
     timeout: 600
 
+  - id: "bin:giant-tui"
+    inputs:
+      - "crates/giant-tui/src/**/*.rs"
+      - "crates/giant-tui/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+    outputs: ["bin/giant-tui"]
+    command: "cargo build --release -p giant-tui --bin giant-tui && install -m 0755 target/release/giant-tui bin/giant-tui"
+    timeout: 600
+
   - id: "docs:install"
     inputs:
       - "docs-site/package.json"
@@ -117,9 +127,9 @@ tasks:
     needs: ["check", "release-build", "docs"]
 
   bin:
-    command: "echo refreshed bin/giant and bin/giant-task"
+    command: "echo refreshed bin/giant, bin/giant-task, and bin/giant-tui"
     description: "build the binaries and install them into ./bin"
-    deps: ["bin:giant", "bin:giant-task"]
+    deps: ["bin:giant", "bin:giant-task", "bin:giant-tui"]
 
   docs:
     command: "echo docs built to docs-site/dist/"
