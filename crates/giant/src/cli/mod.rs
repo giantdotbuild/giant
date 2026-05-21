@@ -4,8 +4,10 @@
 //! through to porcelain dispatch: `giant <name>` looks for `giant-<name>`
 //! on PATH and execs it (git/cargo/kubectl model - see ADR-0010).
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 mod affected;
 mod build;
@@ -96,7 +98,17 @@ pub async fn run() -> anyhow::Result<()> {
     // exits - without ever reaching the normal command dispatch.
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
 
-    let cli = Cli::parse();
+    // Build the clap Command from the derived Cli, then dynamically
+    // append a list of detected porcelains to the help output. The
+    // porcelains aren't real subcommands as far as clap is concerned;
+    // they still get dispatched via `Commands::External`. The
+    // after-help section is just so users see them in `--help`.
+    let mut cmd = Cli::command();
+    if let Some(blurb) = porcelain_help_section() {
+        cmd = cmd.after_help(blurb);
+    }
+    let matches = cmd.get_matches();
+    let cli = Cli::from_arg_matches(&matches).expect("clap derive ensures shape");
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&cli.log));
@@ -141,3 +153,97 @@ impl std::fmt::Display for SilentExit {
 }
 
 impl std::error::Error for SilentExit {}
+
+/// Subcommand names that clap already knows about - porcelain
+/// detection skips these so we don't end up listing `giant-clean` as
+/// a porcelain alongside the built-in `clean`.
+const BUILTIN_SUBCOMMANDS: &[&str] = &[
+    "build",
+    "test",
+    "affected",
+    "explain",
+    "graph",
+    "clean",
+    "watch",
+    "session",
+    "completions",
+];
+
+/// Format a one-line-per-porcelain "after help" section, or `None` if
+/// nothing was found on PATH. Output looks like:
+///
+/// ```text
+/// Porcelains (extra subcommands provided by binaries on PATH):
+///   task    /home/user/.cargo/bin/giant-task
+///   tui     /usr/local/bin/giant-tui
+/// ```
+fn porcelain_help_section() -> Option<String> {
+    let porcelains = detect_porcelains();
+    if porcelains.is_empty() {
+        return None;
+    }
+    let width = porcelains.keys().map(|n| n.len()).max().unwrap_or(0);
+    let mut out = String::from(
+        "Porcelains (extra subcommands provided by binaries on PATH):\n",
+    );
+    for (name, path) in &porcelains {
+        out.push_str(&format!(
+            "  {:<width$}  {}\n",
+            name,
+            path.display(),
+            width = width
+        ));
+    }
+    out.push_str("\nRun `giant <name> --help` for the porcelain's own help.");
+    Some(out)
+}
+
+/// Walk PATH for `giant-<name>` executables that don't shadow a
+/// built-in subcommand. Returns a sorted map of `name → path`; only
+/// the first occurrence (earliest in PATH) wins, mirroring how the
+/// shell resolves names.
+fn detect_porcelains() -> BTreeMap<String, PathBuf> {
+    use std::collections::HashSet;
+    let builtins: HashSet<&'static str> = BUILTIN_SUBCOMMANDS.iter().copied().collect();
+    let mut found: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path) {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            let Some(porc) = name.strip_prefix("giant-") else {
+                continue;
+            };
+            if porc.is_empty() || builtins.contains(porc) {
+                continue;
+            }
+            if found.contains_key(porc) {
+                continue;
+            }
+            if is_executable(&entry.path()) {
+                found.insert(porc.to_string(), entry.path());
+            }
+        }
+    }
+    found
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    // On Windows, PATHEXT lookup is the right answer; for now treat
+    // any file matching the prefix as executable.
+    std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+}
