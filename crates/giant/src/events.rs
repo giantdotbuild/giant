@@ -116,6 +116,27 @@ pub enum Event {
         added_targets: Vec<TargetId>,
     },
 
+    /// Describes one target in the merged graph. Emitted by
+    /// `giant list --events ndjson` and (when it lands) by the
+    /// `query.catalog` channel of a long-running engine. Exporting
+    /// the merged graph is a separate concern from build events; this
+    /// event is *only* used in catalog streams, never during a build.
+    #[serde(rename = "target.described")]
+    TargetDescribed {
+        id: TargetId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        test: bool,
+        command: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        inputs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        outputs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        deps: Vec<TargetId>,
+    },
+
     #[serde(rename = "protocol.dropped")]
     ProtocolDropped {
         count: u64,
@@ -197,6 +218,33 @@ mod tests {
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"t\":\"engine.hello\""));
         assert!(s.contains("\"version\":\"0.1.0\""));
+    }
+
+    #[test]
+    fn target_described_round_trips_through_json() {
+        let ev = Event::TargetDescribed {
+            id: TargetId::new("go:bin:server"),
+            tags: vec!["release".into(), "smoke".into()],
+            test: false,
+            command: "go build -o bin/server".into(),
+            inputs: vec!["src/**/*.go".into()],
+            outputs: vec!["bin/server".into()],
+            deps: vec![TargetId::new("proto:api")],
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"t\":\"target.described\""));
+        assert!(s.contains("\"id\":\"go:bin:server\""));
+        // test:false should be elided.
+        assert!(!s.contains("\"test\""), "test:false should be skipped");
+        let back: Event = serde_json::from_str(&s).unwrap();
+        match back {
+            Event::TargetDescribed { id, tags, deps, .. } => {
+                assert_eq!(id.as_str(), "go:bin:server");
+                assert_eq!(tags, vec!["release", "smoke"]);
+                assert_eq!(deps.len(), 1);
+            }
+            _ => panic!("wrong variant after round-trip"),
+        }
     }
 
     #[test]
