@@ -15,3 +15,6 @@ bin
 
 # Giant runtime state
 .giant/
+
+# Playwright MCP scratch (snapshots, screenshots)
+.playwright-mcp/

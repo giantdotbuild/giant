@@ -143,13 +143,31 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
                         }
                         Action::CancelChild => {
                             if let Some(build_id) = state.pending_build_id.clone()
-                                && matches!(state.screen, Screen::Building | Screen::BuildFinished)
+                                && matches!(state.screen, Screen::Building | Screen::Watching | Screen::BuildFinished)
                             {
                                 let _ = cmd_tx.send(Command::Cancel {
                                     command_id: Some(format!("c_{}", new_command_seq())),
                                     build: build_id,
                                 }).await;
                             }
+                        }
+                        Action::StartWatch => {
+                            let sel = state.selection_for_build();
+                            if sel.is_empty() {
+                                state.last_error = Some("no targets in current selection".into());
+                            } else {
+                                state.start_watch_locally();
+                                let _ = cmd_tx.send(Command::WatchStart {
+                                    command_id: Some(format!("c_{}", new_command_seq())),
+                                    targets: sel,
+                                }).await;
+                            }
+                        }
+                        Action::StopWatch => {
+                            let _ = cmd_tx.send(Command::WatchStop {
+                                command_id: Some(format!("c_{}", new_command_seq())),
+                            }).await;
+                            state.return_to_browser();
                         }
                         Action::Ignore => {}
                     }

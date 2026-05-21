@@ -5,6 +5,14 @@ import starlight from '@astrojs/starlight';
 // https://astro.build/config
 export default defineConfig({
   site: 'https://giant.build',
+  vite: {
+    // Vite 5+ requires every Host header to be allowlisted. With `--host`
+    // we bind on all interfaces, so requests can arrive as `neptune`,
+    // `*.ts.net`, raw IPs, etc. `true` allows everything - fine for a
+    // local docs preview, not what you'd want on a public deployment.
+    preview: { allowedHosts: true },
+    server: { allowedHosts: true },
+  },
   integrations: [
     starlight({
       title: 'Giant',

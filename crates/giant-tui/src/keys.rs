@@ -14,6 +14,10 @@ pub enum Action {
     CancelChild,
     /// Send {"c":"build", targets: <current selection>}.
     StartBuild,
+    /// Send {"c":"watch.start", targets: <current selection>}.
+    StartWatch,
+    /// Send {"c":"watch.stop"} to exit watch mode.
+    StopWatch,
     /// Key consumed but no UI effect.
     Ignore,
 }
@@ -27,6 +31,7 @@ pub fn handle(state: &mut State, key: KeyEvent) -> Action {
     {
         return match state.screen {
             Screen::Building => Action::CancelChild,
+            Screen::Watching => Action::StopWatch,
             _ => Action::Quit,
         };
     }
@@ -40,7 +45,7 @@ pub fn handle(state: &mut State, key: KeyEvent) -> Action {
     state.last_error = None;
     match state.screen {
         Screen::Loading | Screen::Browser => handle_browser(state, key),
-        Screen::Building => handle_running_build(state, key),
+        Screen::Building | Screen::Watching => handle_running_build(state, key),
         Screen::BuildFinished => handle_finished(state, key),
     }
 }
@@ -49,6 +54,7 @@ fn handle_browser(state: &mut State, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
         KeyCode::Enter | KeyCode::Char('b') => Action::StartBuild,
+        KeyCode::Char('w') => Action::StartWatch,
         KeyCode::Char('/') => {
             state.mode = Mode::Search;
             state.filters.search.clear();
@@ -106,10 +112,19 @@ fn handle_browser(state: &mut State, key: KeyEvent) -> Action {
 fn handle_running_build(state: &mut State, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
-        // Esc only cancels when there's actually a build to cancel.
-        // After build.finished arrives, handle_finished routes Esc
-        // to return_to_browser before delegating here.
-        KeyCode::Esc => Action::CancelChild,
+        // Esc semantics:
+        // - In Watching: stop the watch (it has no single build to
+        //   cancel; watch.stop ends the whole loop).
+        // - In Building: cancel the in-flight build.
+        // - In BuildFinished: handled in handle_finished before we
+        //   get here (it returns to browser).
+        KeyCode::Esc => {
+            if state.screen == Screen::Watching {
+                Action::StopWatch
+            } else {
+                Action::CancelChild
+            }
+        }
         KeyCode::Char('?') => {
             state.mode = Mode::Help;
             Action::Redraw

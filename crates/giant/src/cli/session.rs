@@ -148,6 +148,9 @@ struct SessionState {
     graph: Arc<BuildGraph>,
     cache: LocalCache,
     workspace_root: AbsPath,
+    /// Resolved absolute cache directory - the watcher must exclude it
+    /// so cache writes don't trigger rebuild storms.
+    cache_root: AbsPath,
     fresh_default: bool,
     event_tx: EventSender,
     /// At most one build runs at a time in v1. A second `build`
@@ -156,6 +159,10 @@ struct SessionState {
     /// `build.finished`).
     running: Option<RunningBuild>,
     queued: Option<QueuedBuild>,
+    /// Active watch session, if any. Mutually exclusive with regular
+    /// builds in v1 - `build` while watching is rejected, and
+    /// `watch.start` while a build is in flight is rejected.
+    watch: Option<WatchSession>,
     next_build_seq: u64,
 }
 
@@ -172,16 +179,26 @@ struct QueuedBuild {
     cancel: CancellationToken,
 }
 
+struct WatchSession {
+    cancel: CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+}
+
 impl SessionState {
     fn new(prepared: prep::Prepared, event_tx: EventSender, fresh_default: bool) -> Self {
+        let cache_root = prep::resolve_cache_dir(&prepared.config.cache.dir)
+            .map(AbsPath::new)
+            .unwrap_or_else(|_| prepared.workspace_root.clone());
         Self {
             graph: Arc::new(prepared.graph),
             cache: prepared.cache,
             workspace_root: prepared.workspace_root,
+            cache_root,
             fresh_default,
             event_tx,
             running: None,
             queued: None,
+            watch: None,
             next_build_seq: 0,
         }
     }
@@ -197,6 +214,14 @@ impl SessionState {
                 targets,
                 fresh,
             } => {
+                if self.watch.is_some() {
+                    self.reject(
+                        command_id,
+                        "watch is active - send `watch.stop` first".into(),
+                    )
+                    .await;
+                    return false;
+                }
                 if let Some(reason) = self.validate_targets(&targets) {
                     self.reject(command_id, reason).await;
                     return false;
@@ -244,17 +269,62 @@ impl SessionState {
                         .await;
                 }
             }
-            Command::WatchStart { command_id, .. }
-            | Command::WatchStop { command_id }
-            | Command::ConfigReload { command_id } => {
+            Command::WatchStart {
+                command_id,
+                targets,
+            } => {
+                if self.watch.is_some() {
+                    self.reject(command_id, "watch already active".into()).await;
+                    return false;
+                }
+                if self.running.is_some() || self.queued.is_some() {
+                    self.reject(
+                        command_id,
+                        "build in flight - try again when it finishes".into(),
+                    )
+                    .await;
+                    return false;
+                }
+                if let Some(reason) = self.validate_targets(&targets) {
+                    self.reject(command_id, reason).await;
+                    return false;
+                }
+                self.start_watch(targets);
+                self.ack(command_id, None).await;
+            }
+            Command::WatchStop { command_id } => {
+                if let Some(w) = self.watch.take() {
+                    w.cancel.cancel();
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), w.handle).await;
+                }
+                self.ack(command_id, None).await;
+            }
+            Command::ConfigReload { command_id } => {
                 self.reject(
                     command_id,
-                    "watch / reload commands arrive in a follow-up changeset".into(),
+                    "config.reload arrives in a follow-up changeset".into(),
                 )
                 .await;
             }
         }
         false
+    }
+
+    fn start_watch(&mut self, selection: Vec<TargetId>) {
+        let cancel = CancellationToken::new();
+        let ctx = WatchCtx {
+            graph: self.graph.clone(),
+            cache: self.cache.clone(),
+            workspace_root: self.workspace_root.clone(),
+            cache_root: self.cache_root.clone(),
+            fresh: self.fresh_default,
+            event_tx: self.event_tx.clone(),
+        };
+        let cancel_for_task = cancel.clone();
+        let handle = tokio::spawn(async move {
+            watch_loop(ctx, selection, cancel_for_task).await;
+        });
+        self.watch = Some(WatchSession { cancel, handle });
     }
 
     fn next_build_id(&mut self) -> String {
@@ -363,6 +433,10 @@ impl SessionState {
     }
 
     async fn shutdown(&mut self) {
+        if let Some(w) = self.watch.take() {
+            w.cancel.cancel();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), w.handle).await;
+        }
         if let Some(r) = self.running.take() {
             r.cancel.cancel();
             // Bounded wait; if the build is unresponsive, executor's
@@ -490,4 +564,150 @@ fn workspace_hint(global: &GlobalFlags) -> Option<String> {
     std::env::current_dir()
         .ok()
         .map(|p| p.display().to_string())
+}
+
+/// Bundle of state the watch loop needs. Wrapper because clippy
+/// complains about 8 positional arguments otherwise - and the
+/// structure clusters "everything the engine shares" vs the
+/// per-watch selection/cancellation.
+struct WatchCtx {
+    graph: Arc<BuildGraph>,
+    cache: LocalCache,
+    workspace_root: AbsPath,
+    cache_root: AbsPath,
+    fresh: bool,
+    event_tx: EventSender,
+}
+
+/// The file-watching loop for `watch.start`. Runs the initial build,
+/// then spins on debounced file events, running affected rebuilds
+/// until cancelled. All events flow back through `event_tx` so the
+/// porcelain sees normal `build.started` / `build.finished` cycles
+/// with distinct `b_w_<n>` ids.
+async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: CancellationToken) {
+    let WatchCtx {
+        graph,
+        cache,
+        workspace_root,
+        cache_root,
+        fresh,
+        event_tx,
+    } = ctx;
+    let mut cycle: u64 = 1;
+    run_watch_cycle(CycleArgs {
+        graph: &graph,
+        cache: &cache,
+        workspace_root: &workspace_root,
+        selection: &selection,
+        fresh,
+        event_tx: event_tx.clone(),
+        cancel: cancel.clone(),
+        build_id: format!("b_w_{cycle:04x}"),
+    })
+    .await;
+
+    // Watcher excludes: anything we write (cache, declared outputs)
+    // plus .git / .giant to keep noise out.
+    let mut excludes: Vec<std::path::PathBuf> = vec![
+        workspace_root.as_path().join(".git"),
+        workspace_root.as_path().join(".giant"),
+        cache_root.as_path().to_path_buf(),
+    ];
+    for (_, spec) in graph.iter() {
+        for o in &spec.outputs {
+            excludes.push(workspace_root.as_path().join(o.as_path()));
+        }
+    }
+    let (_w_handle, mut rx) = match crate::watcher::spawn(workspace_root.as_path(), excludes) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = event_tx
+                .send(Event::CommandError {
+                    command_id: "watch".into(),
+                    message: format!("could not start file watcher: {e}"),
+                })
+                .await;
+            return;
+        }
+    };
+
+    let mut debouncer = super::watch::Debouncer::new(
+        std::time::Duration::from_millis(100),
+        std::time::Duration::from_millis(500),
+    );
+
+    loop {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let batch = match debouncer.next_batch(&mut rx, &cancel).await {
+            Some(b) if !b.is_empty() => b,
+            Some(_) => continue, // empty batch from cancellation wake; loop checks above
+            None => break,
+        };
+
+        // Affected = targets whose inputs match any changed path,
+        // intersected with the user's watch selection.
+        let workspace_rel: Vec<std::path::PathBuf> = batch
+            .iter()
+            .map(|p| {
+                p.strip_prefix(workspace_root.as_path())
+                    .map(|s| s.to_path_buf())
+                    .unwrap_or_else(|_| p.clone())
+            })
+            .collect();
+        let rel_refs: Vec<&std::path::Path> = workspace_rel.iter().map(|p| p.as_path()).collect();
+        let affected = crate::selection::affected_targets(&graph, &rel_refs);
+        let to_build: Vec<TargetId> = selection
+            .iter()
+            .filter(|id| affected.contains(*id))
+            .cloned()
+            .collect();
+        if to_build.is_empty() {
+            continue;
+        }
+
+        cycle += 1;
+        run_watch_cycle(CycleArgs {
+            graph: &graph,
+            cache: &cache,
+            workspace_root: &workspace_root,
+            selection: &to_build,
+            fresh,
+            event_tx: event_tx.clone(),
+            cancel: cancel.clone(),
+            build_id: format!("b_w_{cycle:04x}"),
+        })
+        .await;
+    }
+}
+
+struct CycleArgs<'a> {
+    graph: &'a Arc<BuildGraph>,
+    cache: &'a LocalCache,
+    workspace_root: &'a AbsPath,
+    selection: &'a [TargetId],
+    fresh: bool,
+    event_tx: EventSender,
+    cancel: CancellationToken,
+    build_id: String,
+}
+
+async fn run_watch_cycle(a: CycleArgs<'_>) {
+    let job = BuildJob {
+        graph: a.graph.clone(),
+        selection: a.selection.to_vec(),
+        cache: a.cache.clone(),
+        workspace_root: a.workspace_root.clone(),
+        parallelism: prep::num_cpus_estimate(),
+        fresh: a.fresh,
+        events: a.event_tx,
+        cancel: a.cancel,
+        build_id: a.build_id,
+        #[cfg(feature = "remote")]
+        remote: None,
+        #[cfg(feature = "remote")]
+        upload_tx: None,
+    };
+    let _ = build(job).await;
 }

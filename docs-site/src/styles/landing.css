@@ -215,20 +215,30 @@
   max-width: 1280px;
   margin: 4rem auto;
   padding: 0 1.5rem;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  /* Flexbox over grid here. Grid was producing visibly different
+     heights - possibly a Starlight global rule fighting our
+     align-items default. Flexbox with `align-items: stretch` (its
+     default) is unambiguous: every direct child gets the same
+     cross-axis height. */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
   gap: 1.5rem;
 }
 
-@media (max-width: 900px) {
-  .landing section.pillars { grid-template-columns: 1fr; }
-}
-
 .landing .pillar {
+  flex: 1 1 0;
+  min-width: 260px;
   background: var(--sl-color-gray-6);
   border: 1px solid var(--sl-color-gray-5);
   border-radius: 0.9rem;
   padding: 1.75rem;
+  /* Starlight's `sl-markdown-content` applies rhythm spacing via
+     `* + *` to descendants - that gave non-first pillars a 16px
+     top margin and made them visibly shorter than the leftmost one
+     (the flex row sized to the tall card, but the margin ate into
+     the others). Zero it so every card occupies the full row height. */
+  margin: 0;
 }
 
 .landing .pillar h3 {
@@ -290,16 +300,28 @@
   max-width: 1280px;
   margin: 5rem auto;
   padding: 0 1.5rem;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  /* Same flexbox approach as the pillars above. wraps to 2 then 1
+     column at narrower widths thanks to min-width on the card. */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
   gap: 1.25rem;
 }
 
 .landing .feature {
+  /* `calc(33.333% - 1.25rem * 2 / 3)` is "one third minus its share
+     of the gaps." flex-grow:1 so a partial last row still expands to
+     fill. min-width forces wrap to 2-up below ~870px and 1-up below
+     ~580px. */
+  flex: 1 1 calc(33.333% - 0.834rem);
+  min-width: 260px;
   background: var(--sl-color-gray-6);
   border: 1px solid var(--sl-color-gray-5);
   border-radius: 0.8rem;
   padding: 1.4rem;
+  /* Same rhythm-spacing override as `.pillar` - Starlight's `* + *`
+     was making non-first cards in each row 16px shorter. */
+  margin: 0;
 }
 
 .landing .feature h4 {
@@ -339,9 +361,16 @@
   border: 1px solid rgba(95, 168, 96, 0.25);
   color: var(--sl-color-white);
   font-weight: 600;
-  padding: 0.1em 0.4em;
+  /* No vertical padding - keeps the chip within the surrounding
+     line-height so a card with an inline code chip is not taller than
+     a card without one. Horizontal padding stays for visual weight. */
+  padding: 0 0.4em;
   border-radius: 0.3em;
   font-size: 0.92em;
+  /* Pin the chip's height to the line so its top/bottom borders sit
+     flush with where text would. */
+  line-height: inherit;
+  vertical-align: baseline;
 }
 
 [data-theme='dark'] .landing :not(pre) > code {

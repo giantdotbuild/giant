@@ -108,8 +108,24 @@ pub fn list(cfg: &TaskConfig) {
     let width = cfg.tasks.keys().map(|k| k.len()).max().unwrap_or(0);
 
     for (name, spec) in &cfg.tasks {
+        let name_s = paint(accent(), name);
         let desc = spec.description.as_deref().unwrap_or("");
-        let desc_s = paint(dim(), desc);
-        println!("  {name:<width$}  {desc_s}");
+        println!(
+            "  {name_s:<padded$}  {desc}",
+            padded = width + accent_padding()
+        );
+    }
+}
+
+/// When we paint the task name in `accent` (green+bold), the ANSI
+/// escape sequence adds invisible bytes that break `{:<width}` padding.
+/// This is the extra byte count we have to add to the width spec so
+/// columns line up under colour. With colour off it's 0.
+fn accent_padding() -> usize {
+    if enabled() {
+        // `\x1b[1;32m` (7 bytes) + `\x1b[0m` (4 bytes) = 11.
+        11
+    } else {
+        0
     }
 }

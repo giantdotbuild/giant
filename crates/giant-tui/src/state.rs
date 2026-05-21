@@ -25,6 +25,9 @@ pub enum Screen {
     Browser,
     /// A one-shot build is running.
     Building,
+    /// File-watching mode: cycles rebuild on file changes. Same UI as
+    /// `Building` but `Esc` stops the watch rather than the build.
+    Watching,
     /// The build just finished; hold on the summary.
     BuildFinished,
 }
@@ -320,6 +323,15 @@ impl State {
         // is a "we sent the command, no event yet, but show the
         // running screen" optimisation so input feels instant.
         self.screen = Screen::Building;
+        self.reset_build_state();
+    }
+
+    pub fn start_watch_locally(&mut self) {
+        self.screen = Screen::Watching;
+        self.reset_build_state();
+    }
+
+    fn reset_build_state(&mut self) {
         self.targets.clear();
         self.logs.clear();
         self.final_summary = None;
@@ -525,14 +537,16 @@ impl State {
     pub fn visible_count(&self) -> usize {
         match self.screen {
             Screen::Browser => self.filtered_catalog().len(),
-            Screen::Building | Screen::BuildFinished => self.sorted_build_targets().len(),
+            Screen::Building | Screen::Watching | Screen::BuildFinished => {
+                self.sorted_build_targets().len()
+            }
             Screen::Loading => 0,
         }
     }
 
     pub fn scroll_up(&mut self, n: usize) {
         match self.screen {
-            Screen::Building | Screen::BuildFinished => {
+            Screen::Building | Screen::Watching | Screen::BuildFinished => {
                 self.move_build_cursor(-(n as isize));
             }
             _ => {
@@ -543,7 +557,7 @@ impl State {
 
     pub fn scroll_down(&mut self, n: usize) {
         match self.screen {
-            Screen::Building | Screen::BuildFinished => {
+            Screen::Building | Screen::Watching | Screen::BuildFinished => {
                 self.move_build_cursor(n as isize);
             }
             _ => {
@@ -555,7 +569,7 @@ impl State {
 
     pub fn scroll_top(&mut self) {
         match self.screen {
-            Screen::Building | Screen::BuildFinished => {
+            Screen::Building | Screen::Watching | Screen::BuildFinished => {
                 self.build_cursor = 0;
             }
             _ => {
@@ -566,7 +580,7 @@ impl State {
 
     pub fn scroll_bottom(&mut self) {
         match self.screen {
-            Screen::Building | Screen::BuildFinished => {
+            Screen::Building | Screen::Watching | Screen::BuildFinished => {
                 let n = self.sorted_build_targets().len();
                 self.build_cursor = n.saturating_sub(1);
             }

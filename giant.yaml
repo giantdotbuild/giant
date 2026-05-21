@@ -152,13 +152,15 @@ tasks:
     deps: ["docs:build"]
 
   docs-dev:
-    command: "npx astro dev"
+    # "$@" forwards anything after `giant task docs-dev --` to astro,
+    # so e.g. `giant task docs-dev -- --host` binds on all interfaces.
+    command: 'npx astro dev "$@"'
     description: "serve the docs site at localhost:4321 (blocks)"
     deps: ["docs:install"]
     cwd: "docs-site"
 
   docs-preview:
-    command: "npx astro preview"
+    command: 'npx astro preview "$@"'
     description: "preview the production-built docs site"
     deps: ["docs:build"]
     cwd: "docs-site"

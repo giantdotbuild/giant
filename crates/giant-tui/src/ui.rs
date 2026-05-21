@@ -25,7 +25,9 @@ pub fn draw(frame: &mut Frame, state: &State) {
     match state.screen {
         Screen::Loading => draw_loading(frame, area, state),
         Screen::Browser => draw_browser(frame, area, state),
-        Screen::Building | Screen::BuildFinished => draw_build_view(frame, area, state),
+        Screen::Building | Screen::Watching | Screen::BuildFinished => {
+            draw_build_view(frame, area, state)
+        }
     }
 
     if state.mode == Mode::Search {
@@ -237,8 +239,13 @@ fn draw_build_header(frame: &mut Frame, area: Rect, state: &State) {
             .map(|t| t.elapsed().as_millis() as u64)
             .unwrap_or(0);
         let total = state.build_target_count();
+        let verb = if state.screen == Screen::Watching {
+            "rebuilding"
+        } else {
+            "building"
+        };
         format!(
-            " giant - building {} of {} targets · {} ",
+            " giant - {verb} {} of {} targets · {} ",
             state.running_count(),
             total,
             format_duration_ms(elapsed_ms)
@@ -254,6 +261,18 @@ fn draw_build_header(frame: &mut Frame, area: Rect, state: &State) {
         _ => Style::default().add_modifier(Modifier::BOLD),
     };
     let mut spans: Vec<Span> = vec![Span::styled(title, style)];
+    if state.screen == Screen::Watching {
+        // High-contrast badge so it's obvious watch mode is on. Sits
+        // right after the verb so the eye picks it up first.
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            " ◉ WATCHING ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     for chip in filter_chips(state) {
         spans.push(Span::raw(" "));
         spans.push(chip);
@@ -429,7 +448,10 @@ fn filter_chips(state: &State) -> Vec<Span<'static>> {
         chips.push(Span::styled(format!(" -{tag} "), exclude_style));
     }
     if state.filters.status != StatusFilter::All
-        && matches!(state.screen, Screen::Building | Screen::BuildFinished)
+        && matches!(
+            state.screen,
+            Screen::Building | Screen::Watching | Screen::BuildFinished
+        )
     {
         chips.push(Span::styled(
             format!(" {} ", state.filters.status.label()),
@@ -740,6 +762,46 @@ mod tests {
     fn compute_offset_handles_empty_and_short_lists() {
         assert_eq!(compute_build_list_offset(0, 0, 10), 0);
         assert_eq!(compute_build_list_offset(2, 5, 10), 0);
+    }
+
+    #[test]
+    fn watching_screen_shows_watching_badge_in_header() {
+        let mut state = State {
+            screen: Screen::Watching,
+            ..State::default()
+        };
+        state.apply(Event::BuildStarted {
+            id: "b_w_0001".into(),
+            selection: vec![],
+            target_ids: vec![giant::model::TargetId::new("a")],
+            parallelism: 1,
+        });
+        let dump = render_to_string(&state);
+        assert!(
+            dump.contains("WATCHING"),
+            "expected WATCHING badge in:\n{dump}"
+        );
+        assert!(
+            dump.contains("rebuilding"),
+            "expected 'rebuilding' verb in:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn building_screen_does_not_show_watching_badge() {
+        let mut state = State {
+            screen: Screen::Building,
+            ..State::default()
+        };
+        state.apply(Event::BuildStarted {
+            id: "b_1".into(),
+            selection: vec![],
+            target_ids: vec![giant::model::TargetId::new("a")],
+            parallelism: 1,
+        });
+        let dump = render_to_string(&state);
+        assert!(!dump.contains("WATCHING"));
+        assert!(dump.contains("building"));
     }
 
     #[test]
