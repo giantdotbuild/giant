@@ -97,10 +97,31 @@ pub(super) async fn execute_with_mode(
         // id_width starts at 0; it gets recomputed inside the renderer
         // once `BuildStarted` arrives with the full target list.
         let mut r = Renderer::new(mode, 0, quiet);
-        while let Some(ev) = rx.recv().await {
-            if let Some(line) = r.render(&ev) {
-                let _ = out.write_all(line.as_bytes()).await;
-                let _ = out.flush().await;
+        // Heartbeat: every second we ask the renderer if any
+        // currently-running targets have been quiet long enough to
+        // warrant a "still running" line. The renderer itself decides
+        // (HEARTBEAT_AFTER threshold).
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                ev = rx.recv() => {
+                    match ev {
+                        Some(ev) => {
+                            if let Some(line) = r.render(&ev) {
+                                let _ = out.write_all(line.as_bytes()).await;
+                                let _ = out.flush().await;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = tick.tick() => {
+                    if let Some(line) = r.heartbeat() {
+                        let _ = out.write_all(line.as_bytes()).await;
+                        let _ = out.flush().await;
+                    }
+                }
             }
         }
     });

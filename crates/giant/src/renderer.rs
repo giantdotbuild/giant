@@ -19,7 +19,9 @@
 use crate::events::{Event, TargetCounts, TargetResultKind};
 use crate::model::TargetId;
 use anstyle::{AnsiColor, Color, Style};
+use std::collections::HashMap;
 use std::io::IsTerminal;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -79,6 +81,7 @@ pub struct Theme {
     external: Style,
     skip: Style,
     fail: Style,
+    running: Style,
     summary_ok: Style,
     summary_fail: Style,
     dim: Style,
@@ -95,6 +98,7 @@ impl Theme {
             external: Style::new(),
             skip: Style::new(),
             fail: Style::new(),
+            running: Style::new(),
             summary_ok: Style::new(),
             summary_fail: Style::new(),
             dim: Style::new(),
@@ -114,6 +118,7 @@ impl Theme {
             external: fg(AnsiColor::BrightBlack),
             skip: fg(AnsiColor::BrightBlack),
             fail: fg(AnsiColor::Red).bold(),
+            running: fg(AnsiColor::Yellow).bold(),
             summary_ok: fg(AnsiColor::Green).bold(),
             summary_fail: fg(AnsiColor::Red).bold(),
             dim: fg(AnsiColor::BrightBlack),
@@ -158,6 +163,24 @@ pub struct Renderer {
     id_width: usize,
     quiet: bool,
     failed: Vec<TargetId>,
+    /// In-flight targets and the last time they emitted output. Used
+    /// by `heartbeat()` to print "still running" lines for quiet
+    /// long-runners so the user gets feedback during slow builds.
+    running: HashMap<TargetId, RunningInfo>,
+}
+
+/// Don't emit a heartbeat for a target until it's been quiet for at
+/// least this long. Fast targets (cache hits, < 3 s builds) get no
+/// heartbeat at all.
+const HEARTBEAT_AFTER: Duration = Duration::from_secs(3);
+
+#[derive(Debug)]
+struct RunningInfo {
+    started_at: Instant,
+    last_activity: Instant,
+    /// Set once we've emitted a heartbeat for this run so we don't
+    /// re-announce the same elapsed bucket twice in a row.
+    last_announced_elapsed_s: u64,
 }
 
 impl Renderer {
@@ -168,6 +191,7 @@ impl Renderer {
             id_width,
             quiet,
             failed: Vec::new(),
+            running: HashMap::new(),
         }
     }
 
@@ -208,7 +232,22 @@ impl Renderer {
                 self.id_width = id_width(target_ids);
                 None
             }
+            Event::TargetStarted { id, .. } => {
+                let now = Instant::now();
+                self.running.insert(
+                    id.clone(),
+                    RunningInfo {
+                        started_at: now,
+                        last_activity: now,
+                        last_announced_elapsed_s: 0,
+                    },
+                );
+                None
+            }
             Event::TargetLog { id, line, .. } => {
+                if let Some(info) = self.running.get_mut(id) {
+                    info.last_activity = Instant::now();
+                }
                 if self.quiet {
                     return None;
                 }
@@ -221,6 +260,7 @@ impl Renderer {
                 error,
                 ..
             } => {
+                self.running.remove(id);
                 if matches!(result, TargetResultKind::Failed) {
                     self.failed.push(id.clone());
                 }
@@ -237,6 +277,58 @@ impl Renderer {
             } => Some(self.summary(*ok, *duration_ms, counts)),
             _ => None,
         }
+    }
+
+    /// Periodic "still running" output for targets that have been
+    /// quiet a while. Returns one line per silent long-runner, or
+    /// `None` if nothing to report. Caller drives this off a timer
+    /// (e.g. every 3 s). Ndjson mode never produces heartbeat output
+    /// - porcelains have richer per-target state.
+    pub fn heartbeat(&mut self) -> Option<String> {
+        if !matches!(self.mode, Mode::Human { .. }) {
+            return None;
+        }
+        let now = Instant::now();
+        // Collect first to release the mutable borrow before we call
+        // `running_line` (which needs &self).
+        let mut due: Vec<(TargetId, Duration)> = Vec::new();
+        for (id, info) in &mut self.running {
+            let elapsed = now.duration_since(info.started_at);
+            let quiet = now.duration_since(info.last_activity);
+            if elapsed < HEARTBEAT_AFTER || quiet < HEARTBEAT_AFTER {
+                continue;
+            }
+            // Round elapsed to seconds; only emit once per second
+            // bucket so a 60s target doesn't print 60 heartbeats.
+            let bucket = elapsed.as_secs();
+            if bucket == info.last_announced_elapsed_s {
+                continue;
+            }
+            info.last_announced_elapsed_s = bucket;
+            due.push((id.clone(), elapsed));
+        }
+        if due.is_empty() {
+            return None;
+        }
+        let mut out = String::new();
+        for (id, elapsed) in due {
+            out.push_str(&self.running_line(&id, elapsed));
+        }
+        Some(out)
+    }
+
+    fn running_line(&self, id: &TargetId, elapsed: Duration) -> String {
+        let verb = "RUN";
+        let painted_verb = paint(
+            self.theme.enabled,
+            self.theme.running,
+            &format!("{verb:<VERB_WIDTH$}"),
+        );
+        let id_str = id.as_str();
+        let id_padded = format!("{id_str:<width$}", width = self.id_width);
+        let dur = format_duration(elapsed.as_millis() as u64);
+        let dur_dim = paint(self.theme.enabled, self.theme.dim, &dur);
+        format!("{painted_verb}  {id_padded}  {dur_dim}\n")
     }
 
     fn log_line(&self, id: &TargetId, line: &str) -> String {
