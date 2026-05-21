@@ -59,6 +59,9 @@ pub struct BuildJob {
     pub events: EventSender,
     pub cancel: CancellationToken,
     pub build_id: String,
+    /// Log capture / replay policy. Default = capture both, replay on
+    /// cache hits, 5 MiB per stream.
+    pub log_capture: LogCapture,
     /// Optional remote cache. Inserted by the CLI when configured;
     /// always `None` when the `remote` feature is off.
     #[cfg(feature = "remote")]
@@ -66,6 +69,42 @@ pub struct BuildJob {
     /// Background uploader sink. Same lifecycle as `remote`.
     #[cfg(feature = "remote")]
     pub upload_tx: Option<tokio::sync::mpsc::Sender<crate::remote::UploadJob>>,
+}
+
+/// Per-build log capture/replay policy. Bundled so the configuration
+/// gets passed through one field rather than three.
+#[derive(Debug, Clone, Copy)]
+pub struct LogCapture {
+    /// Write stdout/stderr to CAS alongside outputs when a target
+    /// builds, so a future cache hit can replay them.
+    pub capture: bool,
+    /// On cache hits (local or remote), emit synthetic `TargetLog`
+    /// events from the stored blob so the porcelain sees the same
+    /// output as a fresh build.
+    pub replay: bool,
+    /// Per-stream byte cap for capture. Lines beyond the cap stream
+    /// live but don't make it to the blob.
+    pub cap_bytes: usize,
+}
+
+impl Default for LogCapture {
+    fn default() -> Self {
+        Self {
+            capture: true,
+            replay: true,
+            cap_bytes: 5 * 1024 * 1024,
+        }
+    }
+}
+
+impl LogCapture {
+    pub fn from_cache_config(c: &crate::config::CacheConfig) -> Self {
+        Self {
+            capture: c.capture_logs,
+            replay: c.replay_logs,
+            cap_bytes: c.log_capture_cap_bytes,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +202,7 @@ struct TargetCtx {
     events: EventSender,
     cancel: CancellationToken,
     build_id: String,
+    log_capture: LogCapture,
     /// Optional remote cache. `None` when the binary is built without
     /// the `remote` feature or when the user has it disabled. Lookup
     /// chain consults it between local AC and the `exists:` check.
@@ -253,6 +293,7 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
         events: job.events.clone(),
         cancel: job.cancel.clone(),
         build_id: job.build_id.clone(),
+        log_capture: job.log_capture,
         #[cfg(feature = "remote")]
         remote: job.remote.clone(),
         #[cfg(feature = "remote")]
@@ -452,9 +493,9 @@ async fn dispatch_target(
     //      env. Exit 0 → ExternalCacheHit, skip the build.
     //   4. run the target's command.
     let (result, output_hash) = if !ctx.fresh {
-        if let Some((r, oh)) = try_cache_hit(&ctx.cache, &ctx.workspace_root, &key).await? {
+        if let Some((r, oh)) = try_cache_hit(&ctx, &spec.id, &key).await? {
             (r, Some(oh))
-        } else if let Some((r, oh)) = try_remote_hit(&ctx, &key).await? {
+        } else if let Some((r, oh)) = try_remote_hit(&ctx, &spec.id, &key).await? {
             (r, Some(oh))
         } else if let Some((r, oh)) = try_exists_check(&ctx, &spec, key).await {
             (r, Some(oh))
@@ -666,14 +707,14 @@ fn compose_cache_key_blocking(
 
     // file inputs (expand globs, sort, hash content)
     h.update(b"file_inputs\0");
-    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut file_globs: Vec<&str> = Vec::new();
     // Collect structural-input specs as we walk; they hash separately
     // so the section is independent of file-input order.
     let mut structurals: Vec<StructuralSpec> = Vec::new();
     for input in &spec.inputs {
         match input {
             Input::File { glob } => {
-                expand_glob_into(workspace_root.as_path(), glob.as_str(), &mut paths)?;
+                file_globs.push(glob.as_str());
             }
             Input::Structural {
                 files,
@@ -691,40 +732,49 @@ fn compose_cache_key_blocking(
             }
         }
     }
-    paths.sort();
-    paths.dedup();
-    for p in &paths {
-        let rel = p
-            .strip_prefix(workspace_root.as_path())
-            .unwrap_or(p)
-            .to_string_lossy()
-            .into_owned();
-        h.update(rel.as_bytes());
-        h.update(b"\0");
-        let file_hash = ContentHash::of_file(p)?;
-        h.update(file_hash.as_bytes());
-        h.update(b"\0");
-        if let Some(bd) = breakdown.as_deref_mut() {
-            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-            bd.file_inputs.push(FileInputContribution {
-                rel_path: rel,
-                content_hash: file_hash,
-                size,
-            });
-        }
-    }
-
-    // structural inputs - one fingerprint per declared structural
-    // input, canonicalised (sort each input's globs/lines/scope; sort
-    // the inputs themselves) so YAML reordering doesn't shift the key.
-    h.update(b"structural_inputs\0");
+    // Canonicalise the structural specs ahead of time so the
+    // parallel-computed section is deterministic on both sides of
+    // the join. Sorts are cheap on a handful of specs.
     for s in &mut structurals {
         s.files.sort();
         s.lines.sort();
         s.scope.sort();
     }
     structurals.sort();
-    for s in &structurals {
+
+    // Independent work - run concurrently. The file-input branch
+    // walks + hashes; the structural branch consults the gix
+    // fast-path / sidecar. Neither touches the other's data, so
+    // rayon::join gives us a clean wall-time overlap of the slower
+    // of the two phases.
+    let (file_result, structural_result): (
+        Result<Vec<FileInputItem>, std::io::Error>,
+        Result<Vec<StructuralFingerprint>, std::io::Error>,
+    ) = rayon::join(
+        || compute_file_inputs(workspace_root, cache, &file_globs),
+        || compute_structural_inputs(workspace_root, cache, &spec.id, &structurals),
+    );
+    let file_items = file_result?;
+    let structural_items = structural_result?;
+
+    // Hash file_inputs section in deterministic order.
+    for item in &file_items {
+        h.update(item.rel_path.as_bytes());
+        h.update(b"\0");
+        h.update(item.content_hash.as_bytes());
+        h.update(b"\0");
+        if let Some(bd) = breakdown.as_deref_mut() {
+            bd.file_inputs.push(FileInputContribution {
+                rel_path: item.rel_path.clone(),
+                content_hash: item.content_hash,
+                size: item.size,
+            });
+        }
+    }
+
+    // Hash structural_inputs section. Same shape as before.
+    h.update(b"structural_inputs\0");
+    for (s, fp) in structurals.iter().zip(structural_items.iter()) {
         for f in &s.files {
             h.update(f.as_bytes());
             h.update(b"\0");
@@ -740,23 +790,14 @@ fn compose_cache_key_blocking(
             h.update(b"\0");
         }
         h.update(b"|\0");
-        let fp = crate::structural::compute_fingerprint(
-            workspace_root,
-            cache,
-            &spec.id,
-            &s.files,
-            &s.lines,
-            &s.scope,
-        )
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-        h.update(fp.as_bytes());
+        h.update(fp.fingerprint.as_bytes());
         h.update(b"\0");
         if let Some(bd) = breakdown.as_deref_mut() {
             bd.structural_inputs.push(StructuralContribution {
                 files: s.files.clone(),
                 lines: s.lines.clone(),
                 scope: s.scope.clone(),
-                fingerprint: fp,
+                fingerprint: fp.fingerprint,
             });
         }
     }
@@ -775,6 +816,81 @@ fn compose_cache_key_blocking(
     Ok(h.finalize())
 }
 
+/// One hashed file input ready to be folded into the cache-key hash.
+/// Order is fixed by `compute_file_inputs` (sorted by `rel_path`).
+struct FileInputItem {
+    rel_path: String,
+    content_hash: ContentHash,
+    size: u64,
+}
+
+/// Fingerprint of one structural input - paired positionally with the
+/// canonicalised `StructuralSpec` it was computed for.
+struct StructuralFingerprint {
+    fingerprint: ContentHash,
+}
+
+/// Walk + hash file inputs. Walk is parallel via `expand_globs_batched`;
+/// hashing is parallel via rayon over the sorted path list. Sequential
+/// hashing was visibly slow on warm runs of large discovery targets
+/// (~1 ms per file × 70+ files); rayon brings that to ~10 ms.
+fn compute_file_inputs(
+    workspace_root: &AbsPath,
+    cache: &LocalCache,
+    globs: &[&str],
+) -> Result<Vec<FileInputItem>, std::io::Error> {
+    use rayon::prelude::*;
+
+    let mut paths = expand_globs_batched(workspace_root.as_path(), globs, cache)?;
+    paths.sort();
+    paths.dedup();
+
+    paths
+        .par_iter()
+        .map(|p| {
+            let rel = p
+                .strip_prefix(workspace_root.as_path())
+                .unwrap_or(p)
+                .to_string_lossy()
+                .into_owned();
+            let content_hash = ContentHash::of_file(p)?;
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            Ok(FileInputItem {
+                rel_path: rel,
+                content_hash,
+                size,
+            })
+        })
+        .collect()
+}
+
+/// Compute structural-input fingerprints. Sequential across structural
+/// specs (usually only 1-2 per target) since `compute_fingerprint`
+/// uses gix and a per-target sidecar - contention rather than gain if
+/// parallelised at this layer.
+fn compute_structural_inputs(
+    workspace_root: &AbsPath,
+    cache: &LocalCache,
+    target_id: &TargetId,
+    structurals: &[StructuralSpec],
+) -> Result<Vec<StructuralFingerprint>, std::io::Error> {
+    structurals
+        .iter()
+        .map(|s| {
+            crate::structural::compute_fingerprint(
+                workspace_root,
+                cache,
+                target_id,
+                &s.files,
+                &s.lines,
+                &s.scope,
+            )
+            .map(|fingerprint| StructuralFingerprint { fingerprint })
+            .map_err(|e| std::io::Error::other(e.to_string()))
+        })
+        .collect()
+}
+
 /// Internal canonical representation of one structural input, used to
 /// build a deterministic section of the cache key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -784,32 +900,135 @@ struct StructuralSpec {
     scope: Vec<String>,
 }
 
-fn expand_glob_into(
-    root: &Path,
-    pattern: &str,
-    out: &mut Vec<PathBuf>,
-) -> Result<(), std::io::Error> {
-    // glob crate expects the pattern relative to the cwd. We change to the
-    // workspace root in spirit by joining manually.
-    let full_pattern = root.join(pattern).to_string_lossy().into_owned();
-    let entries = glob::glob(&full_pattern)
-        .map_err(|e| std::io::Error::other(format!("bad glob {pattern:?}: {e}")))?;
-    for entry in entries.flatten() {
-        if entry.is_file() {
-            out.push(entry);
+/// Expand a set of input globs against the workspace at most once.
+///
+/// Without this, declaring N globs that contain `**` would walk the
+/// workspace N times. We split the input list into:
+///   - **literal paths**: no glob metachars; resolved via single `stat`
+///   - **shallow globs**: no `**`; cheap, resolved by `glob::glob` (it
+///     reads only directories the pattern actually traverses)
+///   - **recursive globs**: contain `**`; matched against ONE shared
+///     workspace walk (`walkdir`) that visits each directory once.
+///
+/// The shared walk also prunes known noise (`.git`, `.giant`, the
+/// configured cache directory) to keep the visit budget bounded.
+fn expand_globs_batched(
+    workspace_root: &Path,
+    globs: &[&str],
+    cache: &LocalCache,
+) -> Result<Vec<PathBuf>, std::io::Error> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut recursive: Vec<(String, glob::Pattern)> = Vec::new();
+
+    for &g in globs {
+        if g.contains("**") {
+            let pat = glob::Pattern::new(g)
+                .map_err(|e| std::io::Error::other(format!("bad glob {g:?}: {e}")))?;
+            recursive.push((g.to_string(), pat));
+        } else if has_glob_metachars(g) {
+            // Shallow glob - let the glob crate handle it; it'll only
+            // read the directories actually referenced by the pattern.
+            let full = workspace_root.join(g).to_string_lossy().into_owned();
+            let entries = glob::glob(&full)
+                .map_err(|e| std::io::Error::other(format!("bad glob {g:?}: {e}")))?;
+            for entry in entries.flatten() {
+                if entry.is_file() {
+                    out.push(entry);
+                }
+            }
+        } else {
+            // Literal path - one stat, no walk.
+            let p = workspace_root.join(g);
+            if p.is_file() {
+                out.push(p);
+            }
         }
     }
-    Ok(())
+
+    if recursive.is_empty() {
+        return Ok(out);
+    }
+
+    // Shared parallel walk for all recursive patterns. `ignore::WalkParallel`
+    // distributes directory entries across a worker pool, with each match
+    // pushed to a shared `Vec` behind a mutex. Mutex contention is minor -
+    // only files matching the glob list actually contend.
+    //
+    // We turn off standard filters (.gitignore / .ignore / hidden) so the
+    // semantics match `glob::glob` exactly: declared inputs are matched
+    // against the literal filesystem, not against what git tracks.
+    let cache_dir = cache.root().as_path().to_path_buf();
+    let skip_names: &[&str] = &[".git", ".giant", ".direnv", ".devenv"];
+
+    let matches: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let workspace_root_owned = workspace_root.to_path_buf();
+    let recursive = Arc::new(recursive);
+
+    ignore::WalkBuilder::new(workspace_root)
+        .standard_filters(false)
+        .hidden(false)
+        .follow_links(false)
+        .filter_entry(move |entry| {
+            // Don't descend into noise dirs (matches old prototype's
+            // sequential prune). cache root identified by full path
+            // equality; the others by file_name.
+            let path = entry.path();
+            if path == cache_dir.as_path() {
+                return false;
+            }
+            if let Some(name) = entry.file_name().to_str()
+                && skip_names.contains(&name)
+            {
+                return false;
+            }
+            true
+        })
+        .build_parallel()
+        .run(|| {
+            let matches = Arc::clone(&matches);
+            let workspace_root = workspace_root_owned.clone();
+            let recursive = Arc::clone(&recursive);
+            Box::new(move |result| {
+                let Ok(entry) = result else {
+                    return ignore::WalkState::Continue;
+                };
+                if !entry.file_type().is_some_and(|t| t.is_file()) {
+                    return ignore::WalkState::Continue;
+                }
+                let path = entry.path();
+                let rel = path.strip_prefix(&workspace_root).unwrap_or(path);
+                if recursive.iter().any(|(_, pat)| pat.matches_path(rel)) {
+                    matches.lock().unwrap().push(path.to_path_buf());
+                }
+                ignore::WalkState::Continue
+            })
+        });
+
+    let mut found = Arc::try_unwrap(matches)
+        .map(|m| m.into_inner().unwrap())
+        .unwrap_or_else(|arc| std::mem::take(&mut *arc.lock().unwrap()));
+    out.append(&mut found);
+
+    Ok(out)
+}
+
+fn has_glob_metachars(s: &str) -> bool {
+    s.contains('*') || s.contains('?') || s.contains('[')
 }
 
 /// Try a local-cache lookup; if hit, restore outputs to workspace and
 /// return the (result, output_content_hash) tuple. Returning the hash
-/// here saves a re-read on the dispatcher side.
+/// here saves a re-read on the dispatcher side. Also replays captured
+/// stdout/stderr (if the AC entry has blobs and replay is enabled) so
+/// cache hits aren't silent.
 async fn try_cache_hit(
-    cache: &LocalCache,
-    workspace_root: &AbsPath,
+    ctx: &TargetCtx,
+    target_id: &TargetId,
     key: &CacheKey,
 ) -> Result<Option<(TargetResult, ContentHash)>, ExecutorError> {
+    let cache = &ctx.cache;
+    let workspace_root = &ctx.workspace_root;
     let Some(entry) = cache.get_ac(key).await? else {
         return Ok(None);
     };
@@ -860,6 +1079,10 @@ async fn try_cache_hit(
         }
     };
 
+    if ctx.log_capture.replay {
+        replay_logs(ctx, target_id, &entry).await;
+    }
+
     Ok(Some((
         TargetResult::CacheHit {
             key: *key,
@@ -867,6 +1090,49 @@ async fn try_cache_hit(
         },
         output_hash,
     )))
+}
+
+/// Emit captured stdout/stderr from an AC entry as `TargetLog`
+/// events. Missing blobs / empty entries are silently skipped - the
+/// target predates log capture or had no output to begin with.
+async fn replay_logs(ctx: &TargetCtx, target_id: &TargetId, entry: &crate::cache::AcEntry) {
+    if let Some(hex) = entry.stdout_blob.as_deref() {
+        replay_one_stream(ctx, target_id, hex, LogStream::Stdout).await;
+    }
+    if let Some(hex) = entry.stderr_blob.as_deref() {
+        replay_one_stream(ctx, target_id, hex, LogStream::Stderr).await;
+    }
+}
+
+async fn replay_one_stream(
+    ctx: &TargetCtx,
+    target_id: &TargetId,
+    blob_hex: &str,
+    stream: LogStream,
+) {
+    let Ok(bytes) = const_hex::decode(blob_hex) else {
+        return;
+    };
+    let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) else {
+        return;
+    };
+    let hash = ContentHash::from_raw(arr);
+    let Ok(Some(blob)) = ctx.cache.get_cas(&hash).await else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&blob);
+    for line in text.lines() {
+        let _ = ctx
+            .events
+            .send(Event::TargetLog {
+                build: ctx.build_id.clone(),
+                id: target_id.clone(),
+                stream,
+                line: line.to_string(),
+                truncated: false,
+            })
+            .await;
+    }
 }
 
 /// Try the remote cache. Hits restore outputs to the workspace AND
@@ -878,6 +1144,7 @@ async fn try_cache_hit(
 #[cfg(feature = "remote")]
 async fn try_remote_hit(
     ctx: &TargetCtx,
+    target_id: &TargetId,
     key: &CacheKey,
 ) -> Result<Option<(TargetResult, ContentHash)>, ExecutorError> {
     let Some(remote) = ctx.remote.as_ref() else {
@@ -918,6 +1185,33 @@ async fn try_remote_hit(
         crate::cache::atomic_write_output(dst, blob, out.executable).await?;
     }
 
+    // Fetch the captured stdout/stderr blobs into local CAS too, so a
+    // future local hit can replay without touching the remote. Missing
+    // blobs on the remote are tolerated - older entries may not have
+    // logs at all.
+    for hex in entry
+        .stdout_blob
+        .iter()
+        .chain(entry.stderr_blob.iter())
+        .map(|s| s.as_str())
+    {
+        let Ok(bytes) = const_hex::decode(hex) else {
+            continue;
+        };
+        let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) else {
+            continue;
+        };
+        let hash = ContentHash::from_raw(arr);
+        if ctx.cache.has_cas(&hash).await {
+            continue;
+        }
+        if let Ok(Some(blob)) = remote.get_cas(&hash).await {
+            if ContentHash::of_bytes(&blob) == hash {
+                ctx.cache.put_cas(blob).await?;
+            }
+        }
+    }
+
     // Write the AC entry to local cache too so the next run goes
     // straight to the local fast path.
     ctx.cache.put_ac(key, &entry).await?;
@@ -929,6 +1223,10 @@ async fn try_remote_hit(
         Some(arr) => ContentHash::from_raw(arr),
         None => return Ok(None),
     };
+
+    if ctx.log_capture.replay {
+        replay_logs(ctx, target_id, &entry).await;
+    }
 
     Ok(Some((
         TargetResult::RemoteCacheHit {
@@ -944,6 +1242,7 @@ async fn try_remote_hit(
 #[cfg(not(feature = "remote"))]
 async fn try_remote_hit(
     _ctx: &TargetCtx,
+    _target_id: &TargetId,
     _key: &CacheKey,
 ) -> Result<Option<(TargetResult, ContentHash)>, ExecutorError> {
     Ok(None)
@@ -994,12 +1293,16 @@ async fn try_exists_check(
     };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    // exists-check output is purely informational - don't capture
+    // it to CAS (no AC entry to attach it to).
     let pump_o = pump_lines(
         stdout,
         ctx.events.clone(),
         ctx.build_id.clone(),
         spec.id.clone(),
         LogStream::Stdout,
+        0,
+        false,
     );
     let pump_e = pump_lines(
         stderr,
@@ -1007,6 +1310,8 @@ async fn try_exists_check(
         ctx.build_id.clone(),
         spec.id.clone(),
         LogStream::Stderr,
+        0,
+        false,
     );
 
     let status = tokio::select! {
@@ -1094,6 +1399,8 @@ async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> Target
         build_id.clone(),
         target_id.clone(),
         LogStream::Stdout,
+        ctx.log_capture.cap_bytes,
+        ctx.log_capture.capture,
     );
     let pump_stderr = pump_lines(
         stderr,
@@ -1101,6 +1408,8 @@ async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> Target
         build_id,
         target_id,
         LogStream::Stderr,
+        ctx.log_capture.cap_bytes,
+        ctx.log_capture.capture,
     );
 
     let status = tokio::select! {
@@ -1110,7 +1419,7 @@ async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> Target
             return TargetResult::Failed { key: Some(key), error: "cancelled".into() };
         }
     };
-    let (_, _) = tokio::join!(pump_stdout, pump_stderr);
+    let (stdout_bytes, stderr_bytes) = tokio::join!(pump_stdout, pump_stderr);
 
     let exit = match status {
         Ok(s) => s,
@@ -1139,6 +1448,35 @@ async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> Target
         }
     };
 
+    // Persist captured stdout/stderr to CAS so a future cache hit can
+    // replay them. Empty streams (or capture disabled) → None.
+    let stdout_blob = if ctx.log_capture.capture && !stdout_bytes.is_empty() {
+        match ctx.cache.put_cas(stdout_bytes.clone()).await {
+            Ok(h) => Some(h.to_hex()),
+            Err(e) => {
+                return TargetResult::Failed {
+                    key: Some(key),
+                    error: format!("write stdout blob: {e}"),
+                };
+            }
+        }
+    } else {
+        None
+    };
+    let stderr_blob = if ctx.log_capture.capture && !stderr_bytes.is_empty() {
+        match ctx.cache.put_cas(stderr_bytes.clone()).await {
+            Ok(h) => Some(h.to_hex()),
+            Err(e) => {
+                return TargetResult::Failed {
+                    key: Some(key),
+                    error: format!("write stderr blob: {e}"),
+                };
+            }
+        }
+    } else {
+        None
+    };
+
     // Write AC entry.
     let outputs_hash = compute_outputs_content_hash(&outputs);
     let ac = AcEntry {
@@ -1149,8 +1487,8 @@ async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> Target
         cwd: spec.cwd.as_path().to_string_lossy().into_owned(),
         outputs: outputs.iter().map(OutputFile::to_entry).collect(),
         outputs_content_hash: outputs_hash.to_hex(),
-        stdout_blob: None,
-        stderr_blob: None,
+        stdout_blob,
+        stderr_blob,
         exit_code: 0,
         duration_ms: started.elapsed().as_millis() as u64,
         built_at: chrono::Utc::now().to_rfc3339(),
@@ -1168,12 +1506,29 @@ async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> Target
     // ago, so the read is cheap. The build never waits on this.
     #[cfg(feature = "remote")]
     if let Some(tx) = ctx.upload_tx.as_ref() {
-        let mut blobs = Vec::with_capacity(outputs.len());
+        let mut blobs = Vec::with_capacity(outputs.len() + 2);
         for o in &outputs {
             match ctx.cache.get_cas(&o.content_hash).await {
                 Ok(Some(bytes)) => blobs.push((o.content_hash, bytes)),
                 _ => {
                     tracing::warn!("local CAS read failed for upload of {}", o.rel_path);
+                }
+            }
+        }
+        // Also ship captured stdout/stderr so other machines hitting
+        // this AC entry can replay the logs.
+        for hex in ac
+            .stdout_blob
+            .iter()
+            .chain(ac.stderr_blob.iter())
+            .map(|s| s.as_str())
+        {
+            if let Ok(bytes) = const_hex::decode(hex) {
+                if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                    let h = ContentHash::from_raw(arr);
+                    if let Ok(Some(b)) = ctx.cache.get_cas(&h).await {
+                        blobs.push((h, b));
+                    }
                 }
             }
         }
@@ -1295,19 +1650,46 @@ fn apply_color_env(cmd: &mut Command) {
     }
 }
 
-/// Pump stdout/stderr from a child into log events.
+/// Pump stdout/stderr from a child into log events while also
+/// accumulating the bytes into a buffer that can be written to CAS
+/// after the target completes (for cache-hit replay).
+///
+/// Returns the captured bytes. Accumulation stops at `cap_bytes` per
+/// stream; lines beyond the cap still stream live but aren't written
+/// to the blob. A `[truncated]` marker is appended so a future replay
+/// shows the cutoff.
 async fn pump_lines<R>(
     reader: Option<R>,
     events: EventSender,
     build_id: String,
     target_id: TargetId,
     stream: LogStream,
-) where
+    cap_bytes: usize,
+    capture: bool,
+) -> Vec<u8>
+where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
-    let Some(r) = reader else { return };
+    let mut buf: Vec<u8> = if capture {
+        Vec::with_capacity(1024)
+    } else {
+        Vec::new()
+    };
+    let mut hit_cap = false;
+    let Some(r) = reader else { return buf };
     let mut lines = BufReader::new(r).lines();
     while let Ok(Some(line)) = lines.next_line().await {
+        if capture && !hit_cap {
+            // +1 for the newline we re-append.
+            let needed = line.len() + 1;
+            if buf.len() + needed <= cap_bytes {
+                buf.extend_from_slice(line.as_bytes());
+                buf.push(b'\n');
+            } else {
+                buf.extend_from_slice(b"[giant: log truncated at capture cap]\n");
+                hit_cap = true;
+            }
+        }
         let truncated = line.len() > 8 * 1024;
         let line = if truncated {
             line[..8 * 1024].to_string()
@@ -1324,6 +1706,7 @@ async fn pump_lines<R>(
             })
             .await;
     }
+    buf
 }
 
 async fn emit(events: &EventSender, ev: Event) {

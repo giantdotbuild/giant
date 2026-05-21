@@ -199,7 +199,11 @@ mod tests {
         assert_eq!(new_includes.len(), 1);
         assert_eq!(new_includes[0].as_str(), "discover:wave2");
         // Both the nested include AND the static target are in the graph now.
-        assert!(graph.get(&crate::model::TargetId::new("discover:wave2")).is_some());
+        assert!(
+            graph
+                .get(&crate::model::TargetId::new("discover:wave2"))
+                .is_some()
+        );
         assert!(graph.get(&crate::model::TargetId::new("x")).is_some());
     }
 }

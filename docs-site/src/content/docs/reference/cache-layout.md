@@ -20,7 +20,6 @@ is `~/.cache/giant`; you can override per-workspace via `cache.dir`.
 ├── structural/          # per-target sidecars for structural inputs
 │   └── 8e/
 │       └── 8e1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e.json
-├── log/                 # captured stdout/stderr blobs (planned)
 └── tmp/                 # transient write-then-rename staging
 ```
 
@@ -63,7 +62,7 @@ both the filename and the lookup index:
   "exit_code": 0,
   "duration_ms": 1240,
   "built_at": "2026-05-20T13:24:01Z",
-  "stdout_blob": null,
+  "stdout_blob": "7c1e9a...",
   "stderr_blob": null
 }
 ```
@@ -72,11 +71,18 @@ both the filename and the lookup index:
 Downstream targets reference it (not the cache key) for the [early
 cutoff](/concepts/cache-key/#early-cutoff) optimization.
 
+`stdout_blob` / `stderr_blob` are the CAS hashes of the captured
+stdout and stderr from the build that wrote this entry. Either can be
+`null` - if the stream produced no bytes, or if `cache.capture_logs`
+was off at the time. See [Log capture and replay](#log-capture-and-replay)
+below.
+
 ## `cas/`
 
 Pure content-addressed bytes. Filename = SHA-256 of contents (verified
 on read). No metadata, no JSON - just the raw output bytes from some
-target.
+target. Captured stdout/stderr blobs live in `cas/` too; they're CAS
+entries like any other.
 
 ## `structural/`
 
@@ -131,3 +137,63 @@ deduplicate across workspaces (same bytes = same hash = same path).
 Eviction works fine across multi-workspace caches, but doesn't
 fair-share. If one workspace dominates, it'll evict the other's older
 entries. Document this for shared environments.
+
+## Log capture and replay
+
+Cache hits would otherwise be silent - you'd see `CACHE  go:bin:server`
+and nothing else, even if the original build emitted useful diagnostic
+output. To fix that, Giant captures each target's stdout and stderr
+into CAS blobs alongside its outputs. On a hit, those blobs are read
+back and re-emitted as `target.log` events, just like the live run.
+
+### What gets stored
+
+After a target builds successfully:
+
+1. Streaming stdout/stderr is accumulated into in-memory buffers
+   (capped - see below).
+2. Each non-empty stream is written to `cas/` as a normal CAS blob.
+3. The blob hashes go into the AC entry's `stdout_blob` /
+   `stderr_blob` fields.
+
+Failed builds don't write an AC entry at all, so their logs aren't
+captured - failure output already streamed live, and there's nothing
+to replay against.
+
+### Replay
+
+On a cache hit (local *or* remote), the executor reads the blobs from
+local CAS and emits one `target.log` event per line. Renderer output
+on a hit therefore matches a fresh build's output, modulo the
+`CACHE`/`BUILD` verb. Porcelains that listen on `target.log` get the
+replay for free.
+
+For a remote hit, the log blobs are fetched into local CAS alongside
+the output blobs, so the next local hit replays without touching the
+remote again.
+
+### Caps
+
+Each stream is capped at `cache.log_capture_cap_bytes` (default 5 MiB).
+A build that exceeds the cap continues streaming live to the
+console - only the captured portion stops growing. The on-disk blob
+ends with `[giant: log truncated at capture cap]` so a future replay
+makes the cutoff visible.
+
+ANSI control sequences are preserved (raw bytes go in), so colors
+replay too.
+
+### Opting out
+
+Both halves are independently configurable. Set
+`cache.capture_logs: false` to skip writing log blobs entirely;
+set `cache.replay_logs: false` to keep capturing but stay silent on
+hits. See [config reference](/reference/config/) for the full shape.
+
+### Eviction
+
+Log blobs participate in normal eviction. When an AC entry is evicted,
+its referenced `stdout_blob`/`stderr_blob` hashes are eligible for
+collection. A subsequent cache hit on an entry whose log blobs were
+already evicted just silently skips the replay - the hit itself still
+succeeds.

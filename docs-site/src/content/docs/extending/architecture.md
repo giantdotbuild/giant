@@ -147,9 +147,9 @@ The renderer task pulls from the matching `Receiver` and either prints
 human-readable lines or serializes the raw event to NDJSON depending
 on mode.
 
-The same machinery will back the future `giant serve` socket - events
-get fanned out to attached clients with the same shape, no
-serialization differences.
+The same machinery backs `giant session` - events fan out to the
+attached stdin/stdout client with the same shape, no serialization
+differences.
 
 ## Tokio task layout
 
@@ -183,7 +183,8 @@ clean up.
 
 - Tasks (`giant-task` porcelain in `crates/giant-task/`; see
   [its docs page](/extending/giant-task/)).
-- TUI (separate `giant-tui` porcelain, future).
+- TUI (`giant-tui` porcelain in `crates/giant-tui/`; see
+  [its docs page](/extending/giant-tui/)).
 - Service supervision (process-compose / overmind / systemd-run).
 - Embedded scripting language (discovery is a target, not a script
   embedded in the engine).

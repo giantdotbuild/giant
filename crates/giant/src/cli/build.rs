@@ -200,6 +200,7 @@ pub(super) async fn execute_with_mode(
     // after BuildJob consumes its copy.
     let cache_for_evict = prepared.cache.clone();
     let cache_cfg = prepared.config.cache.clone();
+    let log_capture = crate::executor::LogCapture::from_cache_config(&cache_cfg);
 
     let job = BuildJob {
         graph: Arc::new(prepared.graph),
@@ -211,6 +212,7 @@ pub(super) async fn execute_with_mode(
         events: tx,
         cancel,
         build_id,
+        log_capture,
         #[cfg(feature = "remote")]
         remote,
         #[cfg(feature = "remote")]

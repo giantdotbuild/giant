@@ -2020,6 +2020,159 @@ targets:
 }
 
 #[test]
+fn cache_hit_replays_captured_stdout() {
+    // A target prints "captured output:42" on its first run. The second
+    // build should be a cache hit and the renderer should still surface
+    // that same line - proving capture (build 1) + replay (build 2)
+    // round-trip through the local cache.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: logcap
+cache:
+  dir: ./cache
+targets:
+  - id: "demo:logs"
+    inputs: []
+    outputs: ["out.txt"]
+    command: "echo captured-marker-42 && echo out > out.txt"
+"#,
+    )
+    .unwrap();
+
+    let out1 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(
+        out1.status.success(),
+        "first build failed: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    let s1 = String::from_utf8_lossy(&out1.stdout);
+    assert!(
+        s1.contains("captured-marker-42"),
+        "first build should emit live stdout; got: {s1}"
+    );
+
+    let out2 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out2.status.success(), "second build failed");
+    let s2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        cached(&s2, "demo:logs"),
+        "second build should cache-hit; got: {s2}"
+    );
+    assert!(
+        s2.contains("captured-marker-42"),
+        "cache hit should replay captured stdout; got: {s2}"
+    );
+}
+
+#[test]
+fn cache_hit_replay_disabled_by_config() {
+    // With cache.replay_logs: false, the second build still hits the
+    // cache but the captured stdout must NOT reappear in renderer
+    // output.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: logcap2
+cache:
+  dir: ./cache
+  replay_logs: false
+targets:
+  - id: "demo:noreplay"
+    inputs: []
+    outputs: ["out.txt"]
+    command: "echo no-replay-marker-99 && echo out > out.txt"
+"#,
+    )
+    .unwrap();
+
+    let out1 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out1.status.success());
+    let s1 = String::from_utf8_lossy(&out1.stdout);
+    assert!(s1.contains("no-replay-marker-99"));
+
+    let out2 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out2.status.success());
+    let s2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        cached(&s2, "demo:noreplay"),
+        "second build should cache-hit; got: {s2}"
+    );
+    assert!(
+        !s2.contains("no-replay-marker-99"),
+        "replay_logs:false should suppress replay; got: {s2}"
+    );
+}
+
+#[test]
+fn cache_capture_disabled_then_no_replay() {
+    // With cache.capture_logs: false, no log blobs are stored. The
+    // second build still cache-hits, but since nothing was captured,
+    // no logs are replayed.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: logcap3
+cache:
+  dir: ./cache
+  capture_logs: false
+targets:
+  - id: "demo:nocapture"
+    inputs: []
+    outputs: ["out.txt"]
+    command: "echo nocapture-marker-7 && echo out > out.txt"
+"#,
+    )
+    .unwrap();
+
+    let out1 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out1.status.success());
+    assert!(String::from_utf8_lossy(&out1.stdout).contains("nocapture-marker-7"));
+
+    let out2 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out2.status.success());
+    let s2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(cached(&s2, "demo:nocapture"), "got: {s2}");
+    assert!(
+        !s2.contains("nocapture-marker-7"),
+        "no capture should mean no replay; got: {s2}"
+    );
+}
+
+#[test]
 fn cache_miss_when_command_changes() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();

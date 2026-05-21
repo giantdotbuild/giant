@@ -72,6 +72,7 @@ export default defineConfig({
           label: 'Extending Giant',
           items: [
             { label: 'giant-task (task runner)', slug: 'extending/giant-task' },
+            { label: 'giant-tui (interactive browser)', slug: 'extending/giant-tui' },
             { label: 'Porcelains', slug: 'extending/porcelains' },
             { label: 'Architecture', slug: 'extending/architecture' },
           ],

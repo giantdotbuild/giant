@@ -94,6 +94,106 @@ go list -json ./... | jq -s '
 Whatever produces JSON works. Many discovery scripts are 20 lines of
 shell + `jq`.
 
+## Discovery tools as cached targets
+
+When the discovery tool grows beyond a shell script - a real Go/Rust/Python
+binary that does the work - there's a pattern that keeps everything
+clean: **declare a regular `build:` target that compiles the tool, and
+have the `include:` target depend on it**.
+
+```yaml
+# giant.yaml
+targets:
+  - id: "build:my-discover"
+    inputs:
+      - "tools/my-discover/**/*.go"
+      - "tools/my-discover/go.mod"
+      - "tools/my-discover/go.sum"
+    outputs: ["bin/my-discover"]
+    command: "cd tools/my-discover && go build -o ../../bin/my-discover ."
+
+include:
+  - id: "discover:all"
+    deps: ["build:my-discover"]
+    inputs:
+      - kind: structural
+        files: "src/**/*.go"
+        lines: ["package ", "import ", "//go:embed "]
+    outputs: [".giant/d/all.json"]
+    command: "./bin/my-discover > .giant/d/all.json"
+```
+
+The bootstrap pass picks up `discover:all`, expands its `deps:`
+transitively, builds `build:my-discover` first (or cache-hits it),
+then runs the discovery command. Three properties fall out for free:
+
+- **The discovery tool is cached like any target.** Edit
+  `my-discover/main.go` once → rebuild once → cached forever after.
+- **Remote-shareable.** CI machines pull the compiled binary from the
+  remote cache, never compile it locally. The compile happens on the
+  one machine that warms the cache, then propagates.
+- **Source changes invalidate correctly.** Editing the tool's source
+  invalidates `build:my-discover`'s output hash, which feeds
+  `discover:all`'s cache key via `deps`, which re-runs discovery.
+
+### Why this isn't circular
+
+The shape can feel paradoxical at first: a target produces something
+a discovery uses, and the discovery produces more targets - same
+graph, same engine, same caching. It looks recursive.
+
+It isn't. There are two distinct layers:
+
+| | Where it's declared | What it depends on |
+|---|---|---|
+| **Static layer** (the `build:` + `include:` entries in `giant.yaml`) | YAML, hand-written | Only on paths inside the discovery tool's own source tree |
+| **Dynamic layer** (every target the discovery emits) | The discovery's JSON output | Each other, by ID convention |
+
+The static layer's inputs are paths like `tools/my-discover/main.go`
+that no dynamic target ever produces. Its cache key can be computed
+before any discovery runs. It has no edges into the dynamic layer.
+
+The dynamic layer doesn't override or modify the static layer - it
+only adds new target IDs. Discovery output emitting a target whose
+id collides with a static target is silently skipped (`merge_into`
+dedupes), so the static layer always wins.
+
+So:
+- Static layer doesn't see the dynamic layer.
+- Dynamic layer can't reach back into the static layer.
+
+What would actually create a cycle (and the engine would correctly
+reject):
+
+- The build target's `inputs:` reference a path that a dynamic
+  target produces. `build_edges_and_validate()` catches this as a
+  cycle in the final graph.
+- The build target declares a `deps:` on a dynamically-emitted
+  target. Same - caught during edge validation.
+
+If you stay disciplined about input paths (the tool's source lives
+under a directory nothing else writes to), the layers stay
+disjoint and the pattern composes cleanly.
+
+A useful analogy: a compiler bootstrap. Stage 0 (a previously-built
+compiler) compiles stage 1 (the current source). They share a
+language but they're separate entities, layered. The compiled
+discovery tool is stage 0; the targets it emits are stage 1. Two
+phases, not a cycle.
+
+### When to use it
+
+- The discovery logic is non-trivial (more than ~50 lines of shell).
+- You want type checking, refactoring tools, or unit tests on the
+  discovery logic itself.
+- The same workspace is built often enough that compiling the tool
+  once and caching the binary is cheaper than re-interpreting a
+  script on every cold path.
+
+When a shell + jq script is enough, leave it as a shell + jq script.
+This pattern earns its keep when discovery is genuinely a piece of
+software, not a quick filter.
+
 ## What discovery DOESN'T do
 
 - **It doesn't have access to the engine.** Discovery is a normal

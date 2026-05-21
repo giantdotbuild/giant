@@ -305,6 +305,7 @@ async fn run_build(
     });
 
     let (remote, upload_tx, upload_handle) = prep::open_remote(&prepared.config)?;
+    let log_capture = crate::executor::LogCapture::from_cache_config(&prepared.config.cache);
 
     let job = BuildJob {
         graph: Arc::new(prepared.graph.clone()),
@@ -316,6 +317,7 @@ async fn run_build(
         events: tx,
         cancel,
         build_id: format!("watch_{}", prep::short_random()),
+        log_capture,
         #[cfg(feature = "remote")]
         remote,
         #[cfg(feature = "remote")]

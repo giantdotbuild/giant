@@ -77,6 +77,25 @@ pub struct CacheConfig {
 
     #[serde(default)]
     pub max_age_days: Option<u32>,
+
+    /// Capture each target's stdout + stderr to CAS blobs alongside
+    /// outputs, so a future cache hit can replay them. Default true.
+    /// Disable to lean out cache size at the cost of silent cache
+    /// hits.
+    #[serde(default = "default_capture_logs")]
+    pub capture_logs: bool,
+
+    /// Replay captured logs on cache hits (local or remote). Default
+    /// true. Disable for CI runs that just want the result, not the
+    /// scroll-back from a previous build.
+    #[serde(default = "default_replay_logs")]
+    pub replay_logs: bool,
+
+    /// Per-stream cap on captured bytes (stdout and stderr each get
+    /// this much). Lines beyond the cap are still streamed live but
+    /// not written to CAS. Default 5 MiB.
+    #[serde(default = "default_log_capture_cap")]
+    pub log_capture_cap_bytes: usize,
 }
 
 fn default_cache_dir() -> String {
@@ -95,6 +114,18 @@ fn default_evict_target_pct() -> u32 {
     80
 }
 
+fn default_capture_logs() -> bool {
+    true
+}
+
+fn default_replay_logs() -> bool {
+    true
+}
+
+fn default_log_capture_cap() -> usize {
+    5 * 1024 * 1024
+}
+
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
@@ -103,6 +134,9 @@ impl Default for CacheConfig {
             evict_when_above_pct: default_evict_above_pct(),
             evict_target_pct: default_evict_target_pct(),
             max_age_days: None,
+            capture_logs: default_capture_logs(),
+            replay_logs: default_replay_logs(),
+            log_capture_cap_bytes: default_log_capture_cap(),
         }
     }
 }

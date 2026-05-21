@@ -34,8 +34,8 @@ Rust - whatever. Two responsibilities:
 1. **Read your own CLI args.** `argv[1..]` is whatever the user passed
    after `<name>`.
 2. **(Optional) Talk to giant via NDJSON.** Spawn `giant build --events
-   ndjson` and consume its stdout, or read events from
-   `giant serve`'s Unix socket when it lands.
+   ndjson` and consume its stdout, or spawn `giant session` for a
+   persistent engine with a bidirectional command channel.
 
 Minimum viable porcelain (bash):
 
@@ -81,7 +81,7 @@ Reserved built-in names (don't shadow these): `build`, `test`,
 
 ## Communicating with the engine
 
-Three transport options, all speaking the same [NDJSON
+Two transport options, both speaking the same [NDJSON
 protocol](/reference/events/):
 
 ### 1. Subprocess + stdout (the simple case)
@@ -89,16 +89,14 @@ protocol](/reference/events/):
 Your porcelain spawns `giant build --events ndjson` and consumes
 stdout. One-shot, easy, no shared state.
 
-### 2. Subprocess + stdin/stdout (planned)
+### 2. Persistent session via `giant session`
 
-For interactive porcelains (a TUI controlling a watch session), giant
-will accept commands on stdin alongside emitting events on stdout.
-
-### 3. Unix socket via `giant serve` (planned)
-
-Multi-client scenarios: a TUI + a CI tail + your IDE all attached to
-one engine instance. `giant serve` runs a Unix socket; clients connect
-and speak the same protocol.
+For interactive porcelains (a TUI controlling a watch session, an IDE
+driving builds across files), spawn `giant session` once and speak
+NDJSON commands on stdin while parsing events from stdout. The engine
+loads config and runs discovery once, then stays warm. See
+[`giant session`](/reference/cli/#giant-session) and the
+[Command channel](/reference/events/#command-channel) section.
 
 ## Distribution
 
@@ -120,6 +118,6 @@ Three reasons:
 - **Platform-specific dynamic loading.** dlopen/Windows DLLs/macOS
   dylibs have different semantics and quirks.
 
-Subprocess-based porcelains are strictly simpler. The Unix socket
-transport plus the well-defined NDJSON protocol give you everything
-loadable plugins would, without the headaches.
+Subprocess-based porcelains are strictly simpler. The well-defined
+NDJSON protocol over stdin/stdout gives you everything loadable
+plugins would, without the headaches.

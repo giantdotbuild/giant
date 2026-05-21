@@ -67,10 +67,8 @@ pub async fn prepare(
     // processed, it's silently skipped - same target can't run twice.
     if !config.include.is_empty() {
         const MAX_DISCOVERY_DEPTH: u32 = 32;
-        let mut current_wave: Vec<TargetId> =
-            config.include.iter().map(|t| t.id.clone()).collect();
-        let mut seen: std::collections::HashSet<TargetId> =
-            current_wave.iter().cloned().collect();
+        let mut current_wave: Vec<TargetId> = config.include.iter().map(|t| t.id.clone()).collect();
+        let mut seen: std::collections::HashSet<TargetId> = current_wave.iter().cloned().collect();
         let mut depth: u32 = 0;
 
         while !current_wave.is_empty() {
@@ -92,6 +90,7 @@ pub async fn prepare(
                 events: events.clone(),
                 cancel: cancel.clone(),
                 build_id: format!("bootstrap_w{depth}_{}", short_random()),
+                log_capture: crate::executor::LogCapture::from_cache_config(&config.cache),
                 // Discovery doesn't currently use the remote cache -
                 // discoveries are per-workspace dynamic and aren't
                 // worth pushing to a shared server. Easy to revisit

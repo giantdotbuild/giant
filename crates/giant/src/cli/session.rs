@@ -151,6 +151,7 @@ struct SessionState {
     /// Resolved absolute cache directory - the watcher must exclude it
     /// so cache writes don't trigger rebuild storms.
     cache_root: AbsPath,
+    log_capture: crate::executor::LogCapture,
     fresh_default: bool,
     event_tx: EventSender,
     /// At most one build runs at a time in v1. A second `build`
@@ -189,11 +190,13 @@ impl SessionState {
         let cache_root = prep::resolve_cache_dir(&prepared.config.cache.dir)
             .map(AbsPath::new)
             .unwrap_or_else(|_| prepared.workspace_root.clone());
+        let log_capture = crate::executor::LogCapture::from_cache_config(&prepared.config.cache);
         Self {
             graph: Arc::new(prepared.graph),
             cache: prepared.cache,
             workspace_root: prepared.workspace_root,
             cache_root,
+            log_capture,
             fresh_default,
             event_tx,
             running: None,
@@ -317,6 +320,7 @@ impl SessionState {
             cache: self.cache.clone(),
             workspace_root: self.workspace_root.clone(),
             cache_root: self.cache_root.clone(),
+            log_capture: self.log_capture,
             fresh: self.fresh_default,
             event_tx: self.event_tx.clone(),
         };
@@ -362,6 +366,7 @@ impl SessionState {
             events: self.event_tx.clone(),
             cancel: cancel.clone(),
             build_id: build_id.clone(),
+            log_capture: self.log_capture,
             #[cfg(feature = "remote")]
             remote: None,
             #[cfg(feature = "remote")]
@@ -575,6 +580,7 @@ struct WatchCtx {
     cache: LocalCache,
     workspace_root: AbsPath,
     cache_root: AbsPath,
+    log_capture: crate::executor::LogCapture,
     fresh: bool,
     event_tx: EventSender,
 }
@@ -590,6 +596,7 @@ async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: Cancellatio
         cache,
         workspace_root,
         cache_root,
+        log_capture,
         fresh,
         event_tx,
     } = ctx;
@@ -599,6 +606,7 @@ async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: Cancellatio
         cache: &cache,
         workspace_root: &workspace_root,
         selection: &selection,
+        log_capture,
         fresh,
         event_tx: event_tx.clone(),
         cancel: cancel.clone(),
@@ -673,6 +681,7 @@ async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: Cancellatio
             cache: &cache,
             workspace_root: &workspace_root,
             selection: &to_build,
+            log_capture,
             fresh,
             event_tx: event_tx.clone(),
             cancel: cancel.clone(),
@@ -687,6 +696,7 @@ struct CycleArgs<'a> {
     cache: &'a LocalCache,
     workspace_root: &'a AbsPath,
     selection: &'a [TargetId],
+    log_capture: crate::executor::LogCapture,
     fresh: bool,
     event_tx: EventSender,
     cancel: CancellationToken,
@@ -704,6 +714,7 @@ async fn run_watch_cycle(a: CycleArgs<'_>) {
         events: a.event_tx,
         cancel: a.cancel,
         build_id: a.build_id,
+        log_capture: a.log_capture,
         #[cfg(feature = "remote")]
         remote: None,
         #[cfg(feature = "remote")]

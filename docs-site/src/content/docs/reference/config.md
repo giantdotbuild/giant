@@ -15,6 +15,9 @@ cache:
   max_size_gb: 20
   evict_when_above_pct: 100
   evict_target_pct: 80
+  capture_logs: true
+  replay_logs: true
+  log_capture_cap_bytes: 5242880
 
 remote:                       # feature-gated; only with --features remote
   url: "https://cache.example.com"
@@ -60,9 +63,20 @@ targets:
 | `max_size_gb` | `20` | Max cache size in GB. `null` or `0` disables auto-eviction. |
 | `evict_when_above_pct` | `100` | Trigger eviction at this percentage of max. |
 | `evict_target_pct` | `80` | Evict down to this percentage when eviction runs. |
+| `capture_logs` | `true` | Write each successful target's stdout + stderr to CAS so they can replay on a future cache hit. |
+| `replay_logs` | `true` | On a cache hit (local or remote), re-emit the captured stdout/stderr as `target.log` events. |
+| `log_capture_cap_bytes` | `5242880` (5 MiB) | Per-stream cap on captured bytes. Live streaming is unaffected; only the on-disk blob is truncated. |
 
 The two-threshold setup avoids "always-evicting" behavior: trigger at
 100%, evict down to 80%, leaving a 20% buffer before the next round.
+
+Log capture/replay is what makes cache hits informative: without it
+you'd see `CACHE go:bin:server` and nothing else, even if the original
+build printed test failures, deprecation warnings, or compiler hints.
+With it the renderer (and any porcelain on the [event protocol](/reference/events/))
+sees the same `target.log` line stream a fresh build would have
+produced. See [Log capture and replay](/reference/cache-layout/#log-capture-and-replay)
+for storage details.
 
 ## `remote` (feature-gated)
 
