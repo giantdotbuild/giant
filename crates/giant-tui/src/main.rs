@@ -79,14 +79,8 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
         .spawn()
         .with_context(|| format!("spawning `{} session`", bin.to_string_lossy()))?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .expect("stdout is piped - take is safe");
-    let stdin = child
-        .stdin
-        .take()
-        .expect("stdin is piped - take is safe");
+    let stdout = child.stdout.take().expect("stdout is piped - take is safe");
+    let stdin = child.stdin.take().expect("stdin is piped - take is safe");
 
     // ---- Set up the terminal --------------------------------------
     enable_raw_mode().context("could not enable raw mode")?;
@@ -253,10 +247,7 @@ fn restore_terminal() -> Result<()> {
     Ok(())
 }
 
-async fn pump_events<R: tokio::io::AsyncRead + Unpin>(
-    stdout: R,
-    tx: mpsc::Sender<Event>,
-) {
+async fn pump_events<R: tokio::io::AsyncRead + Unpin>(stdout: R, tx: mpsc::Sender<Event>) {
     let mut lines = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {

@@ -213,8 +213,7 @@ impl PatternMatcher {
     }
 
     pub fn matches(&self, id: &TargetId) -> bool {
-        self.inner
-            .matches_with(&id_match_str(id), MATCH_OPTS)
+        self.inner.matches_with(&id_match_str(id), MATCH_OPTS)
     }
 
     pub fn matches_str(&self, id: &str) -> bool {

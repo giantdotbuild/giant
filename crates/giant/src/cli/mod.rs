@@ -183,9 +183,7 @@ fn porcelain_help_section() -> Option<String> {
         return None;
     }
     let width = porcelains.keys().map(|n| n.len()).max().unwrap_or(0);
-    let mut out = String::from(
-        "Porcelains (extra subcommands provided by binaries on PATH):\n",
-    );
+    let mut out = String::from("Porcelains (extra subcommands provided by binaries on PATH):\n");
     for (name, path) in &porcelains {
         out.push_str(&format!(
             "  {:<width$}  {}\n",
@@ -245,5 +243,7 @@ fn is_executable(path: &std::path::Path) -> bool {
 fn is_executable(path: &std::path::Path) -> bool {
     // On Windows, PATHEXT lookup is the right answer; for now treat
     // any file matching the prefix as executable.
-    std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+    std::fs::metadata(path)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
 }

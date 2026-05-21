@@ -302,12 +302,13 @@ impl State {
                 }
             }
             // ----- Command acknowledgements -------------------------
-            Event::CommandAccepted {
-                build: Some(b), ..
-            } => {
+            Event::CommandAccepted { build: Some(b), .. } => {
                 self.pending_build_id = Some(b);
             }
-            Event::CommandRejected { reason, .. } | Event::CommandError { message: reason, .. } => {
+            Event::CommandRejected { reason, .. }
+            | Event::CommandError {
+                message: reason, ..
+            } => {
                 self.last_error = Some(reason);
             }
             _ => {}
@@ -556,7 +557,6 @@ impl State {
         match self.screen {
             Screen::Building | Screen::BuildFinished => {
                 self.build_cursor = 0;
-                self.scroll_offset = 0;
             }
             _ => {
                 self.scroll_offset = 0;
@@ -569,7 +569,6 @@ impl State {
             Screen::Building | Screen::BuildFinished => {
                 let n = self.sorted_build_targets().len();
                 self.build_cursor = n.saturating_sub(1);
-                self.scroll_offset = self.build_cursor;
             }
             _ => {
                 self.scroll_offset = self.visible_count().saturating_sub(1);
@@ -581,20 +580,17 @@ impl State {
         let n = self.sorted_build_targets().len();
         if n == 0 {
             self.build_cursor = 0;
-            self.scroll_offset = 0;
             return;
         }
         let cur = self.build_cursor as isize;
         let new = (cur + delta).clamp(0, n as isize - 1) as usize;
         self.build_cursor = new;
-        // Keep cursor in view: simple "follow the cursor" - if it
-        // goes above the top of the view or beyond the bottom, scroll.
-        // We don't know the viewport height here so we just keep
-        // scroll_offset aligned with the cursor as a lower bound; the
-        // renderer handles the upper bound.
-        if self.scroll_offset > self.build_cursor {
-            self.scroll_offset = self.build_cursor;
-        }
+        // The renderer computes its own viewport offset around the
+        // cursor each draw - see ui::compute_build_list_offset - so
+        // we don't track scroll_offset for the build view here. That
+        // means moving the cursor down just moves the cursor down;
+        // the list scrolls only when the cursor would otherwise leave
+        // the viewport.
     }
 
     /// Target id at the build cursor, or `None` if the list is empty.
@@ -621,7 +617,11 @@ impl State {
 ///   its tags are in the exclude set.
 fn tags_pass(filters: &Filters, target_tags: &HashSet<String>) -> bool {
     if !filters.tag_include.is_empty()
-        && filters.tag_include.intersection(target_tags).next().is_none()
+        && filters
+            .tag_include
+            .intersection(target_tags)
+            .next()
+            .is_none()
     {
         return false;
     }
@@ -654,7 +654,8 @@ fn matches_search(query: &str, id: &str) -> bool {
             Err(_) => false,
         }
     } else {
-        id.to_ascii_lowercase().contains(&query.to_ascii_lowercase())
+        id.to_ascii_lowercase()
+            .contains(&query.to_ascii_lowercase())
     }
 }
 
@@ -784,7 +785,11 @@ mod tests {
         s.apply(described("go:bin:server", &[], false));
         s.apply(described("docker:api", &[], false));
         s.filters.search = "GO:".into();
-        let ids: Vec<&str> = s.filtered_catalog().iter().map(|(id, _)| id.as_str()).collect();
+        let ids: Vec<&str> = s
+            .filtered_catalog()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
         assert_eq!(ids, vec!["go:bin:server"]);
     }
 
@@ -841,7 +846,11 @@ mod tests {
         s.apply(described("a", &["release"], false));
         s.apply(described("b", &[], false));
         s.filters.tag_include.insert("release".into());
-        let ids: Vec<&str> = s.filtered_catalog().iter().map(|(id, _)| id.as_str()).collect();
+        let ids: Vec<&str> = s
+            .filtered_catalog()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
         assert_eq!(ids, vec!["a"]);
     }
 
@@ -853,7 +862,11 @@ mod tests {
         s.apply(described("c", &["other"], false));
         s.filters.tag_include.insert("release".into());
         s.filters.tag_include.insert("smoke".into());
-        let ids: Vec<&str> = s.filtered_catalog().iter().map(|(id, _)| id.as_str()).collect();
+        let ids: Vec<&str> = s
+            .filtered_catalog()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
         assert_eq!(ids, vec!["a", "b"]);
     }
 
@@ -864,7 +877,11 @@ mod tests {
         s.apply(described("b", &["release", "flaky"], false));
         s.filters.tag_include.insert("release".into());
         s.filters.tag_exclude.insert("flaky".into());
-        let ids: Vec<&str> = s.filtered_catalog().iter().map(|(id, _)| id.as_str()).collect();
+        let ids: Vec<&str> = s
+            .filtered_catalog()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
         assert_eq!(ids, vec!["a"]);
     }
 
@@ -910,10 +927,13 @@ mod tests {
         s.apply(described("a", &[], false));
         s.apply(described("b", &[], true));
         s.filters.test_only = true;
-        let ids: Vec<&str> = s.filtered_catalog().iter().map(|(id, _)| id.as_str()).collect();
+        let ids: Vec<&str> = s
+            .filtered_catalog()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
         assert_eq!(ids, vec!["b"]);
     }
-
 
     #[test]
     fn selection_for_build_returns_filtered_ids() {

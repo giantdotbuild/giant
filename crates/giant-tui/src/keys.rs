@@ -106,6 +106,9 @@ fn handle_browser(state: &mut State, key: KeyEvent) -> Action {
 fn handle_running_build(state: &mut State, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
+        // Esc only cancels when there's actually a build to cancel.
+        // After build.finished arrives, handle_finished routes Esc
+        // to return_to_browser before delegating here.
         KeyCode::Esc => Action::CancelChild,
         KeyCode::Char('?') => {
             state.mode = Mode::Help;
@@ -148,11 +151,19 @@ fn handle_running_build(state: &mut State, key: KeyEvent) -> Action {
 }
 
 fn handle_finished(state: &mut State, key: KeyEvent) -> Action {
-    if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
-        return Action::Quit;
+    // The build is done but the user is still browsing the result -
+    // scrolling, looking at logs per-target. Only explicit
+    // dismissal keys return to the catalog. Everything else is
+    // handled the same way as during a running build, so the cursor
+    // moves, filter chips work, etc.
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('b') => {
+            state.return_to_browser();
+            Action::Redraw
+        }
+        _ => handle_running_build(state, key),
     }
-    state.return_to_browser();
-    Action::Redraw
 }
 
 fn handle_help(state: &mut State, _key: KeyEvent) -> Action {
@@ -186,7 +197,6 @@ fn handle_tag_picker(state: &mut State, key: KeyEvent) -> Action {
         _ => Action::Ignore,
     }
 }
-
 
 fn handle_search(state: &mut State, key: KeyEvent) -> Action {
     match key.code {
@@ -294,19 +304,61 @@ mod tests {
     }
 
     #[test]
-    fn finished_any_key_returns_to_browser_except_q() {
-        let mut s = State {
-            screen: Screen::BuildFinished,
-            ..State::default()
-        };
-        assert_eq!(handle(&mut s, key(KeyCode::Char('x'))), Action::Redraw);
-        assert_eq!(s.screen, Screen::Browser);
-
+    fn finished_q_quits() {
         let mut s = State {
             screen: Screen::BuildFinished,
             ..State::default()
         };
         assert_eq!(handle(&mut s, key(KeyCode::Char('q'))), Action::Quit);
+    }
+
+    #[test]
+    fn finished_esc_or_enter_returns_to_browser() {
+        for k in [KeyCode::Esc, KeyCode::Enter] {
+            let mut s = State {
+                screen: Screen::BuildFinished,
+                ..State::default()
+            };
+            assert_eq!(handle(&mut s, key(k)), Action::Redraw);
+            assert_eq!(s.screen, Screen::Browser);
+        }
+    }
+
+    #[test]
+    fn finished_jk_moves_cursor_does_not_dismiss() {
+        use giant::events::{Event, TargetCounts};
+        use giant::model::TargetId;
+        let mut s = State {
+            screen: Screen::BuildFinished,
+            ..State::default()
+        };
+        s.apply(Event::BuildStarted {
+            id: "b_1".into(),
+            selection: vec![],
+            target_ids: vec![TargetId::new("a"), TargetId::new("b")],
+            parallelism: 1,
+        });
+        s.apply(Event::BuildFinished {
+            id: "b_1".into(),
+            ok: true,
+            duration_ms: 1,
+            counts: TargetCounts::default(),
+        });
+        s.screen = Screen::BuildFinished; // BuildFinished after the events
+        let initial_cursor = s.build_cursor;
+        handle(&mut s, key(KeyCode::Char('j')));
+        assert_eq!(s.screen, Screen::BuildFinished, "must stay in build view");
+        assert_eq!(s.build_cursor, initial_cursor + 1);
+    }
+
+    #[test]
+    fn finished_random_key_is_a_noop_not_dismiss() {
+        let mut s = State {
+            screen: Screen::BuildFinished,
+            ..State::default()
+        };
+        handle(&mut s, key(KeyCode::Char('x')));
+        assert_eq!(s.screen, Screen::BuildFinished);
     }
 
     #[test]

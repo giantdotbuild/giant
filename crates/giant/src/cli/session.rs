@@ -15,8 +15,8 @@
 //! variants) but the engine rejects them with `command.rejected`.
 
 use crate::cache::LocalCache;
-use crate::cli::{GlobalFlags, SilentExit};
 use crate::cli::prep;
+use crate::cli::{GlobalFlags, SilentExit};
 use crate::commands::Command;
 use crate::events::{Event, EventSender, ShutdownReason, TargetCounts};
 use crate::executor::{BuildJob, build};
@@ -186,11 +186,7 @@ impl SessionState {
         }
     }
 
-    async fn handle_command(
-        &mut self,
-        cmd: Command,
-        build_done_tx: &mpsc::Sender<()>,
-    ) -> bool {
+    async fn handle_command(&mut self, cmd: Command, build_done_tx: &mpsc::Sender<()>) -> bool {
         match cmd {
             Command::Shutdown { command_id } => {
                 self.ack(command_id, None).await;
@@ -414,7 +410,8 @@ async fn emit_catalog(tx: &EventSender, graph: &BuildGraph) {
             .map(|i| match i {
                 Input::File { glob } => glob.as_str().to_string(),
                 Input::Structural { files, .. } => {
-                    let joined: Vec<String> = files.iter().map(|g| g.as_str().to_string()).collect();
+                    let joined: Vec<String> =
+                        files.iter().map(|g| g.as_str().to_string()).collect();
                     format!("structural:{}", joined.join(","))
                 }
             })
@@ -490,5 +487,7 @@ fn workspace_hint(global: &GlobalFlags) -> Option<String> {
     if let Some(p) = &global.config {
         return Some(p.display().to_string());
     }
-    std::env::current_dir().ok().map(|p| p.display().to_string())
+    std::env::current_dir()
+        .ok()
+        .map(|p| p.display().to_string())
 }

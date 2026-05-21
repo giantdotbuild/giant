@@ -263,22 +263,44 @@ fn draw_build_header(frame: &mut Frame, area: Rect, state: &State) {
 }
 
 fn draw_build_target_list(frame: &mut Frame, area: Rect, state: &State) {
-    let rows: Vec<Line> = state
-        .sorted_build_targets()
+    let targets = state.sorted_build_targets();
+    let height = area.height as usize;
+    let cursor = state.build_cursor.min(targets.len().saturating_sub(1));
+    let offset = compute_build_list_offset(cursor, targets.len(), height);
+    let rows: Vec<Line> = targets
         .iter()
         .enumerate()
-        .skip(state.scroll_offset)
-        .map(|(i, (id, v))| target_row(id, v, i == state.build_cursor))
+        .skip(offset)
+        .take(height)
+        .map(|(i, (id, v))| target_row(id, v, i == cursor))
         .collect();
     let para = Paragraph::new(rows).wrap(Wrap { trim: false });
     frame.render_widget(para, area);
+}
+
+/// Compute which row index the build-list viewport should start at,
+/// given the cursor position, total target count, and viewport
+/// height. Keeps the cursor on-screen with a one-row top/bottom
+/// margin where possible - moving down only scrolls when the cursor
+/// hits the bottom, and vice-versa.
+pub fn compute_build_list_offset(cursor: usize, total: usize, height: usize) -> usize {
+    if total == 0 || height == 0 {
+        return 0;
+    }
+    let max_offset = total.saturating_sub(height);
+    // Center bias: keep the cursor away from the top/bottom edges
+    // when there's room. Cursor sits roughly 1/3 down from the top.
+    let preferred_top = cursor.saturating_sub(height / 3);
+    preferred_top.min(max_offset)
 }
 
 fn target_row<'a>(id: &'a TargetId, v: &'a TargetView, selected: bool) -> Line<'a> {
     let cursor = if selected {
         Span::styled(
             "▶ ",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::raw("  ")
@@ -382,7 +404,12 @@ fn filter_chips(state: &State) -> Vec<Span<'static>> {
             chip_style,
         ));
     }
-    let mut include: Vec<&str> = state.filters.tag_include.iter().map(|s| s.as_str()).collect();
+    let mut include: Vec<&str> = state
+        .filters
+        .tag_include
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
     include.sort();
     for tag in include {
         chips.push(Span::styled(format!(" +{tag} "), chip_style));
@@ -391,7 +418,12 @@ fn filter_chips(state: &State) -> Vec<Span<'static>> {
         .fg(Color::White)
         .bg(Color::Red)
         .add_modifier(Modifier::BOLD);
-    let mut exclude: Vec<&str> = state.filters.tag_exclude.iter().map(|s| s.as_str()).collect();
+    let mut exclude: Vec<&str> = state
+        .filters
+        .tag_exclude
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
     exclude.sort();
     for tag in exclude {
         chips.push(Span::styled(format!(" -{tag} "), exclude_style));
@@ -491,7 +523,9 @@ fn draw_tag_picker(frame: &mut Frame, area: Rect, state: &State) {
         let cursor = if idx == state.tag_picker_cursor {
             Span::styled(
                 "▶ ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             )
         } else {
             Span::raw("  ")
@@ -565,7 +599,10 @@ fn draw_error_banner(frame: &mut Frame, area: Rect, msg: &str) {
         width: area.width,
         height: h,
     };
-    let text = format!(" ! {} ", truncate(msg, area.width.saturating_sub(4) as usize));
+    let text = format!(
+        " ! {} ",
+        truncate(msg, area.width.saturating_sub(4) as usize)
+    );
     let para = Paragraph::new(Span::styled(
         text,
         Style::default()
@@ -674,6 +711,35 @@ mod tests {
         let dump = render_to_string(&state);
         assert!(dump.contains("go:bin:server"));
         assert!(dump.contains("release"));
+    }
+
+    #[test]
+    fn compute_offset_keeps_cursor_in_view_at_top() {
+        // Cursor near top of list, plenty of space → no scroll.
+        assert_eq!(compute_build_list_offset(0, 100, 10), 0);
+        assert_eq!(compute_build_list_offset(2, 100, 10), 0);
+    }
+
+    #[test]
+    fn compute_offset_scrolls_when_cursor_goes_past_top_third() {
+        // Cursor at 5 with height 10 → preferred top is 5 - 3 = 2.
+        assert_eq!(compute_build_list_offset(5, 100, 10), 2);
+        // Cursor at 50 → preferred top 50 - 3 = 47.
+        assert_eq!(compute_build_list_offset(50, 100, 10), 47);
+    }
+
+    #[test]
+    fn compute_offset_clamps_to_max_when_near_bottom() {
+        // Total 20, height 10 → max_offset = 10. Cursor at 19 should
+        // still leave the cursor visible; offset = 10.
+        assert_eq!(compute_build_list_offset(19, 20, 10), 10);
+        assert_eq!(compute_build_list_offset(15, 20, 10), 10);
+    }
+
+    #[test]
+    fn compute_offset_handles_empty_and_short_lists() {
+        assert_eq!(compute_build_list_offset(0, 0, 10), 0);
+        assert_eq!(compute_build_list_offset(2, 5, 10), 0);
     }
 
     #[test]
