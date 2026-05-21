@@ -16,6 +16,7 @@ mod explain;
 mod external;
 mod graph;
 pub(crate) mod prep;
+mod session;
 mod test;
 mod watch;
 
@@ -70,6 +71,13 @@ pub enum Commands {
     /// targets when files change. Ctrl-C to exit.
     Watch(watch::WatchArgs),
 
+    /// Persistent engine over stdio. Loads config once, runs
+    /// discovery once, then reads JSON commands on stdin and emits
+    /// NDJSON events on stdout. The protocol porcelains (the TUI in
+    /// particular) drive against. Refuses to run with stdout on a
+    /// TTY - pipe it. See TDD-0014.
+    Session(session::SessionArgs),
+
     /// Generate a shell completion script for bash / zsh / fish /
     /// powershell / elvish / nushell. Pipe the output into the right
     /// place for your shell.
@@ -107,6 +115,7 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Graph(args) => graph::execute(args, &global).await,
         Commands::Clean(args) => clean::execute(args, &global).await,
         Commands::Watch(args) => watch::execute(args, &global).await,
+        Commands::Session(args) => session::execute(args, &global).await,
         Commands::Completions(args) => completions::execute(args),
         Commands::External(args) => external::dispatch(args),
     }
