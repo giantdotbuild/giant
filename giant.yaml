@@ -31,6 +31,7 @@ targets:
     outputs: ["bin/giant"]
     command: "cargo build --release -p giant --bin giant && install -m 0755 target/release/giant bin/giant"
     timeout: 600
+    tags: ["bin", "rust"]
 
   - id: "bin:giant-task"
     inputs:
@@ -42,6 +43,7 @@ targets:
     # -p selects the workspace member; --bin disambiguates within it.
     command: "cargo build --release -p giant-task --bin giant-task && install -m 0755 target/release/giant-task bin/giant-task"
     timeout: 600
+    tags: ["bin", "rust", "porcelain"]
 
   - id: "bin:giant-tui"
     inputs:
@@ -52,6 +54,7 @@ targets:
     outputs: ["bin/giant-tui"]
     command: "cargo build --release -p giant-tui --bin giant-tui && install -m 0755 target/release/giant-tui bin/giant-tui"
     timeout: 600
+    tags: ["bin", "rust", "porcelain"]
 
   - id: "docs:install"
     inputs:
@@ -62,6 +65,7 @@ targets:
     cwd: "docs-site"
     command: "npm ci"
     timeout: 180
+    tags: ["docs"]
 
   - id: "docs:build"
     # Explicit input list - input globs don't (yet) support `!exclude`,
@@ -81,6 +85,7 @@ targets:
     command: "npx astro build"
     timeout: 120
     deps: ["docs:install"]
+    tags: ["docs"]
 
 # -----------------------------------------------------------------------------
 # Tasks - named commands. Most are `cargo X` wrappers; the docs pipeline

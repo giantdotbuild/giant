@@ -37,6 +37,31 @@ pub fn draw(frame: &mut Frame, state: &State) {
     if let Some(err) = &state.last_error {
         draw_error_banner(frame, area, err);
     }
+    if state.quitting {
+        draw_quitting_overlay(frame, area);
+    }
+}
+
+fn draw_quitting_overlay(frame: &mut Frame, area: Rect) {
+    let w: u16 = 30.min(area.width.saturating_sub(2));
+    let h: u16 = 3.min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, rect);
+    let para = Paragraph::new(Line::from(Span::styled(
+        " quitting…",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )))
+    .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(para, rect);
 }
 
 // ============================================================

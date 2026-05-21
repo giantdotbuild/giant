@@ -147,6 +147,10 @@ pub struct State {
     /// command_id → expected build_id, populated from command.accepted.
     /// Tracks the build the TUI just kicked off so it can cancel by id.
     pub pending_build_id: Option<String>,
+    /// True while we're shutting down the session. UI shows a
+    /// "quitting…" overlay so the user has feedback during the
+    /// (typically <50ms) drain.
+    pub quitting: bool,
 }
 
 impl State {

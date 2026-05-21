@@ -205,13 +205,12 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
 
     // ---- Shutdown -------------------------------------------------
     //
-    // Restore the terminal *first* so the user sees their shell back
-    // immediately. Whatever the session does after this (it should
-    // just drain and exit) flows over a pipe we already own; it
-    // doesn't reach the user's terminal.
-    let _ = restore_terminal();
-
+    // Render one frame with the "quitting…" overlay so the user sees
+    // immediate feedback while the session drains. Then restore the
+    // terminal and wait for the child.
     if user_quit {
+        state.quitting = true;
+        let _ = terminal.draw(|f| ui::draw(f, &state));
         let _ = cmd_tx
             .send(Command::Shutdown {
                 command_id: Some("c_quit".into()),
@@ -221,12 +220,11 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
     // Closing stdin is the EOF signal the session reads. After that
     // we wait briefly; the session normally exits in < 50 ms.
     drop(cmd_tx);
-    if tokio::time::timeout(SHUTDOWN_GRACE, child.wait())
-        .await
-        .is_err()
-    {
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await;
+    if let Ok(None) = child.try_wait() {
         let _ = child.kill().await;
     }
+    let _ = restore_terminal();
     Ok(state.exit_code())
 }
 
