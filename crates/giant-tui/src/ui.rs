@@ -3,7 +3,7 @@
 
 use crate::colors::{status_icon, status_label, status_style, target_color};
 use crate::state::{
-    CatalogEntry, LogLine, Mode, Screen, State, StatusFilter, TargetStatus, TargetView,
+    CatalogEntry, LogLine, Mode, Screen, State, StatusFilter, TagState, TargetStatus, TargetView,
 };
 use giant::events::LogStream;
 use giant::model::TargetId;
@@ -33,6 +33,9 @@ pub fn draw(frame: &mut Frame, state: &State) {
     }
     if state.mode == Mode::Help {
         draw_help_overlay(frame, area);
+    }
+    if state.mode == Mode::TagPicker {
+        draw_tag_picker(frame, area, state);
     }
     if let Some(err) = &state.last_error {
         draw_error_banner(frame, area, err);
@@ -360,8 +363,19 @@ fn filter_chips(state: &State) -> Vec<Span<'static>> {
             chip_style,
         ));
     }
-    if let Some(tag) = &state.filters.tag {
-        chips.push(Span::styled(format!(" #{tag} "), chip_style));
+    let mut include: Vec<&str> = state.filters.tag_include.iter().map(|s| s.as_str()).collect();
+    include.sort();
+    for tag in include {
+        chips.push(Span::styled(format!(" +{tag} "), chip_style));
+    }
+    let exclude_style = Style::default()
+        .fg(Color::White)
+        .bg(Color::Red)
+        .add_modifier(Modifier::BOLD);
+    let mut exclude: Vec<&str> = state.filters.tag_exclude.iter().map(|s| s.as_str()).collect();
+    exclude.sort();
+    for tag in exclude {
+        chips.push(Span::styled(format!(" -{tag} "), exclude_style));
     }
     if state.filters.status != StatusFilter::All
         && matches!(state.screen, Screen::Building | Screen::BuildFinished)
@@ -416,6 +430,73 @@ fn draw_search_bar(frame: &mut Frame, area: Rect, state: &State) {
     frame.render_widget(para, rect);
 }
 
+fn draw_tag_picker(frame: &mut Frame, area: Rect, state: &State) {
+    let tags = state.known_tags();
+    let w: u16 = 40.min(area.width.saturating_sub(2));
+    let max_h = (tags.len() as u16 + 4).min(area.height.saturating_sub(2));
+    let h: u16 = max_h.max(5);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, rect);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(tags.len() + 2);
+    lines.push(Line::from(Span::styled(
+        " space: toggle  j/k: move  c: clear  Esc/Enter: close ",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+    for (idx, tag) in tags.iter().enumerate() {
+        let state_marker = match state.tag_picker_state(tag) {
+            TagState::Neutral => Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+            TagState::Include => Span::styled(
+                " + ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            TagState::Exclude => Span::styled(
+                " - ",
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        };
+        let cursor = if idx == state.tag_picker_cursor {
+            Span::styled(
+                "▶ ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw("  ")
+        };
+        let tag_style = if idx == state.tag_picker_cursor {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            cursor,
+            state_marker,
+            Span::styled(tag.clone(), tag_style),
+        ]));
+    }
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" tags ")
+            .style(Style::default().fg(Color::White)),
+    );
+    frame.render_widget(para, rect);
+}
+
 fn draw_help_overlay(frame: &mut Frame, area: Rect) {
     let w = 60.min(area.width.saturating_sub(2));
     let h = 18.min(area.height.saturating_sub(2));
@@ -434,7 +515,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("    Enter / b    build the current filter selection"),
         Line::from("    /            search target ids (substring, or"),
         Line::from("                 glob: bin:*, docker:**, etc.)"),
-        Line::from("    t            cycle through known tags"),
+        Line::from("    t            open tag picker (multi-select +/-)"),
         Line::from("    T            toggle test-only filter"),
         Line::from("    Tab / f      cycle status filter (build screens)"),
         Line::from("    c            clear all filters"),

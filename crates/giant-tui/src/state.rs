@@ -29,9 +29,29 @@ pub enum Screen {
 #[derive(Debug, Default, Clone)]
 pub struct Filters {
     pub search: String,
-    pub tag: Option<String>,
+    /// Targets must carry at least one of these tags (OR). Empty
+    /// means "ignore include filter."
+    pub tag_include: HashSet<String>,
+    /// Targets must carry none of these tags (AND NOT). Empty means
+    /// "ignore exclude filter."
+    pub tag_exclude: HashSet<String>,
     pub status: StatusFilter,
     pub test_only: bool,
+}
+
+impl Filters {
+    pub fn has_any_tag_filter(&self) -> bool {
+        !self.tag_include.is_empty() || !self.tag_exclude.is_empty()
+    }
+}
+
+/// State of one tag in the picker.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TagState {
+    #[default]
+    Neutral,
+    Include,
+    Exclude,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +86,9 @@ pub enum Mode {
     Normal,
     Search,
     Help,
+    /// Multi-select tag picker modal. Tracks a cursor; space cycles
+    /// the cursor row through neutral → include → exclude → neutral.
+    TagPicker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +174,8 @@ pub struct State {
     /// "quitting…" overlay so the user has feedback during the
     /// (typically <50ms) drain.
     pub quitting: bool,
+    /// Cursor inside the tag picker modal.
+    pub tag_picker_cursor: usize,
 }
 
 impl State {
@@ -334,9 +359,7 @@ impl State {
         if !matches_search(&self.filters.search, id.as_str()) {
             return false;
         }
-        if let Some(tag) = &self.filters.tag
-            && !entry.tags.contains(tag)
-        {
+        if !tags_pass(&self.filters, &entry.tags) {
             return false;
         }
         if self.filters.test_only && !entry.test {
@@ -369,9 +392,14 @@ impl State {
         if !matches_search(&self.filters.search, id.as_str()) {
             return false;
         }
-        if let Some(tag) = &self.filters.tag {
-            let has = self.catalog.get(id).is_some_and(|e| e.tags.contains(tag));
-            if !has {
+        if self.filters.has_any_tag_filter() {
+            let tags = self
+                .catalog
+                .get(id)
+                .map(|e| &e.tags)
+                .cloned()
+                .unwrap_or_default();
+            if !tags_pass(&self.filters, &tags) {
                 return false;
             }
         }
@@ -400,22 +428,66 @@ impl State {
         v
     }
 
-    pub fn cycle_tag(&mut self) {
+    /// State of the cursor row in the tag picker - useful for the UI
+    /// to render a highlight.
+    pub fn tag_picker_state(&self, tag: &str) -> TagState {
+        if self.filters.tag_include.contains(tag) {
+            TagState::Include
+        } else if self.filters.tag_exclude.contains(tag) {
+            TagState::Exclude
+        } else {
+            TagState::Neutral
+        }
+    }
+
+    /// Cycle the cursor row in the tag picker through the three
+    /// states: Neutral → Include → Exclude → Neutral.
+    pub fn cycle_tag_at_cursor(&mut self) {
         let tags = self.known_tags();
         if tags.is_empty() {
             return;
         }
-        self.filters.tag = match &self.filters.tag {
-            None => Some(tags[0].clone()),
-            Some(current) => {
-                let pos = tags.iter().position(|t| t == current);
-                match pos {
-                    Some(i) if i + 1 < tags.len() => Some(tags[i + 1].clone()),
-                    _ => None,
-                }
+        let idx = self.tag_picker_cursor.min(tags.len().saturating_sub(1));
+        let tag = tags[idx].clone();
+        match self.tag_picker_state(&tag) {
+            TagState::Neutral => {
+                self.filters.tag_include.insert(tag);
             }
-        };
+            TagState::Include => {
+                self.filters.tag_include.remove(&tag);
+                self.filters.tag_exclude.insert(tag);
+            }
+            TagState::Exclude => {
+                self.filters.tag_exclude.remove(&tag);
+            }
+        }
         self.scroll_offset = 0;
+    }
+
+    pub fn move_tag_cursor(&mut self, delta: isize) {
+        let n = self.known_tags().len();
+        if n == 0 {
+            self.tag_picker_cursor = 0;
+            return;
+        }
+        let cur = self.tag_picker_cursor as isize;
+        let new = (cur + delta).clamp(0, n as isize - 1);
+        self.tag_picker_cursor = new as usize;
+    }
+
+    pub fn open_tag_picker(&mut self) {
+        if self.known_tags().is_empty() {
+            // Nothing to pick from - show a friendly error chip
+            // instead of entering a useless modal.
+            self.last_error = Some("no tags declared in this workspace".into());
+            return;
+        }
+        self.mode = Mode::TagPicker;
+        self.tag_picker_cursor = 0;
+    }
+
+    pub fn close_tag_picker(&mut self) {
+        self.mode = Mode::Normal;
     }
 
     pub fn cycle_status(&mut self) {
@@ -457,6 +529,29 @@ impl State {
     pub fn scroll_bottom(&mut self) {
         self.scroll_offset = self.visible_count().saturating_sub(1);
     }
+}
+
+/// Same semantics as `selection::SelectionOpts::passes_tags`:
+/// - Empty include set → any tag passes the include filter.
+/// - Non-empty include set → at least one of the target's tags must
+///   appear in include (OR / union).
+/// - Excluded tags filter as AND-NOT: target passes only if none of
+///   its tags are in the exclude set.
+fn tags_pass(filters: &Filters, target_tags: &HashSet<String>) -> bool {
+    if !filters.tag_include.is_empty()
+        && filters.tag_include.intersection(target_tags).next().is_none()
+    {
+        return false;
+    }
+    if filters
+        .tag_exclude
+        .intersection(target_tags)
+        .next()
+        .is_some()
+    {
+        return false;
+    }
+    true
 }
 
 /// Match a search query against a target id.
@@ -659,13 +754,72 @@ mod tests {
     }
 
     #[test]
-    fn tag_filter_uses_catalog_tags() {
+    fn tag_filter_include_passes_only_matching_targets() {
         let mut s = State::default();
         s.apply(described("a", &["release"], false));
         s.apply(described("b", &[], false));
-        s.filters.tag = Some("release".into());
+        s.filters.tag_include.insert("release".into());
         let ids: Vec<&str> = s.filtered_catalog().iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, vec!["a"]);
+    }
+
+    #[test]
+    fn tag_filter_include_unions_multiple_tags() {
+        let mut s = State::default();
+        s.apply(described("a", &["release"], false));
+        s.apply(described("b", &["smoke"], false));
+        s.apply(described("c", &["other"], false));
+        s.filters.tag_include.insert("release".into());
+        s.filters.tag_include.insert("smoke".into());
+        let ids: Vec<&str> = s.filtered_catalog().iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn tag_filter_exclude_removes_matches() {
+        let mut s = State::default();
+        s.apply(described("a", &["release"], false));
+        s.apply(described("b", &["release", "flaky"], false));
+        s.filters.tag_include.insert("release".into());
+        s.filters.tag_exclude.insert("flaky".into());
+        let ids: Vec<&str> = s.filtered_catalog().iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["a"]);
+    }
+
+    #[test]
+    fn cycle_tag_at_cursor_steps_through_neutral_include_exclude() {
+        let mut s = State::default();
+        s.apply(described("a", &["release", "smoke"], false));
+        s.apply(described("b", &["smoke"], false));
+        // known_tags is sorted: ["release", "smoke"]
+        assert_eq!(s.known_tags(), vec!["release", "smoke"]);
+        s.tag_picker_cursor = 0;
+        s.cycle_tag_at_cursor();
+        assert!(s.filters.tag_include.contains("release"));
+        s.cycle_tag_at_cursor();
+        assert!(!s.filters.tag_include.contains("release"));
+        assert!(s.filters.tag_exclude.contains("release"));
+        s.cycle_tag_at_cursor();
+        assert!(!s.filters.tag_exclude.contains("release"));
+    }
+
+    #[test]
+    fn open_tag_picker_with_no_tags_flashes_error_instead_of_modal() {
+        let mut s = State::default();
+        s.apply(described("a", &[], false));
+        s.open_tag_picker();
+        assert_eq!(s.mode, Mode::Normal);
+        assert!(s.last_error.is_some());
+    }
+
+    #[test]
+    fn move_tag_cursor_clamps_to_known_tags() {
+        let mut s = State::default();
+        s.apply(described("a", &["x", "y", "z"], false));
+        s.move_tag_cursor(-1);
+        assert_eq!(s.tag_picker_cursor, 0);
+        s.move_tag_cursor(100);
+        assert_eq!(s.tag_picker_cursor, 2);
     }
 
     #[test]
@@ -678,18 +832,6 @@ mod tests {
         assert_eq!(ids, vec!["b"]);
     }
 
-    #[test]
-    fn cycle_tag_steps_through_known_then_back_to_none() {
-        let mut s = State::default();
-        s.apply(described("a", &["release", "smoke"], false));
-        s.apply(described("b", &["release"], false));
-        s.cycle_tag();
-        assert_eq!(s.filters.tag.as_deref(), Some("release"));
-        s.cycle_tag();
-        assert_eq!(s.filters.tag.as_deref(), Some("smoke"));
-        s.cycle_tag();
-        assert_eq!(s.filters.tag, None);
-    }
 
     #[test]
     fn selection_for_build_returns_filtered_ids() {

@@ -33,6 +33,7 @@ pub fn handle(state: &mut State, key: KeyEvent) -> Action {
     match state.mode {
         Mode::Help => return handle_help(state, key),
         Mode::Search => return handle_search(state, key),
+        Mode::TagPicker => return handle_tag_picker(state, key),
         Mode::Normal => {}
     }
     // Any non-Ctrl-C input clears the last-error banner.
@@ -59,7 +60,7 @@ fn handle_browser(state: &mut State, key: KeyEvent) -> Action {
             Action::Redraw
         }
         KeyCode::Char('t') => {
-            state.cycle_tag();
+            state.open_tag_picker();
             Action::Redraw
         }
         KeyCode::Char('T') => {
@@ -158,6 +159,34 @@ fn handle_help(state: &mut State, _key: KeyEvent) -> Action {
     state.mode = Mode::Normal;
     Action::Redraw
 }
+
+fn handle_tag_picker(state: &mut State, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('t') | KeyCode::Char('q') => {
+            state.close_tag_picker();
+            Action::Redraw
+        }
+        KeyCode::Char(' ') | KeyCode::Char('i') => {
+            state.cycle_tag_at_cursor();
+            Action::Redraw
+        }
+        KeyCode::Char('c') => {
+            state.filters.tag_include.clear();
+            state.filters.tag_exclude.clear();
+            Action::Redraw
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.move_tag_cursor(-1);
+            Action::Redraw
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.move_tag_cursor(1);
+            Action::Redraw
+        }
+        _ => Action::Ignore,
+    }
+}
+
 
 fn handle_search(state: &mut State, key: KeyEvent) -> Action {
     match key.code {
