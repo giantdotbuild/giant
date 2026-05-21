@@ -55,52 +55,94 @@ pub async fn prepare(
     std::fs::create_dir_all(&cache_root)?;
     let cache = LocalCache::open(AbsPath::new(cache_root)).await?;
 
+    // Wave-based discovery (TDD-0003 §Recursive discovery).
+    //
+    // Each wave is a parallel build of the current set of include
+    // targets. Their outputs are parsed; any nested `include:` entries
+    // they emit feed the next wave. Loop until no new includes appear,
+    // or hit MAX_DISCOVERY_DEPTH (cycle / runaway safety net).
+    //
+    // Cycle detection: we track every include target ID we've already
+    // built in `seen`. If a later wave emits an include we've already
+    // processed, it's silently skipped - same target can't run twice.
     if !config.include.is_empty() {
-        let include_ids: Vec<TargetId> = config.include.iter().map(|t| t.id.clone()).collect();
-        let bootstrap_job = BuildJob {
-            graph: Arc::new(graph.clone()),
-            selection: include_ids.clone(),
-            cache: cache.clone(),
-            workspace_root: workspace_abs.clone(),
-            parallelism,
-            fresh,
-            events,
-            cancel,
-            build_id: format!("bootstrap_{}", short_random()),
-            // Discovery doesn't currently use the remote cache -
-            // discoveries are per-workspace dynamic and aren't worth
-            // pushing to a shared server. Easy to revisit if a real
-            // use case appears.
-            #[cfg(feature = "remote")]
-            remote: None,
-            #[cfg(feature = "remote")]
-            upload_tx: None,
-        };
-        let bootstrap = build(bootstrap_job).await?;
-        if bootstrap.counts.failed > 0 {
-            anyhow::bail!(
-                "discovery failed: {} include target(s) failed",
-                bootstrap.counts.failed
-            );
-        }
+        const MAX_DISCOVERY_DEPTH: u32 = 32;
+        let mut current_wave: Vec<TargetId> =
+            config.include.iter().map(|t| t.id.clone()).collect();
+        let mut seen: std::collections::HashSet<TargetId> =
+            current_wave.iter().cloned().collect();
+        let mut depth: u32 = 0;
 
-        // Merge each discovery target's output JSON. Collect outputs first
-        // to release the immutable borrow of `graph`.
-        let outputs_to_read: Vec<PathBuf> = include_ids
-            .iter()
-            .flat_map(|id| {
-                let spec = graph.get(id).expect("present in initial graph");
-                spec.outputs
-                    .iter()
-                    .map(|p| workspace_abs.as_path().join(p.as_path()))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        for abs in outputs_to_read {
-            let fragment = discovery::parse_fragment(&abs)?;
-            discovery::merge_into(&mut graph, fragment)?;
+        while !current_wave.is_empty() {
+            if depth >= MAX_DISCOVERY_DEPTH {
+                anyhow::bail!(
+                    "discovery exceeded {MAX_DISCOVERY_DEPTH} wave depth - \
+                     possible cycle? Last wave's target ids: {:?}",
+                    current_wave,
+                );
+            }
+
+            let bootstrap_job = BuildJob {
+                graph: Arc::new(graph.clone()),
+                selection: current_wave.clone(),
+                cache: cache.clone(),
+                workspace_root: workspace_abs.clone(),
+                parallelism,
+                fresh,
+                events: events.clone(),
+                cancel: cancel.clone(),
+                build_id: format!("bootstrap_w{depth}_{}", short_random()),
+                // Discovery doesn't currently use the remote cache -
+                // discoveries are per-workspace dynamic and aren't
+                // worth pushing to a shared server. Easy to revisit
+                // if a real use case appears.
+                #[cfg(feature = "remote")]
+                remote: None,
+                #[cfg(feature = "remote")]
+                upload_tx: None,
+            };
+            let bootstrap = build(bootstrap_job).await?;
+            if bootstrap.counts.failed > 0 {
+                anyhow::bail!(
+                    "discovery failed at wave {depth}: {} include target(s) failed",
+                    bootstrap.counts.failed
+                );
+            }
+
+            // Collect outputs first so we release the immutable borrow
+            // before mutating the graph.
+            let outputs_to_read: Vec<PathBuf> = current_wave
+                .iter()
+                .flat_map(|id| {
+                    let spec = graph.get(id).expect("present in current wave");
+                    spec.outputs
+                        .iter()
+                        .map(|p| workspace_abs.as_path().join(p.as_path()))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+
+            // Merge each wave's outputs. Nested includes returned by
+            // merge_into feed the next wave (de-duplicated via `seen`).
+            let mut next_wave: Vec<TargetId> = Vec::new();
+            for abs in outputs_to_read {
+                let fragment = discovery::parse_fragment(&abs)?;
+                let new_includes = discovery::merge_into(&mut graph, fragment)?;
+                for nid in new_includes {
+                    if seen.insert(nid.clone()) {
+                        next_wave.push(nid);
+                    }
+                }
+            }
+
+            // Validate edges between waves: next-wave includes may
+            // declare deps on this-wave targets, and we need the graph
+            // consistent before executing them.
+            graph.build_edges_and_validate()?;
+
+            current_wave = next_wave;
+            depth += 1;
         }
-        graph.build_edges_and_validate()?;
     }
 
     Ok(Prepared {

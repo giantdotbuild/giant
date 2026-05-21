@@ -508,6 +508,190 @@ targets:
 }
 
 #[test]
+fn discovery_can_emit_nested_includes() {
+    // Wave-based recursive discovery (TDD-0003): a discovery target
+    // emits another include target, which runs in the next wave and
+    // emits a regular target. The final graph contains everything.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir(ws.join("tools")).unwrap();
+
+    // wave-1 discovery: emits a wave-2 include target.
+    std::fs::write(
+        ws.join("tools/wave1.sh"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p .giant/d
+cat > .giant/d/wave1.json <<'JSON'
+{
+  "include": [
+    {
+      "id": "discover:wave2",
+      "inputs": ["tools/wave2.sh"],
+      "outputs": [".giant/d/wave2.json"],
+      "command": "./tools/wave2.sh"
+    }
+  ]
+}
+JSON
+"#,
+    )
+    .unwrap();
+
+    // wave-2 discovery: emits a regular target.
+    std::fs::write(
+        ws.join("tools/wave2.sh"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p .giant/d
+cat > .giant/d/wave2.json <<'JSON'
+{
+  "targets": [
+    {
+      "id": "deep:target",
+      "inputs": [],
+      "outputs": ["deep.txt"],
+      "command": "echo from_deep_discovery > deep.txt"
+    }
+  ]
+}
+JSON
+"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for script in ["tools/wave1.sh", "tools/wave2.sh"] {
+            let p = std::fs::metadata(ws.join(script)).unwrap().permissions();
+            let mut p = p;
+            p.set_mode(0o755);
+            std::fs::set_permissions(ws.join(script), p).unwrap();
+        }
+    }
+
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: recursive-discovery
+cache:
+  dir: ./cache
+include:
+  - id: "discover:wave1"
+    inputs: ["tools/wave1.sh"]
+    outputs: [".giant/d/wave1.json"]
+    command: "./tools/wave1.sh"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "build failed: {}\n--- stdout ---\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout),
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    // The wave-2 discovery's emitted target should have built - proof
+    // that recursive discovery is working end-to-end.
+    assert!(
+        built(&s, "deep:target"),
+        "deep:target (from wave-2 discovery) should build; output:\n{s}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("deep.txt"))
+            .unwrap()
+            .trim(),
+        "from_deep_discovery"
+    );
+}
+
+#[test]
+fn discovery_cycle_is_detected() {
+    // A discovery target that emits an include pointing at itself
+    // would loop forever. The seen-set in the wave loop should
+    // dedupe it, so the build completes normally rather than
+    // hanging.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir(ws.join("tools")).unwrap();
+    std::fs::write(
+        ws.join("tools/self-emit.sh"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p .giant/d
+cat > .giant/d/loop.json <<'JSON'
+{
+  "include": [
+    {
+      "id": "discover:loop",
+      "inputs": ["tools/self-emit.sh"],
+      "outputs": [".giant/d/loop.json"],
+      "command": "./tools/self-emit.sh"
+    }
+  ],
+  "targets": [
+    {
+      "id": "loop:result",
+      "inputs": [],
+      "outputs": ["loop.txt"],
+      "command": "echo loop_resolved > loop.txt"
+    }
+  ]
+}
+JSON
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::fs::metadata(ws.join("tools/self-emit.sh"))
+            .unwrap()
+            .permissions();
+        let mut p = p;
+        p.set_mode(0o755);
+        std::fs::set_permissions(ws.join("tools/self-emit.sh"), p).unwrap();
+    }
+
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: cycle-discovery
+cache:
+  dir: ./cache
+include:
+  - id: "discover:loop"
+    inputs: ["tools/self-emit.sh"]
+    outputs: [".giant/d/loop.json"]
+    command: "./tools/self-emit.sh"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "build should complete (cycle deduped): {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(built(&s, "loop:result"), "non-cyclic target should still build; {s}");
+}
+
+#[test]
 fn exists_check_succeeding_skips_build_command() {
     // `exists:` says "yes, it's already there" → build command must not
     // run. We prove the command didn't run by having it write a marker

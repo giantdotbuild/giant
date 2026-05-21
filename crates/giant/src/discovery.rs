@@ -36,6 +36,13 @@ pub struct DiscoveryFragment {
     #[serde(default)]
     pub targets: Vec<TargetSpec>,
 
+    /// Further `include:` targets to run after this fragment is merged.
+    /// Each is built, its output parsed, its targets merged, and any
+    /// `include:` it emits goes into the next wave - recursively, up
+    /// to a depth limit. See TDD-0003 §Wave-based bootstrap.
+    #[serde(default)]
+    pub include: Vec<TargetSpec>,
+
     /// Optional fingerprint-input list (TDD-0001 / TDD-0003): files the
     /// discovery script actually read. Reserved for future use in tighter
     /// cache invalidation than declared inputs alone.
@@ -64,13 +71,34 @@ pub fn parse_fragment(path: &std::path::Path) -> Result<DiscoveryFragment, Disco
     Ok(frag)
 }
 
-/// Merge a fragment's targets into the graph. Tasks are accepted but
-/// not yet integrated (TDD-0005 task-from-discovery is v1.1).
-pub fn merge_into(graph: &mut BuildGraph, frag: DiscoveryFragment) -> Result<(), DiscoveryError> {
+/// Merge a fragment's targets (and any nested `include:` entries) into
+/// the graph. Returns the list of newly-added include target IDs so
+/// the bootstrap loop can build them in the next wave.
+///
+/// Nested includes whose ID is already in the graph (e.g. a discovery
+/// that emits its own self-id, or two discoveries that both emit the
+/// same nested include) are silently deduplicated - this is the
+/// cycle-detection safety net for recursive discovery.
+pub fn merge_into(
+    graph: &mut BuildGraph,
+    frag: DiscoveryFragment,
+) -> Result<Vec<crate::model::TargetId>, DiscoveryError> {
+    let mut new_includes: Vec<crate::model::TargetId> = Vec::with_capacity(frag.include.len());
+    for inc in frag.include {
+        let id = inc.id.clone();
+        if graph.get(&id).is_some() {
+            // Already added by an earlier wave (or duplicate within
+            // this wave). Skip; the cycle/dup is harmless here - the
+            // bootstrap loop's seen-set won't re-build it either.
+            continue;
+        }
+        graph.add_target(inc)?;
+        new_includes.push(id);
+    }
     for target in frag.targets {
         graph.add_target(target)?;
     }
-    Ok(())
+    Ok(new_includes)
 }
 
 #[cfg(test)]
@@ -142,7 +170,36 @@ mod tests {
         );
         let frag = parse_fragment(f.path()).unwrap();
         let mut graph = BuildGraph::new();
-        merge_into(&mut graph, frag).unwrap();
+        let new_includes = merge_into(&mut graph, frag).unwrap();
+        assert!(graph.get(&crate::model::TargetId::new("x")).is_some());
+        assert!(new_includes.is_empty());
+    }
+
+    #[test]
+    fn merge_returns_nested_include_ids() {
+        let f = write_json(
+            r#"{
+              "include": [
+                { "id": "discover:wave2",
+                  "inputs": ["scripts/wave2.sh"],
+                  "outputs": [".giant/wave2.json"],
+                  "command": "scripts/wave2.sh > .giant/wave2.json" }
+              ],
+              "targets": [
+                { "id": "x",
+                  "inputs": [],
+                  "outputs": ["x.out"],
+                  "command": "true" }
+              ]
+            }"#,
+        );
+        let frag = parse_fragment(f.path()).unwrap();
+        let mut graph = BuildGraph::new();
+        let new_includes = merge_into(&mut graph, frag).unwrap();
+        assert_eq!(new_includes.len(), 1);
+        assert_eq!(new_includes[0].as_str(), "discover:wave2");
+        // Both the nested include AND the static target are in the graph now.
+        assert!(graph.get(&crate::model::TargetId::new("discover:wave2")).is_some());
         assert!(graph.get(&crate::model::TargetId::new("x")).is_some());
     }
 }
