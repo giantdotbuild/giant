@@ -19,13 +19,16 @@ pub enum Action {
 }
 
 pub fn handle(state: &mut State, key: KeyEvent) -> Action {
-    // Ctrl-C: cancel current build (or no-op if none). Note: in raw
-    // mode the terminal doesn't translate Ctrl-C to SIGINT; this is
-    // just a key event the TUI interprets.
+    // Ctrl-C is screen-sensitive: cancels a running build, quits
+    // everywhere else. The terminal doesn't translate it to SIGINT in
+    // raw mode; the TUI decides what it means.
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
     {
-        return Action::CancelChild;
+        return match state.screen {
+            Screen::Building => Action::CancelChild,
+            _ => Action::Quit,
+        };
     }
     match state.mode {
         Mode::Help => return handle_help(state, key),
@@ -224,18 +227,22 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_is_cancel_in_every_screen() {
-        for screen in [
-            Screen::Loading,
-            Screen::Browser,
-            Screen::Building,
-            Screen::BuildFinished,
-        ] {
+    fn ctrl_c_cancels_only_during_a_running_build() {
+        let mut s = State {
+            screen: Screen::Building,
+            ..State::default()
+        };
+        assert_eq!(handle(&mut s, ctrl('c')), Action::CancelChild);
+    }
+
+    #[test]
+    fn ctrl_c_quits_when_no_build_is_running() {
+        for screen in [Screen::Loading, Screen::Browser, Screen::BuildFinished] {
             let mut s = State {
                 screen,
                 ..State::default()
             };
-            assert_eq!(handle(&mut s, ctrl('c')), Action::CancelChild);
+            assert_eq!(handle(&mut s, ctrl('c')), Action::Quit);
         }
     }
 

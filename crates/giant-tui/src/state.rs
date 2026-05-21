@@ -7,6 +7,7 @@
 
 use giant::events::{Event, LogStream, TargetCounts, TargetResultKind};
 use giant::model::TargetId;
+use giant::selection::{PatternMatcher, has_glob_chars};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::time::Instant;
 
@@ -326,11 +327,8 @@ impl State {
     }
 
     fn catalog_matches_filters(&self, id: &TargetId, entry: &CatalogEntry) -> bool {
-        if !self.filters.search.is_empty() {
-            let needle = self.filters.search.to_ascii_lowercase();
-            if !id.as_str().to_ascii_lowercase().contains(&needle) {
-                return false;
-            }
+        if !matches_search(&self.filters.search, id.as_str()) {
+            return false;
         }
         if let Some(tag) = &self.filters.tag
             && !entry.tags.contains(tag)
@@ -364,11 +362,8 @@ impl State {
     }
 
     fn build_target_matches_filters(&self, id: &TargetId, v: &TargetView) -> bool {
-        if !self.filters.search.is_empty() {
-            let needle = self.filters.search.to_ascii_lowercase();
-            if !id.as_str().to_ascii_lowercase().contains(&needle) {
-                return false;
-            }
+        if !matches_search(&self.filters.search, id.as_str()) {
+            return false;
         }
         if let Some(tag) = &self.filters.tag {
             let has = self.catalog.get(id).is_some_and(|e| e.tags.contains(tag));
@@ -457,6 +452,28 @@ impl State {
 
     pub fn scroll_bottom(&mut self) {
         self.scroll_offset = self.visible_count().saturating_sub(1);
+    }
+}
+
+/// Match a search query against a target id.
+///
+/// - Empty query → match all.
+/// - Query with glob chars (`*`, `?`, `[`) → engine selection language
+///   (same matcher `giant build bin:*` uses). Case-sensitive, `:`
+///   segments don't cross under `*`. Bad globs while the user is
+///   mid-typing match nothing.
+/// - No glob chars → case-insensitive substring match.
+fn matches_search(query: &str, id: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    if has_glob_chars(query) {
+        match PatternMatcher::compile(query) {
+            Ok(p) => p.matches_str(id),
+            Err(_) => false,
+        }
+    } else {
+        id.to_ascii_lowercase().contains(&query.to_ascii_lowercase())
     }
 }
 
@@ -581,13 +598,60 @@ mod tests {
     }
 
     #[test]
-    fn search_filter_substring_case_insensitive() {
+    fn search_filter_substring_case_insensitive_when_no_globs() {
         let mut s = State::default();
         s.apply(described("go:bin:server", &[], false));
         s.apply(described("docker:api", &[], false));
         s.filters.search = "GO:".into();
         let ids: Vec<&str> = s.filtered_catalog().iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, vec!["go:bin:server"]);
+    }
+
+    #[test]
+    fn search_filter_uses_engine_globs_when_pattern_has_stars() {
+        let mut s = State::default();
+        s.apply(described("bin:giant", &[], false));
+        s.apply(described("bin:giant-tui", &[], false));
+        s.apply(described("docker:bin:api", &[], false));
+        // `bin:*` should match only `bin:` segment 1, not `docker:bin:api`.
+        s.filters.search = "bin:*".into();
+        let ids: Vec<&str> = s
+            .filtered_catalog()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["bin:giant", "bin:giant-tui"]);
+    }
+
+    #[test]
+    fn search_filter_double_star_crosses_segments() {
+        let mut s = State::default();
+        s.apply(described("docker:api", &[], false));
+        s.apply(described("docker:foo:bar", &[], false));
+        // `docker:*` matches one segment after the prefix.
+        s.filters.search = "docker:*".into();
+        let ids: Vec<&str> = s
+            .filtered_catalog()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["docker:api"]);
+        // `docker:**` matches the rest of the id regardless of depth.
+        s.filters.search = "docker:**".into();
+        let ids: Vec<&str> = s
+            .filtered_catalog()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["docker:api", "docker:foo:bar"]);
+    }
+
+    #[test]
+    fn search_filter_bad_glob_mid_typing_matches_nothing() {
+        let mut s = State::default();
+        s.apply(described("bin:giant", &[], false));
+        s.filters.search = "[".into(); // unterminated class
+        assert!(s.filtered_catalog().is_empty());
     }
 
     #[test]

@@ -31,7 +31,10 @@ use tokio::sync::mpsc;
 
 const GIANT_BIN_ENV: &str = "GIANT_TUI_BUILD_BIN";
 const REDRAW_INTERVAL: Duration = Duration::from_millis(33); // ~30 Hz cap
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+/// How long to wait for the session to drain after we ask it to
+/// shut down. The session just needs to close files and exit, so
+/// this should be near-instant; if it isn't we kill the child.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Parser, Debug)]
 #[command(
@@ -201,21 +204,29 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
     }
 
     // ---- Shutdown -------------------------------------------------
+    //
+    // Restore the terminal *first* so the user sees their shell back
+    // immediately. Whatever the session does after this (it should
+    // just drain and exit) flows over a pipe we already own; it
+    // doesn't reach the user's terminal.
+    let _ = restore_terminal();
+
     if user_quit {
-        // Polite: ask the session to shut down. If it doesn't
-        // respond in time, kill it.
         let _ = cmd_tx
             .send(Command::Shutdown {
                 command_id: Some("c_quit".into()),
             })
             .await;
     }
+    // Closing stdin is the EOF signal the session reads. After that
+    // we wait briefly; the session normally exits in < 50 ms.
     drop(cmd_tx);
-    let _ = tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await;
-    if let Ok(None) = child.try_wait() {
+    if tokio::time::timeout(SHUTDOWN_GRACE, child.wait())
+        .await
+        .is_err()
+    {
         let _ = child.kill().await;
     }
-    let _ = restore_terminal();
     Ok(state.exit_code())
 }
 

@@ -190,8 +190,37 @@ fn id_match_str(id: &TargetId) -> String {
     id.as_str().replace(':', "/")
 }
 
-fn has_glob_chars(s: &str) -> bool {
+/// Whether a string contains any of the glob metacharacters Giant's
+/// selection language recognises (`*`, `?`, `[`). Porcelains that want
+/// to switch between literal and pattern matching can call this.
+pub fn has_glob_chars(s: &str) -> bool {
     s.contains('*') || s.contains('?') || s.contains('[')
+}
+
+/// A compiled single-pattern matcher that porcelains can use to apply
+/// the same selection rules as `giant build`. Same `:` segmentation
+/// (`*` stops at `:`, `**` crosses).
+#[derive(Debug, Clone)]
+pub struct PatternMatcher {
+    inner: glob::Pattern,
+}
+
+impl PatternMatcher {
+    pub fn compile(raw: &str) -> Result<Self, SelectionError> {
+        Ok(Self {
+            inner: compile(raw)?,
+        })
+    }
+
+    pub fn matches(&self, id: &TargetId) -> bool {
+        self.inner
+            .matches_with(&id_match_str(id), MATCH_OPTS)
+    }
+
+    pub fn matches_str(&self, id: &str) -> bool {
+        let s = id.replace(':', "/");
+        self.inner.matches_with(&s, MATCH_OPTS)
+    }
 }
 
 /// Set of targets whose inputs match any of the given changed files,
