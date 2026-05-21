@@ -145,6 +145,45 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<TargetId>,
     },
+
+    // ----- Session-mode events (TDD-0014) ----------------------------
+    //
+    // Emitted after the initial catalog stream finishes, indicating the
+    // session is now ready to accept commands on stdin.
+    #[serde(rename = "engine.ready")]
+    EngineReady,
+
+    /// Engine acknowledges a command and (if the command starts a
+    /// build) reports the assigned build id.
+    #[serde(rename = "command.accepted")]
+    CommandAccepted {
+        command_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build: Option<String>,
+    },
+
+    /// Engine refuses a command - bad schema, conflicting state,
+    /// unknown target, etc. The build never starts.
+    #[serde(rename = "command.rejected")]
+    CommandRejected { command_id: String, reason: String },
+
+    /// Engine accepted a command but it failed during execution.
+    /// Different from `build.finished { ok: false }` (which is a
+    /// targeted-failure event from the executor); this is for command-
+    /// level failures like "discovery couldn't run."
+    #[serde(rename = "command.error")]
+    CommandError { command_id: String, message: String },
+
+    /// Catalog is about to be invalidated and re-emitted (config or
+    /// discovery output changed). Porcelains should hold off on
+    /// rendering until `catalog.ready` arrives.
+    #[serde(rename = "catalog.invalidating")]
+    CatalogInvalidating,
+
+    /// Catalog re-emission is complete. The most recent
+    /// `target.described` events form the current catalog.
+    #[serde(rename = "catalog.ready")]
+    CatalogReady,
 }
 
 fn is_false(b: &bool) -> bool {
