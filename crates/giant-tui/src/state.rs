@@ -8,10 +8,13 @@
 use giant::events::{Event, LogStream, TargetCounts, TargetResultKind};
 use giant::model::TargetId;
 use giant::selection::{PatternMatcher, has_glob_chars};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
-pub const RECENT_LOGS_CAP: usize = 200;
+/// Maximum log lines retained per target. Older lines drop off the
+/// front of the ring when a target writes more than this. Tuned for
+/// "enough to see the failure context without holding 100 MB."
+pub const LOGS_PER_TARGET_CAP: usize = 500;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -159,7 +162,10 @@ pub struct State {
     pub parallelism: usize,
     pub started_at: Option<Instant>,
     pub targets: BTreeMap<TargetId, TargetView>,
-    pub recent_logs: VecDeque<LogLine>,
+    /// Per-target log ring buffers. Each target keeps its last N
+    /// lines; the bottom pane in the build view shows whichever
+    /// target the cursor points at.
+    pub logs: HashMap<TargetId, VecDeque<LogLine>>,
     pub final_summary: Option<TargetCounts>,
     pub final_duration_ms: Option<u64>,
     pub final_ok: Option<bool>,
@@ -176,6 +182,10 @@ pub struct State {
     pub quitting: bool,
     /// Cursor inside the tag picker modal.
     pub tag_picker_cursor: usize,
+    /// Cursor in the build view's target list. Indexes into the
+    /// sorted/filtered build targets; clamped on each access. The
+    /// selected target's logs render in the bottom pane.
+    pub build_cursor: usize,
 }
 
 impl State {
@@ -225,13 +235,14 @@ impl State {
                     // New build cycle (first one, or a queued one
                     // starting after the previous finished). Reset.
                     self.targets.clear();
-                    self.recent_logs.clear();
+                    self.logs.clear();
                     self.final_summary = None;
                     self.final_duration_ms = None;
                     self.final_ok = None;
                     self.build_id = Some(id);
                     self.parallelism = parallelism;
                     self.started_at = Some(Instant::now());
+                    self.build_cursor = 0;
                 }
                 for tid in target_ids {
                     self.targets.entry(tid).or_default();
@@ -251,10 +262,14 @@ impl State {
             Event::TargetLog {
                 id, stream, line, ..
             } => {
-                if self.recent_logs.len() >= RECENT_LOGS_CAP {
-                    self.recent_logs.pop_front();
+                let buf = self
+                    .logs
+                    .entry(id.clone())
+                    .or_insert_with(|| VecDeque::with_capacity(64));
+                if buf.len() >= LOGS_PER_TARGET_CAP {
+                    buf.pop_front();
                 }
-                self.recent_logs.push_back(LogLine {
+                buf.push_back(LogLine {
                     target: id,
                     stream,
                     line,
@@ -305,11 +320,12 @@ impl State {
         // running screen" optimisation so input feels instant.
         self.screen = Screen::Building;
         self.targets.clear();
-        self.recent_logs.clear();
+        self.logs.clear();
         self.final_summary = None;
         self.final_duration_ms = None;
         self.final_ok = None;
         self.scroll_offset = 0;
+        self.build_cursor = 0;
         self.build_id = None;
         self.pending_build_id = None;
     }
@@ -514,20 +530,86 @@ impl State {
     }
 
     pub fn scroll_up(&mut self, n: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(n);
+        match self.screen {
+            Screen::Building | Screen::BuildFinished => {
+                self.move_build_cursor(-(n as isize));
+            }
+            _ => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(n);
+            }
+        }
     }
 
     pub fn scroll_down(&mut self, n: usize) {
-        let max = self.visible_count().saturating_sub(1);
-        self.scroll_offset = (self.scroll_offset + n).min(max);
+        match self.screen {
+            Screen::Building | Screen::BuildFinished => {
+                self.move_build_cursor(n as isize);
+            }
+            _ => {
+                let max = self.visible_count().saturating_sub(1);
+                self.scroll_offset = (self.scroll_offset + n).min(max);
+            }
+        }
     }
 
     pub fn scroll_top(&mut self) {
-        self.scroll_offset = 0;
+        match self.screen {
+            Screen::Building | Screen::BuildFinished => {
+                self.build_cursor = 0;
+                self.scroll_offset = 0;
+            }
+            _ => {
+                self.scroll_offset = 0;
+            }
+        }
     }
 
     pub fn scroll_bottom(&mut self) {
-        self.scroll_offset = self.visible_count().saturating_sub(1);
+        match self.screen {
+            Screen::Building | Screen::BuildFinished => {
+                let n = self.sorted_build_targets().len();
+                self.build_cursor = n.saturating_sub(1);
+                self.scroll_offset = self.build_cursor;
+            }
+            _ => {
+                self.scroll_offset = self.visible_count().saturating_sub(1);
+            }
+        }
+    }
+
+    fn move_build_cursor(&mut self, delta: isize) {
+        let n = self.sorted_build_targets().len();
+        if n == 0 {
+            self.build_cursor = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        let cur = self.build_cursor as isize;
+        let new = (cur + delta).clamp(0, n as isize - 1) as usize;
+        self.build_cursor = new;
+        // Keep cursor in view: simple "follow the cursor" - if it
+        // goes above the top of the view or beyond the bottom, scroll.
+        // We don't know the viewport height here so we just keep
+        // scroll_offset aligned with the cursor as a lower bound; the
+        // renderer handles the upper bound.
+        if self.scroll_offset > self.build_cursor {
+            self.scroll_offset = self.build_cursor;
+        }
+    }
+
+    /// Target id at the build cursor, or `None` if the list is empty.
+    pub fn selected_build_target(&self) -> Option<TargetId> {
+        let rows = self.sorted_build_targets();
+        rows.get(self.build_cursor).map(|(id, _)| (*id).clone())
+    }
+
+    /// Log buffer for the cursor target. Empty if no logs yet.
+    pub fn selected_target_logs(&self) -> &[LogLine] {
+        static EMPTY: &[LogLine] = &[];
+        let Some(id) = self.selected_build_target() else {
+            return EMPTY;
+        };
+        self.logs.get(&id).map(|d| d.as_slices().0).unwrap_or(EMPTY)
     }
 }
 
@@ -872,9 +954,9 @@ mod tests {
     }
 
     #[test]
-    fn target_log_caps_at_ring_capacity() {
+    fn target_log_caps_per_target_ring() {
         let mut s = State::default();
-        for i in 0..(RECENT_LOGS_CAP + 5) {
+        for i in 0..(LOGS_PER_TARGET_CAP + 5) {
             s.apply(Event::TargetLog {
                 build: "b".into(),
                 id: tid("a"),
@@ -883,6 +965,62 @@ mod tests {
                 truncated: false,
             });
         }
-        assert_eq!(s.recent_logs.len(), RECENT_LOGS_CAP);
+        assert_eq!(s.logs[&tid("a")].len(), LOGS_PER_TARGET_CAP);
+    }
+
+    #[test]
+    fn selected_target_logs_returns_cursor_target_buffer() {
+        let mut s = State {
+            screen: Screen::Building,
+            ..State::default()
+        };
+        s.apply(Event::BuildStarted {
+            id: "b_1".into(),
+            selection: vec![],
+            target_ids: vec![tid("a"), tid("b")],
+            parallelism: 1,
+        });
+        s.apply(Event::TargetLog {
+            build: "b_1".into(),
+            id: tid("a"),
+            stream: LogStream::Stdout,
+            line: "hello from a".into(),
+            truncated: false,
+        });
+        s.apply(Event::TargetLog {
+            build: "b_1".into(),
+            id: tid("b"),
+            stream: LogStream::Stdout,
+            line: "hello from b".into(),
+            truncated: false,
+        });
+        // Cursor at 0 → first sorted target (a) - its logs.
+        s.build_cursor = 0;
+        let logs = s.selected_target_logs();
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].line.contains("hello from a"));
+        // Cursor at 1 → second target (b).
+        s.build_cursor = 1;
+        let logs = s.selected_target_logs();
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].line.contains("hello from b"));
+    }
+
+    #[test]
+    fn build_cursor_clamps_to_visible_count() {
+        let mut s = State {
+            screen: Screen::Building,
+            ..State::default()
+        };
+        s.apply(Event::BuildStarted {
+            id: "b_1".into(),
+            selection: vec![],
+            target_ids: vec![tid("a"), tid("b"), tid("c")],
+            parallelism: 1,
+        });
+        s.scroll_down(100);
+        assert_eq!(s.build_cursor, 2);
+        s.scroll_up(100);
+        assert_eq!(s.build_cursor, 0);
     }
 }

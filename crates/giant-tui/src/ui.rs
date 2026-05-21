@@ -1,7 +1,7 @@
 //! ratatui draw functions. Two layouts: browser (catalog list) and
 //! build view (target list + recent logs).
 
-use crate::colors::{status_icon, status_label, status_style, target_color};
+use crate::colors::{status_icon, status_label, status_style};
 use crate::state::{
     CatalogEntry, LogLine, Mode, Screen, State, StatusFilter, TagState, TargetStatus, TargetView,
 };
@@ -266,19 +266,33 @@ fn draw_build_target_list(frame: &mut Frame, area: Rect, state: &State) {
     let rows: Vec<Line> = state
         .sorted_build_targets()
         .iter()
+        .enumerate()
         .skip(state.scroll_offset)
-        .map(|(id, v)| target_row(id, v))
+        .map(|(i, (id, v))| target_row(id, v, i == state.build_cursor))
         .collect();
     let para = Paragraph::new(rows).wrap(Wrap { trim: false });
     frame.render_widget(para, area);
 }
 
-fn target_row<'a>(id: &'a TargetId, v: &'a TargetView) -> Line<'a> {
+fn target_row<'a>(id: &'a TargetId, v: &'a TargetView, selected: bool) -> Line<'a> {
+    let cursor = if selected {
+        Span::styled(
+            "▶ ",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw("  ")
+    };
     let icon = Span::styled(
-        format!("  {} ", status_icon(v.status)),
+        format!("{} ", status_icon(v.status)),
         status_style(v.status),
     );
-    let id_span = Span::raw(format!("{:<40}", truncate(id.as_str(), 40)));
+    let id_style = if selected {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let id_span = Span::styled(format!("{:<40}", truncate(id.as_str(), 40)), id_style);
     let label = Span::styled(
         format!("{:<8}", status_label(v.status)),
         status_style(v.status),
@@ -293,23 +307,23 @@ fn target_row<'a>(id: &'a TargetId, v: &'a TargetView) -> Line<'a> {
         }
         _ => Span::raw(String::new()),
     };
-    Line::from(vec![icon, id_span, label, dur])
+    Line::from(vec![cursor, icon, id_span, label, dur])
 }
 
 fn draw_recent_logs(frame: &mut Frame, area: Rect, state: &State) {
     let height = area.height.saturating_sub(2) as usize;
-    let lines: Vec<Line> = state
-        .recent_logs
-        .iter()
-        .rev()
-        .take(height)
-        .rev()
-        .map(log_row)
-        .collect();
-    let title = if state.has_failures() && state.final_ok.is_some() {
-        " recent (failures above) "
-    } else {
-        " recent "
+    let logs = state.selected_target_logs();
+    // Take the last `height` lines so the most recent output is
+    // always visible, regardless of how chatty the target is.
+    let start = logs.len().saturating_sub(height);
+    let mut lines: Vec<Line> = Vec::with_capacity(height);
+    for l in &logs[start..] {
+        lines.extend(log_lines(l));
+    }
+    let title = match state.selected_build_target() {
+        Some(id) if !logs.is_empty() => format!(" logs - {} ", id.as_str()),
+        Some(id) => format!(" logs - {} (no output yet) ", id.as_str()),
+        None => " logs ".to_string(),
     };
     let para = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(title))
@@ -334,17 +348,22 @@ fn draw_recent_logs(frame: &mut Frame, area: Rect, state: &State) {
     }
 }
 
-fn log_row(l: &LogLine) -> Line<'_> {
-    let stream_color = match l.stream {
-        LogStream::Stdout => Color::Reset,
-        LogStream::Stderr => Color::Red,
-    };
-    let prefix = Span::styled(
-        format!("[{}] ", l.target.as_str()),
-        Style::default().fg(target_color(l.target.as_str())),
-    );
-    let body = Span::styled(l.line.clone(), Style::default().fg(stream_color));
-    Line::from(vec![prefix, body])
+/// Render one captured log line. Parses ANSI escape sequences so
+/// colored cargo / npm / docker output survives. Returns one or more
+/// `Line` values (rare - ANSI lines with embedded newlines).
+///
+/// Stderr lines get a red default style; stdout lines render whatever
+/// styles the ANSI parser produced (or no style at all).
+fn log_lines(l: &LogLine) -> Vec<Line<'static>> {
+    use ansi_to_tui::IntoText;
+    let parsed = l.line.into_text().unwrap_or_else(|_| {
+        let style = match l.stream {
+            LogStream::Stdout => Style::default(),
+            LogStream::Stderr => Style::default().fg(Color::Red),
+        };
+        ratatui::text::Text::from(Span::styled(l.line.clone(), style))
+    });
+    parsed.lines.into_iter().collect()
 }
 
 // ============================================================

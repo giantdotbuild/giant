@@ -22,6 +22,10 @@ futures-util = "0.3"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 
+# Preserve ANSI color codes that build subprocesses (cargo, npm, etc.)
+# emit in their log lines. Parses escape sequences into ratatui Spans.
+ansi-to-tui = "7"
+
 # Pipe NDJSON in/out of the session subprocess.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
