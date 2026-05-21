@@ -149,29 +149,54 @@ Current: `1`.
 Additive changes (new event types, new optional fields) don't bump the
 version. Clients should tolerate unknown event types by skipping them.
 
-## Command channel (planned)
+## Command channel
 
-When `giant serve` lands, clients will be able to send commands back
-via the same wire format:
+`giant session` accepts NDJSON commands on stdin and emits events on
+stdout - same wire format, same `t`/`c` envelope discipline. The TUI
+and any other porcelain drive the engine through this channel.
+
+Start a session:
+
+```bash
+giant session --events ndjson <commands.jsonl >events.jsonl
+```
+
+Or attach interactively from another tool - write commands to the
+child's stdin, parse events from its stdout.
+
+Command shapes (full list in `crates/giant/src/commands.rs`):
 
 ```jsonc
 { "c": "build",
+  "command_id": "c_1",
   "targets": ["go:bin:server"],
   "fresh": false }
 
-{ "c": "selection.list_tags" }
+{ "c": "watch.start",
+  "command_id": "c_2",
+  "targets": ["go:bin:server"] }
 
-{ "c": "selection.resolve",
-  "patterns": ["go:**"],
-  "tags": ["release"],
-  "no_tags": ["flaky"],
-  "test_mode": "exclude" }
+{ "c": "watch.stop",
+  "command_id": "c_3" }
 
-{ "c": "cancel", "build": "b_4f9c" }
-{ "c": "shutdown" }
+{ "c": "cancel",
+  "command_id": "c_4",
+  "build": "b_4f9c" }
+
+{ "c": "shutdown",
+  "command_id": "c_5" }
 ```
 
-Responses come back as normal events on the stream.
+Each command is acknowledged with a `command.accepted` (carrying the
+allocated `build_id` if applicable) or `command.rejected` (with a
+reason - e.g. `"watch is active - send watch.stop first"`).
+Subsequent events for the work the command kicked off (`build.*`,
+`target.*`) come back on the normal event stream.
+
+Session lifecycle: on `engine.hello` plus the initial
+`target.described` catalog stream plus `engine.ready`, the session is
+ready to accept commands. Closing stdin drains in-flight work and
+exits cleanly.
 
 ## Consuming the stream
 

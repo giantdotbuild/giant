@@ -71,6 +71,18 @@ pub struct WatchArgs {
     /// Exclude targets carrying this tag. Repeatable.
     #[arg(long = "no-tag", value_name = "TAG")]
     pub no_tags: Vec<String>,
+
+    /// Watch test targets only - the TDD feedback loop. Equivalent to
+    /// `giant test` but on a continuous watch. Mutually exclusive
+    /// with `--all`.
+    #[arg(long, conflicts_with = "all")]
+    pub test: bool,
+
+    /// Watch every target, test and non-test alike. Without this and
+    /// without `--test`, watch defaults to non-test targets only (same
+    /// rule as `giant build`).
+    #[arg(long)]
+    pub all: bool,
 }
 
 pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Result<()> {
@@ -78,6 +90,13 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
     let cancel = CancellationToken::new();
     let mode = renderer::detect_mode(args.color, /* ndjson */ false);
     let quiet = args.quiet;
+    let test_mode = if args.test {
+        selection::TestMode::Only
+    } else if args.all {
+        selection::TestMode::Include
+    } else {
+        selection::TestMode::Exclude
+    };
 
     // Ctrl-C → cancel.
     {
@@ -97,7 +116,8 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
         tags: args.tags.clone(),
         no_tags: args.no_tags.clone(),
     };
-    let pattern_selection = resolve_pattern_selection(&prepared, &args.patterns, &select_opts)?;
+    let pattern_selection =
+        resolve_pattern_selection(&prepared, &args.patterns, test_mode, &select_opts)?;
     if pattern_selection.is_empty() {
         anyhow::bail!("no targets to watch");
     }
@@ -175,7 +195,7 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
         };
 
         let pattern_selection =
-            match resolve_pattern_selection(&prepared, &args.patterns, &select_opts) {
+            match resolve_pattern_selection(&prepared, &args.patterns, test_mode, &select_opts) {
                 Ok(s) => s,
                 Err(e) => {
                     print_note(mode, &format!("selection failed: {e}"));
@@ -242,15 +262,10 @@ async fn run_prepare(
 fn resolve_pattern_selection(
     prepared: &Prepared,
     patterns: &[String],
+    test_mode: selection::TestMode,
     opts: &selection::SelectionOpts,
 ) -> anyhow::Result<Vec<TargetId>> {
-    selection::resolve_patterns(
-        &prepared.graph,
-        patterns,
-        selection::TestMode::Exclude,
-        opts,
-    )
-    .map_err(Into::into)
+    selection::resolve_patterns(&prepared.graph, patterns, test_mode, opts).map_err(Into::into)
 }
 
 /// All declared output absolute paths, used as the watcher exclusion

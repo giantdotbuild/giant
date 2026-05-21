@@ -68,6 +68,8 @@ giant watch [PATTERNS...]
 | `--color <when>` | `auto` | See `build`. |
 | `--tag <tag>` | - | See `build`. |
 | `--no-tag <tag>` | - | See `build`. |
+| `--test` | off | Watch test targets only (TDD loop). Mutually exclusive with `--all`. |
+| `--all` | off | Watch every target - tests and non-tests. |
 
 ## `giant affected`
 
@@ -130,6 +132,25 @@ giant clean [-y] [--dry-run]
 For automatic LRU eviction (which happens after every build when
 configured), see the `cache.max_size_gb` setting in
 [giant.yaml reference](/reference/config/).
+
+## `giant session`
+
+Persistent engine over stdio. Loads config once, runs discovery once,
+then reads NDJSON commands on stdin and emits NDJSON events on stdout.
+The protocol porcelains (the TUI in particular) drive against. Refuses
+to run with stdout on a TTY - pipe it.
+
+```
+giant session --events ndjson <commands.jsonl >events.jsonl
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--events <fmt>` | `ndjson` | Only `ndjson` today; flag shape matches `giant build`. |
+
+Commands accepted on stdin: `build`, `watch.start`, `watch.stop`,
+`cancel`, `shutdown`. See [Event protocol - Command channel](/reference/events/#command-channel)
+for the full wire format and ack semantics.
 
 ## Porcelain dispatch
 

@@ -72,25 +72,33 @@ match means no target is affected → cycle skipped).
 
 ## Test loop
 
-Pair with `giant test`:
+## Test-driven feedback loop
 
 ```bash
-# Terminal 1
-giant watch
-
-# Terminal 2
-giant test --tag fast --watch    # if a --watch flag were added
+giant watch --test
 ```
 
-For now, `giant test` doesn't have its own watch mode - but you can
-run `giant watch` with a pattern matching just your tests:
+This is the TDD shape: edit a source file, watch re-runs the affected
+test targets, see results, repeat. Internally it's `giant watch` with
+`TestMode::Only` - same selection semantics as `giant test`, same
+debouncer, same affected-detection.
+
+Mix with patterns and tags to scope further:
 
 ```bash
-giant watch 'go:test:*'
+giant watch --test go:test:auth         # only auth tests
+giant watch --test --tag fast           # only fast-tagged tests
+giant watch --test go:test:* '!go:test:integration:*'
 ```
 
-…or use `watchexec` to re-run `giant test` on a saved file. Both
-work.
+If you want everything - tests AND production targets - together:
+
+```bash
+giant watch --all
+```
+
+`--test` and `--all` are mutually exclusive; without either, the
+default is "non-test targets only," matching `giant build`'s rule.
 
 ## Discovery re-runs
 
