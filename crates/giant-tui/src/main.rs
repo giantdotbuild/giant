@@ -104,7 +104,12 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
     }
 
     // ---- Main loop ------------------------------------------------
-    let mut render_pending = true;
+    //
+    // The 30Hz ticker always redraws - ratatui diffs frames and only
+    // writes cells that actually changed, so idle redraws are nearly
+    // free. This gives running-duration counters a refresh every
+    // 33ms without any guard logic. Significant events also trigger
+    // an immediate draw so screen transitions feel instant.
     let mut ticker = tokio::time::interval(REDRAW_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -118,7 +123,7 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
                 if let CtEvent::Key(k) = ct {
                     if k.kind != KeyEventKind::Press { continue; }
                     match handle(&mut state, k) {
-                        Action::Redraw => render_pending = true,
+                        Action::Redraw => {}
                         Action::Quit => {
                             user_quit = true;
                             break;
@@ -127,7 +132,6 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
                             let sel = state.selection_for_build();
                             if sel.is_empty() {
                                 state.last_error = Some("no targets in current selection".into());
-                                render_pending = true;
                             } else {
                                 state.start_build_locally();
                                 let _ = cmd_tx.send(Command::Build {
@@ -135,7 +139,6 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
                                     targets: sel,
                                     fresh: false,
                                 }).await;
-                                render_pending = true;
                             }
                         }
                         Action::CancelChild => {
@@ -147,12 +150,9 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
                                     build: build_id,
                                 }).await;
                             }
-                            render_pending = true;
                         }
                         Action::Ignore => {}
                     }
-                } else if matches!(ct, CtEvent::Resize(_, _)) {
-                    render_pending = true;
                 }
             }
             ev = event_rx.recv() => {
@@ -172,9 +172,6 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
                         state.apply(ev);
                         if significant {
                             terminal.draw(|f| ui::draw(f, &state))?;
-                            render_pending = false;
-                        } else {
-                            render_pending = true;
                         }
                     }
                     None => {
@@ -190,9 +187,8 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
                     }
                 }
             }
-            _ = ticker.tick(), if render_pending || is_time_dependent(&state) => {
+            _ = ticker.tick() => {
                 terminal.draw(|f| ui::draw(f, &state))?;
-                render_pending = false;
             }
         }
     }
@@ -293,14 +289,6 @@ async fn write_commands(mut stdin: ChildStdin, mut rx: mpsc::Receiver<Command>) 
     }
     // Dropping stdin closes it, which the session reads as EOF and
     // exits.
-}
-
-/// Whether the current frame contains anything that changes over time
-/// (running durations in the build header, per-target elapsed timers).
-/// The tick handler force-redraws when this is true so those counters
-/// advance even with no inbound events.
-fn is_time_dependent(state: &State) -> bool {
-    matches!(state.screen, Screen::Building)
 }
 
 fn new_command_seq() -> u64 {
