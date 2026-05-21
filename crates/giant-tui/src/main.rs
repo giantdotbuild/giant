@@ -190,7 +190,7 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
                     }
                 }
             }
-            _ = ticker.tick(), if render_pending => {
+            _ = ticker.tick(), if render_pending || is_time_dependent(&state) => {
                 terminal.draw(|f| ui::draw(f, &state))?;
                 render_pending = false;
             }
@@ -293,6 +293,14 @@ async fn write_commands(mut stdin: ChildStdin, mut rx: mpsc::Receiver<Command>) 
     }
     // Dropping stdin closes it, which the session reads as EOF and
     // exits.
+}
+
+/// Whether the current frame contains anything that changes over time
+/// (running durations in the build header, per-target elapsed timers).
+/// The tick handler force-redraws when this is true so those counters
+/// advance even with no inbound events.
+fn is_time_dependent(state: &State) -> bool {
+    matches!(state.screen, Screen::Building)
 }
 
 fn new_command_seq() -> u64 {

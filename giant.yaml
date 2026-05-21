@@ -28,6 +28,8 @@ targets:
       - "crates/giant/Cargo.toml"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "devenv.nix"
+      - "devenv.lock"
     outputs: ["bin/giant"]
     command: "cargo build --release -p giant --bin giant && install -m 0755 target/release/giant bin/giant"
     timeout: 600
@@ -39,6 +41,8 @@ targets:
       - "crates/giant-task/Cargo.toml"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "devenv.nix"
+      - "devenv.lock"
     outputs: ["bin/giant-task"]
     # -p selects the workspace member; --bin disambiguates within it.
     command: "cargo build --release -p giant-task --bin giant-task && install -m 0755 target/release/giant-task bin/giant-task"
@@ -51,6 +55,8 @@ targets:
       - "crates/giant-tui/Cargo.toml"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "devenv.nix"
+      - "devenv.lock"
     outputs: ["bin/giant-tui"]
     command: "cargo build --release -p giant-tui --bin giant-tui && install -m 0755 target/release/giant-tui bin/giant-tui"
     timeout: 600
@@ -60,6 +66,8 @@ targets:
     inputs:
       - "docs-site/package.json"
       - "docs-site/package-lock.json"
+      - "devenv.nix"
+      - "devenv.lock"
     outputs:
       - "docs-site/node_modules/.package-lock.json"
     cwd: "docs-site"
@@ -78,6 +86,8 @@ targets:
       - "docs-site/tsconfig.json"
       - "docs-site/package.json"
       - "docs-site/package-lock.json"
+      - "devenv.nix"
+      - "devenv.lock"
     outputs:
       - "docs-site/dist/index.html"
       - "docs-site/dist/sitemap-index.xml"

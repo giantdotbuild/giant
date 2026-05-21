@@ -98,16 +98,55 @@ pub async fn run() -> anyhow::Result<()> {
     // exits - without ever reaching the normal command dispatch.
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
 
-    // Build the clap Command from the derived Cli, then dynamically
-    // append a list of detected porcelains to the help output. The
-    // porcelains aren't real subcommands as far as clap is concerned;
-    // they still get dispatched via `Commands::External`. The
-    // after-help section is just so users see them in `--help`.
+    // Build the clap Command from the derived Cli, then register any
+    // `giant-<name>` binaries we find on PATH as additional
+    // subcommands. They appear in `Commands:` in the regular help with
+    // a one-line `about` extracted from the porcelain's own --help.
+    // The typed `Cli` enum has no variant for them, so we detect a
+    // porcelain hit on the matches and dispatch before falling through
+    // to `from_arg_matches`.
+    let porcelains = detect_porcelains();
+    let want_help = is_help_invocation();
     let mut cmd = Cli::command();
-    if let Some(blurb) = porcelain_help_section() {
-        cmd = cmd.after_help(blurb);
+    for (name, path) in &porcelains {
+        let about = if want_help {
+            porcelain_about(path).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        // clap's Command::new takes `impl Into<Str>` where Str only
+        // converts from `&'static str` - we have to leak the name so
+        // it satisfies the bound. The leak is once per porcelain per
+        // invocation; the strings live for the rest of process life.
+        let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
+        cmd = cmd.subcommand(
+            clap::Command::new(name_static)
+                .about(about)
+                .disable_help_flag(true) // pass --help through to the porcelain
+                .trailing_var_arg(true)
+                .arg(
+                    clap::Arg::new("args")
+                        .num_args(0..)
+                        .allow_hyphen_values(true)
+                        .value_parser(clap::value_parser!(OsString)),
+                ),
+        );
     }
     let matches = cmd.get_matches();
+
+    // Route porcelain hits before the typed decode: the derived `Cli`
+    // enum has no variant for a dynamically-registered subcommand, so
+    // `from_arg_matches` would error.
+    if let Some((sub, sub_matches)) = matches.subcommand()
+        && porcelains.contains_key(sub)
+    {
+        let mut argv: Vec<OsString> = vec![OsString::from(sub)];
+        if let Some(extra) = sub_matches.get_many::<OsString>("args") {
+            argv.extend(extra.cloned());
+        }
+        return external::dispatch(argv);
+    }
+
     let cli = Cli::from_arg_matches(&matches).expect("clap derive ensures shape");
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -169,31 +208,61 @@ const BUILTIN_SUBCOMMANDS: &[&str] = &[
     "completions",
 ];
 
-/// Format a one-line-per-porcelain "after help" section, or `None` if
-/// nothing was found on PATH. Output looks like:
-///
-/// ```text
-/// Porcelains (extra subcommands provided by binaries on PATH):
-///   task    /home/user/.cargo/bin/giant-task
-///   tui     /usr/local/bin/giant-tui
-/// ```
-fn porcelain_help_section() -> Option<String> {
-    let porcelains = detect_porcelains();
-    if porcelains.is_empty() {
-        return None;
+/// True iff the user is asking for help - explicitly via `--help`,
+/// `-h`, or `help`, or implicitly by running `giant` with no
+/// subcommand (clap auto-prints usage in that case). We only extract
+/// porcelain about-lines (which involves spawning a process per
+/// porcelain) when this returns true. Stops at `--` so a flag named
+/// `help` passed through to a porcelain doesn't trigger the
+/// extraction.
+fn is_help_invocation() -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // No args at all → clap renders help.
+    if args.is_empty() {
+        return true;
     }
-    let width = porcelains.keys().map(|n| n.len()).max().unwrap_or(0);
-    let mut out = String::from("Porcelains (extra subcommands provided by binaries on PATH):\n");
-    for (name, path) in &porcelains {
-        out.push_str(&format!(
-            "  {:<width$}  {}\n",
-            name,
-            path.display(),
-            width = width
-        ));
+    // No positional that could be a subcommand → clap still renders
+    // help. Treat global flags only (--config, --fresh, --log) as
+    // not-a-subcommand.
+    let mut iter = args.iter().take_while(|a| a.as_str() != "--");
+    let mut has_subcommand = false;
+    while let Some(a) = iter.next() {
+        if a == "--help" || a == "-h" || a == "help" {
+            return true;
+        }
+        if a.starts_with("--config") || a.starts_with("--log") {
+            // These take a value - skip the next arg if it's not
+            // joined with `=`.
+            if !a.contains('=') {
+                iter.next();
+            }
+            continue;
+        }
+        if a == "--fresh" || a.starts_with('-') {
+            continue;
+        }
+        has_subcommand = true;
+        break;
     }
-    out.push_str("\nRun `giant <name> --help` for the porcelain's own help.");
-    Some(out)
+    !has_subcommand
+}
+
+/// Run `<porcelain> --help` and pull out the about text - the first
+/// non-empty, non-`Usage:` line of stdout. Clap convention puts the
+/// about right at the top. Returns `None` if the porcelain failed to
+/// run, didn't produce parseable output, or just didn't have an about.
+fn porcelain_about(path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new(path)
+        .arg("--help")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("Usage:"))
+        .map(|l| l.to_string())
 }
 
 /// Walk PATH for `giant-<name>` executables that don't shadow a
