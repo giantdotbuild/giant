@@ -183,6 +183,189 @@ fn default_schema_version() -> u32 {
 
 const SUPPORTED_SCHEMA: u32 = 1;
 
+/// Materialized `reads` manifest: paths + recorded content hashes. This
+/// is what the engine writes to the discovery sidecar after a cold run
+/// and verifies against the filesystem on warm runs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordedReads {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<RecordedFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dirs: Vec<RecordedDir>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordedFile {
+    pub path: WsRelPath,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<String>,
+    pub content_hash: ContentHash,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordedDir {
+    pub path: WsRelPath,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filter: Vec<String>,
+    pub listing_hash: ContentHash,
+}
+
+/// Outcome of verifying a `RecordedReads` manifest against the live
+/// filesystem.
+#[derive(Debug, Clone)]
+pub enum VerifyOutcome {
+    Match,
+    Mismatch { reason: String },
+}
+
+/// Convert a discovery-emitted `reads` manifest into a `RecordedReads`
+/// snapshot by hashing every entry against the workspace. Called once
+/// after a cold discovery run, before writing the sidecar.
+pub fn materialize_reads(
+    reads: &DiscoveryReads,
+    workspace_root: &std::path::Path,
+) -> std::io::Result<RecordedReads> {
+    let files = reads
+        .files
+        .iter()
+        .map(|e| {
+            let content_hash = hash_file_entry(e, workspace_root)?;
+            Ok::<_, std::io::Error>(RecordedFile {
+                path: e.path.clone(),
+                lines: e.lines.clone(),
+                content_hash,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let dirs = reads
+        .dirs
+        .iter()
+        .map(|e| {
+            let listing_hash = hash_dir_entry(e, workspace_root)?;
+            Ok::<_, std::io::Error>(RecordedDir {
+                path: e.path.clone(),
+                filter: e.filter.clone(),
+                listing_hash,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(RecordedReads { files, dirs })
+}
+
+/// Recompute hashes for every entry in `recorded` against the workspace,
+/// returning `Match` only if every entry's current hash matches what was
+/// recorded. The first mismatch is reported; remaining entries aren't
+/// checked since any single change invalidates the whole cached output.
+pub fn verify_reads(
+    recorded: &RecordedReads,
+    workspace_root: &std::path::Path,
+) -> std::io::Result<VerifyOutcome> {
+    for f in &recorded.files {
+        let entry = ReadFileEntry {
+            path: f.path.clone(),
+            lines: f.lines.clone(),
+        };
+        match hash_file_entry(&entry, workspace_root) {
+            Ok(current) if current == f.content_hash => {}
+            Ok(_) => {
+                return Ok(VerifyOutcome::Mismatch {
+                    reason: format!("file content changed: {}", f.path.as_path().display()),
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(VerifyOutcome::Mismatch {
+                    reason: format!("file missing: {}", f.path.as_path().display()),
+                });
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    for d in &recorded.dirs {
+        let entry = ReadDirEntry {
+            path: d.path.clone(),
+            filter: d.filter.clone(),
+        };
+        match hash_dir_entry(&entry, workspace_root) {
+            Ok(current) if current == d.listing_hash => {}
+            Ok(_) => {
+                return Ok(VerifyOutcome::Mismatch {
+                    reason: format!("directory listing changed: {}", d.path.as_path().display()),
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(VerifyOutcome::Mismatch {
+                    reason: format!("directory missing: {}", d.path.as_path().display()),
+                });
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(VerifyOutcome::Match)
+}
+
+fn hash_file_entry(
+    entry: &ReadFileEntry,
+    workspace_root: &std::path::Path,
+) -> std::io::Result<ContentHash> {
+    let full_path = workspace_root.join(entry.path.as_path());
+    if entry.lines.is_empty() {
+        return ContentHash::of_file(&full_path);
+    }
+    // Excerpt mode: read file, hash lines whose prefix matches any pattern.
+    // Matched lines preserve their file order, separated by NUL so e.g.
+    // "foo\nbar" and "foobar" hash differently.
+    let raw = std::fs::read_to_string(&full_path)?;
+    let mut h = ContentHash::hasher();
+    for line in raw.lines() {
+        if entry.lines.iter().any(|p| line.starts_with(p.as_str())) {
+            h.update(line.as_bytes());
+            h.update(b"\0");
+        }
+    }
+    Ok(h.finalize())
+}
+
+fn hash_dir_entry(
+    entry: &ReadDirEntry,
+    workspace_root: &std::path::Path,
+) -> std::io::Result<ContentHash> {
+    let full_path = workspace_root.join(entry.path.as_path());
+
+    // Compile filter patterns once. An invalid filter glob in a stored
+    // sidecar is treated as an IO error so the caller can surface a
+    // diagnostic; in practice the same glob was validated when the
+    // discovery output was first parsed.
+    let filters: Result<Vec<glob::Pattern>, _> =
+        entry.filter.iter().map(|s| glob::Pattern::new(s)).collect();
+    let filters = filters
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+
+    let mut names: Vec<String> = Vec::new();
+    for child in std::fs::read_dir(&full_path)? {
+        let child = child?;
+        let name = child.file_name().to_string_lossy().into_owned();
+        let keep = filters.is_empty() || filters.iter().any(|p| p.matches(&name));
+        if keep {
+            names.push(name);
+        }
+    }
+    names.sort();
+
+    let mut h = ContentHash::hasher();
+    for n in &names {
+        h.update(n.as_bytes());
+        h.update(b"\0");
+    }
+    Ok(h.finalize())
+}
+
 /// Parse a discovery output file from disk.
 pub fn parse_fragment(path: &std::path::Path) -> Result<DiscoveryFragment, DiscoveryError> {
     let raw = std::fs::read_to_string(path)
@@ -402,6 +585,215 @@ mod tests {
         a.scope = vec![WsRelPath::new("pkg").unwrap()];
         assert_ne!(discovery_cache_key(&a), discovery_cache_key(&b));
     }
+
+    // ------------ verifier ------------
+
+    fn make_file(root: &std::path::Path, rel: &str, content: &str) {
+        let p = root.join(rel);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(p, content).unwrap();
+    }
+
+    fn whole_file_entry(rel: &str) -> ReadFileEntry {
+        ReadFileEntry {
+            path: WsRelPath::new(rel).unwrap(),
+            lines: vec![],
+        }
+    }
+
+    fn excerpt_entry(rel: &str, lines: &[&str]) -> ReadFileEntry {
+        ReadFileEntry {
+            path: WsRelPath::new(rel).unwrap(),
+            lines: lines.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn dir_entry(rel: &str, filter: &[&str]) -> ReadDirEntry {
+        ReadDirEntry {
+            path: WsRelPath::new(rel).unwrap(),
+            filter: filter.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn whole_file_verifier_match_then_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        make_file(dir.path(), "go.mod", "module x\n");
+        let reads = DiscoveryReads {
+            files: vec![whole_file_entry("go.mod")],
+            dirs: vec![],
+        };
+        let recorded = materialize_reads(&reads, dir.path()).unwrap();
+        assert!(matches!(
+            verify_reads(&recorded, dir.path()).unwrap(),
+            VerifyOutcome::Match
+        ));
+
+        make_file(dir.path(), "go.mod", "module y\n");
+        match verify_reads(&recorded, dir.path()).unwrap() {
+            VerifyOutcome::Mismatch { reason } => assert!(reason.contains("go.mod")),
+            VerifyOutcome::Match => panic!("expected mismatch"),
+        }
+    }
+
+    #[test]
+    fn whole_file_verifier_reports_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        make_file(dir.path(), "x.txt", "hi");
+        let reads = DiscoveryReads {
+            files: vec![whole_file_entry("x.txt")],
+            dirs: vec![],
+        };
+        let recorded = materialize_reads(&reads, dir.path()).unwrap();
+        std::fs::remove_file(dir.path().join("x.txt")).unwrap();
+        match verify_reads(&recorded, dir.path()).unwrap() {
+            VerifyOutcome::Mismatch { reason } => assert!(reason.contains("missing")),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn excerpt_verifier_ignores_non_matching_line_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        make_file(
+            dir.path(),
+            "pkg/foo.go",
+            "package foo\nimport \"fmt\"\nfunc Hello() {}\n",
+        );
+        let reads = DiscoveryReads {
+            files: vec![excerpt_entry("pkg/foo.go", &["package ", "import "])],
+            dirs: vec![],
+        };
+        let recorded = materialize_reads(&reads, dir.path()).unwrap();
+
+        // Function-body edit: package + import lines unchanged → still Match.
+        make_file(
+            dir.path(),
+            "pkg/foo.go",
+            "package foo\nimport \"fmt\"\nfunc Hello() { fmt.Println(\"hi\") }\n",
+        );
+        assert!(matches!(
+            verify_reads(&recorded, dir.path()).unwrap(),
+            VerifyOutcome::Match
+        ));
+
+        // Adding an import: matching line set changes → Mismatch.
+        make_file(
+            dir.path(),
+            "pkg/foo.go",
+            "package foo\nimport \"fmt\"\nimport \"log\"\nfunc Hello() {}\n",
+        );
+        assert!(matches!(
+            verify_reads(&recorded, dir.path()).unwrap(),
+            VerifyOutcome::Mismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn dir_verifier_whole_listing_invalidates_on_any_add() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("pkg")).unwrap();
+        make_file(dir.path(), "pkg/a.go", "");
+        let reads = DiscoveryReads {
+            files: vec![],
+            dirs: vec![dir_entry("pkg", &[])],
+        };
+        let recorded = materialize_reads(&reads, dir.path()).unwrap();
+
+        // Adding any file changes the listing.
+        make_file(dir.path(), "pkg/README.md", "");
+        assert!(matches!(
+            verify_reads(&recorded, dir.path()).unwrap(),
+            VerifyOutcome::Mismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn dir_verifier_filter_ignores_non_matching_additions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("pkg")).unwrap();
+        make_file(dir.path(), "pkg/a.go", "");
+        make_file(dir.path(), "pkg/b.go", "");
+        let reads = DiscoveryReads {
+            files: vec![],
+            dirs: vec![dir_entry("pkg", &["*.go"])],
+        };
+        let recorded = materialize_reads(&reads, dir.path()).unwrap();
+
+        // Adding a README doesn't match the `*.go` filter → still Match.
+        make_file(dir.path(), "pkg/README.md", "");
+        assert!(matches!(
+            verify_reads(&recorded, dir.path()).unwrap(),
+            VerifyOutcome::Match
+        ));
+
+        // Adding a new .go file does match the filter → Mismatch.
+        make_file(dir.path(), "pkg/c.go", "");
+        assert!(matches!(
+            verify_reads(&recorded, dir.path()).unwrap(),
+            VerifyOutcome::Mismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn dir_verifier_invalidates_on_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("pkg")).unwrap();
+        make_file(dir.path(), "pkg/a.go", "");
+        make_file(dir.path(), "pkg/b.go", "");
+        let reads = DiscoveryReads {
+            files: vec![],
+            dirs: vec![dir_entry("pkg", &[])],
+        };
+        let recorded = materialize_reads(&reads, dir.path()).unwrap();
+
+        std::fs::remove_file(dir.path().join("pkg/a.go")).unwrap();
+        assert!(matches!(
+            verify_reads(&recorded, dir.path()).unwrap(),
+            VerifyOutcome::Mismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn dir_verifier_invalidates_on_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("pkg")).unwrap();
+        make_file(dir.path(), "pkg/a.go", "");
+        let reads = DiscoveryReads {
+            files: vec![],
+            dirs: vec![dir_entry("pkg", &[])],
+        };
+        let recorded = materialize_reads(&reads, dir.path()).unwrap();
+
+        std::fs::remove_dir_all(dir.path().join("pkg")).unwrap();
+        match verify_reads(&recorded, dir.path()).unwrap() {
+            VerifyOutcome::Mismatch { reason } => {
+                assert!(reason.contains("missing") || reason.contains("pkg"))
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn dir_listing_hash_order_independent() {
+        // The listing hash sorts names before hashing - two filesystems
+        // that return entries in different orders should still match.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("d")).unwrap();
+        make_file(dir.path(), "d/a", "");
+        make_file(dir.path(), "d/b", "");
+        let reads = DiscoveryReads {
+            files: vec![],
+            dirs: vec![dir_entry("d", &[])],
+        };
+        let r1 = materialize_reads(&reads, dir.path()).unwrap();
+        let r2 = materialize_reads(&reads, dir.path()).unwrap();
+        assert_eq!(r1.dirs[0].listing_hash, r2.dirs[0].listing_hash);
+    }
+
+    // ------------ original parse tests below ------------
 
     #[test]
     fn parse_fragment_without_reads_field() {
