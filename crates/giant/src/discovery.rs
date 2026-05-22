@@ -6,9 +6,66 @@
 //! manifest used for cache invalidation.
 
 use crate::graph::{BuildGraph, GraphError};
-use crate::model::TargetSpec;
+use crate::model::{CacheKey, ContentHash, TargetSpec};
 use crate::paths::WsRelPath;
 use serde::{Deserialize, Serialize};
+
+const DISCOVERY_KEY_SCHEMA: &str = "disc-v1";
+const GIANT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const TARGET_TRIPLE: &str = env!("GIANT_TARGET_TRIPLE");
+
+/// Compute the cache key for a discovery target per ADR-0013:
+/// `cmd + env + cwd + scope` (no file inputs, no dep keys). The returned
+/// key is the lookup key for the discovery sidecar; whether the cached
+/// output is *valid* still depends on verifying the `reads` manifest
+/// against the live filesystem.
+///
+/// Stable across runs given the same command/env/cwd/scope and the same
+/// giant binary; sensitive to engine version bumps (the schema marker
+/// and `GIANT_VERSION` are mixed in).
+pub fn discovery_cache_key(spec: &TargetSpec) -> CacheKey {
+    let mut h = ContentHash::hasher();
+    h.update(DISCOVERY_KEY_SCHEMA.as_bytes());
+    h.update(b"\0");
+
+    h.update(b"cmd\0");
+    h.update(spec.command.as_bytes());
+    h.update(b"\0");
+
+    h.update(b"cwd\0");
+    h.update(spec.cwd.as_path().to_string_lossy().as_bytes());
+    h.update(b"\0");
+
+    h.update(b"env\0");
+    let mut env_keys: Vec<&String> = spec.env.keys().collect();
+    env_keys.sort();
+    for k in env_keys {
+        h.update(k.as_bytes());
+        h.update(b"=");
+        h.update(spec.env[k].as_bytes());
+        h.update(b"\0");
+    }
+    h.update(b"GIANT_TARGET_TRIPLE=");
+    h.update(TARGET_TRIPLE.as_bytes());
+    h.update(b"\0");
+    h.update(b"GIANT_VERSION=");
+    h.update(GIANT_VERSION.as_bytes());
+    h.update(b"\0");
+
+    h.update(b"scope\0");
+    let mut scope_strs: Vec<String> = spec
+        .scope
+        .iter()
+        .map(|s| s.as_path().to_string_lossy().into_owned())
+        .collect();
+    scope_strs.sort();
+    for s in &scope_strs {
+        h.update(s.as_bytes());
+        h.update(b"\0");
+    }
+
+    CacheKey::new(h.finalize())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryError {
@@ -243,6 +300,107 @@ mod tests {
         let new_includes = merge_into(&mut graph, frag).unwrap();
         assert!(graph.get(&crate::model::TargetId::new("x")).is_some());
         assert!(new_includes.is_empty());
+    }
+
+    use crate::model::TargetId;
+
+    fn include_spec(id: &str, command: &str) -> TargetSpec {
+        TargetSpec {
+            id: TargetId::new(id),
+            inputs: vec![],
+            outputs: vec![],
+            deps: vec![],
+            command: command.into(),
+            cwd: Default::default(),
+            env: Default::default(),
+            cache: None,
+            remote_cache: true,
+            exists: None,
+            timeout_secs: None,
+            test: false,
+            tags: Default::default(),
+            label: None,
+            scope: vec![],
+            inferred_deps: Default::default(),
+        }
+    }
+
+    #[test]
+    fn discovery_key_is_deterministic() {
+        let a = include_spec("d", "tools/d.sh > out.json");
+        let b = include_spec("d", "tools/d.sh > out.json");
+        assert_eq!(discovery_cache_key(&a), discovery_cache_key(&b));
+    }
+
+    #[test]
+    fn discovery_key_changes_with_command() {
+        let a = include_spec("d", "tools/d.sh > out.json");
+        let b = include_spec("d", "tools/d2.sh > out.json");
+        assert_ne!(discovery_cache_key(&a), discovery_cache_key(&b));
+    }
+
+    #[test]
+    fn discovery_key_changes_with_cwd() {
+        let mut a = include_spec("d", "tools/d.sh");
+        let mut b = include_spec("d", "tools/d.sh");
+        a.cwd = WsRelPath::new("pkg").unwrap();
+        b.cwd = WsRelPath::new("cmd").unwrap();
+        assert_ne!(discovery_cache_key(&a), discovery_cache_key(&b));
+    }
+
+    #[test]
+    fn discovery_key_changes_with_env_value() {
+        let mut a = include_spec("d", "tools/d.sh");
+        let mut b = include_spec("d", "tools/d.sh");
+        a.env.insert("LANG".into(), "en_US.UTF-8".into());
+        b.env.insert("LANG".into(), "C".into());
+        assert_ne!(discovery_cache_key(&a), discovery_cache_key(&b));
+    }
+
+    #[test]
+    fn discovery_key_stable_under_env_declaration_order() {
+        // env is a HashMap so declaration order is already lost, but make
+        // it explicit: same env entries inserted differently produce the
+        // same key thanks to the sort in `discovery_cache_key`.
+        let mut a = include_spec("d", "tools/d.sh");
+        let mut b = include_spec("d", "tools/d.sh");
+        a.env.insert("A".into(), "1".into());
+        a.env.insert("B".into(), "2".into());
+        b.env.insert("B".into(), "2".into());
+        b.env.insert("A".into(), "1".into());
+        assert_eq!(discovery_cache_key(&a), discovery_cache_key(&b));
+    }
+
+    #[test]
+    fn discovery_key_changes_with_scope() {
+        let mut a = include_spec("d", "tools/d.sh");
+        let mut b = include_spec("d", "tools/d.sh");
+        a.scope = vec![WsRelPath::new("pkg").unwrap()];
+        b.scope = vec![WsRelPath::new("cmd").unwrap()];
+        assert_ne!(discovery_cache_key(&a), discovery_cache_key(&b));
+    }
+
+    #[test]
+    fn discovery_key_stable_under_scope_order() {
+        let mut a = include_spec("d", "tools/d.sh");
+        let mut b = include_spec("d", "tools/d.sh");
+        a.scope = vec![
+            WsRelPath::new("pkg").unwrap(),
+            WsRelPath::new("cmd").unwrap(),
+        ];
+        b.scope = vec![
+            WsRelPath::new("cmd").unwrap(),
+            WsRelPath::new("pkg").unwrap(),
+        ];
+        assert_eq!(discovery_cache_key(&a), discovery_cache_key(&b));
+    }
+
+    #[test]
+    fn discovery_key_empty_scope_vs_set_scope_differ() {
+        let mut a = include_spec("d", "tools/d.sh");
+        let b = include_spec("d", "tools/d.sh");
+        a.scope = vec![WsRelPath::new("pkg").unwrap()];
+        assert_ne!(discovery_cache_key(&a), discovery_cache_key(&b));
     }
 
     #[test]
