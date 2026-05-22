@@ -597,6 +597,117 @@ include:
 }
 
 #[test]
+fn cooperative_discovery_cache_hits_on_warm_run() {
+    // Cold run: discovery runs, sidecar is written, output file on disk.
+    // Warm run with no filesystem changes: discovery does NOT execute its
+    // command - proven by inserting a marker the script would overwrite
+    // each run, and verifying the marker is the cold-run value.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir(ws.join("tools")).unwrap();
+    std::fs::write(ws.join("go.mod"), "module example\n").unwrap();
+    std::fs::write(
+        ws.join("tools/discover.sh"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p .giant/d
+date +%s%N > .giant/last-run.txt
+cat > .giant/d/d.json <<'JSON'
+{
+  "targets": [],
+  "reads": {
+    "files": [
+      { "path": "go.mod" }
+    ]
+  }
+}
+JSON
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::fs::metadata(ws.join("tools/discover.sh"))
+            .unwrap()
+            .permissions();
+        let mut p = p;
+        p.set_mode(0o755);
+        std::fs::set_permissions(ws.join("tools/discover.sh"), p).unwrap();
+    }
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: warm
+cache:
+  dir: ./cache
+include:
+  - id: "discover:warm"
+    outputs: [".giant/d/d.json"]
+    command: "./tools/discover.sh"
+"#,
+    )
+    .unwrap();
+
+    let out1 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(
+        out1.status.success(),
+        "cold build failed: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    let marker1 = std::fs::read_to_string(ws.join(".giant/last-run.txt")).unwrap();
+    assert!(!marker1.is_empty(), "cold run should have written marker");
+
+    // Sanity: cold run should have written exactly one sidecar.
+    let sidecar_dir = ws.join(".giant/discovery");
+    let sidecars: Vec<_> = std::fs::read_dir(&sidecar_dir)
+        .unwrap_or_else(|e| panic!("no sidecar dir after cold: {e}"))
+        .filter_map(|r| r.ok())
+        .collect();
+    assert_eq!(sidecars.len(), 1, "expected one sidecar after cold");
+
+    // Warm run: filesystem unchanged. The sidecar should verify and
+    // the discovery command should not execute → the marker file is
+    // not rewritten.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let out2 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out2.status.success());
+    let marker2 = std::fs::read_to_string(ws.join(".giant/last-run.txt")).unwrap();
+    assert_eq!(
+        marker1,
+        marker2,
+        "warm run should not have re-executed the discovery (sidecar hit). cold stderr:\n{}\nwarm stderr:\n{}",
+        String::from_utf8_lossy(&out1.stderr),
+        String::from_utf8_lossy(&out2.stderr),
+    );
+
+    // Now change go.mod - the sidecar's recorded hash for go.mod no
+    // longer matches, so discovery must re-run.
+    std::fs::write(ws.join("go.mod"), "module example\n// changed\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let out3 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out3.status.success());
+    let marker3 = std::fs::read_to_string(ws.join(".giant/last-run.txt")).unwrap();
+    assert_ne!(
+        marker1, marker3,
+        "go.mod change should have invalidated the sidecar and re-run discovery"
+    );
+}
+
+#[test]
 fn non_cooperative_discovery_skips_sidecar_in_lenient_mode() {
     // A discovery without a `reads` manifest still works (lenient
     // default) but doesn't produce a sidecar.

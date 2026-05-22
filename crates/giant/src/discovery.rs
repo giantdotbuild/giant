@@ -372,6 +372,47 @@ pub fn write_sidecar(
     Ok(())
 }
 
+impl RecordedReads {
+    /// Project to the entry-spec form the discovery emitted (paths +
+    /// patterns, no hashes). Used when restoring a cached discovery
+    /// output to disk so downstream consumers see the same JSON the
+    /// discovery would have produced.
+    pub fn to_discovery_reads(&self) -> DiscoveryReads {
+        DiscoveryReads {
+            files: self
+                .files
+                .iter()
+                .map(|f| ReadFileEntry {
+                    path: f.path.clone(),
+                    lines: f.lines.clone(),
+                })
+                .collect(),
+            dirs: self
+                .dirs
+                .iter()
+                .map(|d| ReadDirEntry {
+                    path: d.path.clone(),
+                    filter: d.filter.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Re-create the `DiscoveryFragment` JSON that a discovery target's
+/// command would have produced. Used when a sidecar verifies and the
+/// engine restores the output without running the discovery, so
+/// downstream targets that read the output file see consistent
+/// contents.
+pub fn fragment_from_sidecar(sidecar: &DiscoverySidecar) -> DiscoveryFragment {
+    DiscoveryFragment {
+        schema_version: SUPPORTED_SCHEMA,
+        targets: sidecar.targets.clone(),
+        include: sidecar.include.clone(),
+        reads: Some(sidecar.reads.to_discovery_reads()),
+    }
+}
+
 /// Read a sidecar for the given key. Returns `Ok(None)` when the file
 /// is absent or has an incompatible schema (treated as a cache miss -
 /// the caller will re-run the discovery and rewrite). I/O errors and

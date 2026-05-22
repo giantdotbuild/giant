@@ -180,6 +180,22 @@ impl LocalCache {
         self.atomic_write(path, bytes).await
     }
 
+    /// Remove the AC entry for a key. Idempotent: a missing entry is
+    /// not an error. CAS blobs are left alone (they may be referenced
+    /// by other entries; eviction handles their lifecycle).
+    pub async fn delete_ac(&self, key: &CacheKey) -> Result<(), CacheError> {
+        let path = self.ac_path(key);
+        spawn_blocking(move || -> Result<(), CacheError> {
+            match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .await??;
+        Ok(())
+    }
+
     /// Read a CAS blob by content hash.
     pub async fn get_cas(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>, CacheError> {
         let path = self.cas_path(hash);

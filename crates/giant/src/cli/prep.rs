@@ -80,32 +80,99 @@ pub async fn prepare(
                 );
             }
 
-            let bootstrap_job = BuildJob {
-                graph: Arc::new(graph.clone()),
-                selection: current_wave.clone(),
-                cache: cache.clone(),
-                workspace_root: workspace_abs.clone(),
-                parallelism,
-                fresh,
-                events: events.clone(),
-                cancel: cancel.clone(),
-                build_id: format!("bootstrap_w{depth}_{}", short_random()),
-                log_capture: crate::executor::LogCapture::from_cache_config(&config.cache),
-                // Discovery doesn't currently use the remote cache -
-                // discoveries are per-workspace dynamic and aren't
-                // worth pushing to a shared server. Easy to revisit
-                // if a real use case appears.
-                #[cfg(feature = "remote")]
-                remote: None,
-                #[cfg(feature = "remote")]
-                upload_tx: None,
-            };
-            let bootstrap = build(bootstrap_job).await?;
-            if bootstrap.counts.failed > 0 {
-                anyhow::bail!(
-                    "discovery failed at wave {depth}: {} include target(s) failed",
-                    bootstrap.counts.failed
-                );
+            // Sidecar short-circuit: for each pending discovery, try
+            // the sidecar before dispatching.
+            //
+            // - Match: skip the command entirely and restore the cached
+            //   output from the sidecar's recorded fragment so
+            //   downstream targets see consistent contents on disk.
+            // - Mismatch / Missing: invalidate the regular AC entry
+            //   for this target (cmd + env + cwd + empty inputs is
+            //   stable across runs; without invalidation the regular
+            //   cache would falsely hit and skip the command), then
+            //   queue for dispatch.
+            //
+            // `--fresh` bypasses the sidecar entirely.
+            let mut to_dispatch: Vec<TargetId> = Vec::with_capacity(current_wave.len());
+            for id in &current_wave {
+                let spec = graph.get(id).expect("present in current wave").clone();
+                if fresh {
+                    to_dispatch.push(id.clone());
+                    continue;
+                }
+                let key = discovery::discovery_cache_key(&spec);
+                let hit = match discovery::read_sidecar(workspace_abs.as_path(), key) {
+                    Ok(Some(sidecar)) => {
+                        match discovery::verify_reads(&sidecar.reads, workspace_abs.as_path())? {
+                            discovery::VerifyOutcome::Match => Some(sidecar),
+                            discovery::VerifyOutcome::Mismatch { .. } => None,
+                        }
+                    }
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(target = %id, error = %e, "sidecar read failed; falling back to cold run");
+                        None
+                    }
+                };
+                if let Some(sidecar) = hit {
+                    let fragment = discovery::fragment_from_sidecar(&sidecar);
+                    let bytes = serde_json::to_vec_pretty(&fragment)?;
+                    for out in &spec.outputs {
+                        let abs = workspace_abs.as_path().join(out.as_path());
+                        if let Some(parent) = abs.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&abs, &bytes)?;
+                    }
+                    tracing::debug!(target = %id, "discovery restored from sidecar");
+                } else {
+                    // Invalidate the regular AC entry so the bootstrap
+                    // actually re-runs the command instead of hitting
+                    // a stale cache entry. The regular key for a
+                    // discovery is computed by the executor via
+                    // compute_cache_key_with_breakdown; we mirror the
+                    // computation here. Empty file_inputs makes this
+                    // cheap (no globbing or hashing).
+                    let (regular_key, _bd) = crate::executor::compute_cache_key_with_breakdown(
+                        &spec,
+                        &workspace_abs,
+                        &cache,
+                        std::collections::BTreeMap::new(),
+                    )
+                    .await?;
+                    cache.delete_ac(&regular_key).await?;
+                    to_dispatch.push(id.clone());
+                }
+            }
+
+            if !to_dispatch.is_empty() {
+                let bootstrap_job = BuildJob {
+                    graph: Arc::new(graph.clone()),
+                    selection: to_dispatch,
+                    cache: cache.clone(),
+                    workspace_root: workspace_abs.clone(),
+                    parallelism,
+                    fresh,
+                    events: events.clone(),
+                    cancel: cancel.clone(),
+                    build_id: format!("bootstrap_w{depth}_{}", short_random()),
+                    log_capture: crate::executor::LogCapture::from_cache_config(&config.cache),
+                    // Discovery doesn't currently use the remote cache -
+                    // discoveries are per-workspace dynamic and aren't
+                    // worth pushing to a shared server. Easy to revisit
+                    // if a real use case appears.
+                    #[cfg(feature = "remote")]
+                    remote: None,
+                    #[cfg(feature = "remote")]
+                    upload_tx: None,
+                };
+                let bootstrap = build(bootstrap_job).await?;
+                if bootstrap.counts.failed > 0 {
+                    anyhow::bail!(
+                        "discovery failed at wave {depth}: {} include target(s) failed",
+                        bootstrap.counts.failed
+                    );
+                }
             }
 
             // Collect (id, spec, output_path) triples; cloning the spec
