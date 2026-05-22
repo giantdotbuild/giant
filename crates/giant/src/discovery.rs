@@ -1,10 +1,13 @@
 //! Discovery: build `include:` targets first, merge their JSON outputs
 //! into the main graph.
 //!
-//! See TDD-0003 for the bootstrap-pass scheduling and merge rules.
+//! See TDD-0003 for the bootstrap-pass scheduling and merge rules,
+//! TDD-0015 for the discovery output protocol including the `reads`
+//! manifest used for cache invalidation.
 
 use crate::graph::{BuildGraph, GraphError};
 use crate::model::TargetSpec;
+use crate::paths::WsRelPath;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -38,16 +41,83 @@ pub struct DiscoveryFragment {
 
     /// Further `include:` targets to run after this fragment is merged.
     /// Each is built, its output parsed, its targets merged, and any
-    /// `include:` it emits goes into the next wave - recursively, up
-    /// to a depth limit. See TDD-0003 §Wave-based bootstrap.
+    /// `include:` it emits gets enqueued for the next round (TDD-0003).
     #[serde(default)]
     pub include: Vec<TargetSpec>,
 
-    /// Optional fingerprint-input list (TDD-0001 / TDD-0003): files the
-    /// discovery script actually read. Reserved for future use in tighter
-    /// cache invalidation than declared inputs alone.
-    #[serde(default)]
-    pub fingerprint_inputs: Vec<String>,
+    /// Files and directories the discovery actually consulted. The
+    /// engine uses this to verify whether the cached output is still
+    /// valid on the next run (TDD-0015 §Verifier algorithm). Absent
+    /// means the discovery did not cooperate - under lenient mode the
+    /// output is used once but not cached; under strict it's an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reads: Option<DiscoveryReads>,
+}
+
+/// The recorded-reads manifest. Two entry kinds: file entries (whole-file
+/// or excerpt) and directory entries (whole listing or filtered listing).
+/// See TDD-0015 for entry-kind semantics and verifier rules.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryReads {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<ReadFileEntry>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dirs: Vec<ReadDirEntry>,
+}
+
+/// A file entry in the `reads` manifest. When `lines` is empty, the
+/// verifier hashes the whole file. When non-empty, only lines whose
+/// prefix matches any pattern are hashed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadFileEntry {
+    pub path: WsRelPath,
+
+    /// Substring-prefix patterns. Single-string form (`"^pkg"`) and
+    /// list form (`["^pkg", "^import "]`) both parse to the same Vec.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_string_or_list"
+    )]
+    pub lines: Vec<String>,
+}
+
+/// A directory entry in the `reads` manifest. When `filter` is empty,
+/// the verifier hashes the directory's full listing. When non-empty,
+/// only entries matching any glob filter are hashed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadDirEntry {
+    pub path: WsRelPath,
+
+    /// Glob patterns matched against entry names (not paths). Same
+    /// single-or-list deserialization as `ReadFileEntry::lines`.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_string_or_list"
+    )]
+    pub filter: Vec<String>,
+}
+
+/// Accept either `"x"` or `["x", "y"]` on the wire, normalize to Vec.
+fn deserialize_string_or_list<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
 }
 
 fn default_schema_version() -> u32 {
@@ -173,6 +243,107 @@ mod tests {
         let new_includes = merge_into(&mut graph, frag).unwrap();
         assert!(graph.get(&crate::model::TargetId::new("x")).is_some());
         assert!(new_includes.is_empty());
+    }
+
+    #[test]
+    fn parse_fragment_without_reads_field() {
+        // Backward compatibility: a fragment with no `reads` field
+        // parses fine. Whether the engine caches the output depends on
+        // strict/lenient mode (separate slice).
+        let f = write_json(r#"{ "targets": [] }"#);
+        let frag = parse_fragment(f.path()).unwrap();
+        assert!(frag.reads.is_none());
+    }
+
+    #[test]
+    fn parse_reads_whole_file_entry() {
+        let f = write_json(
+            r#"{
+              "targets": [],
+              "reads": {
+                "files": [
+                  { "path": "go.mod" },
+                  { "path": "tools/discover.sh" }
+                ]
+              }
+            }"#,
+        );
+        let frag = parse_fragment(f.path()).unwrap();
+        let reads = frag.reads.unwrap();
+        assert_eq!(reads.files.len(), 2);
+        assert!(reads.files[0].lines.is_empty());
+        assert_eq!(
+            reads.files[0].path.as_path(),
+            std::path::Path::new("go.mod")
+        );
+    }
+
+    #[test]
+    fn parse_reads_excerpt_entry_single_pattern() {
+        let f = write_json(
+            r#"{
+              "reads": {
+                "files": [
+                  { "path": "pkg/foo.go", "lines": "^package " }
+                ]
+              }
+            }"#,
+        );
+        let frag = parse_fragment(f.path()).unwrap();
+        let entry = &frag.reads.unwrap().files[0];
+        assert_eq!(entry.lines, vec!["^package ".to_string()]);
+    }
+
+    #[test]
+    fn parse_reads_excerpt_entry_pattern_list() {
+        let f = write_json(
+            r#"{
+              "reads": {
+                "files": [
+                  { "path": "pkg/foo.go",
+                    "lines": ["^package ", "^import "] }
+                ]
+              }
+            }"#,
+        );
+        let frag = parse_fragment(f.path()).unwrap();
+        let entry = &frag.reads.unwrap().files[0];
+        assert_eq!(entry.lines.len(), 2);
+        assert_eq!(entry.lines[1], "^import ");
+    }
+
+    #[test]
+    fn parse_reads_dir_entry_with_filter() {
+        let f = write_json(
+            r#"{
+              "reads": {
+                "dirs": [
+                  { "path": "pkg/" },
+                  { "path": "cmd/", "filter": "*.go" },
+                  { "path": "internal/", "filter": ["*.go", "*.proto"] }
+                ]
+              }
+            }"#,
+        );
+        let frag = parse_fragment(f.path()).unwrap();
+        let dirs = &frag.reads.unwrap().dirs;
+        assert_eq!(dirs.len(), 3);
+        assert!(dirs[0].filter.is_empty());
+        assert_eq!(dirs[1].filter, vec!["*.go".to_string()]);
+        assert_eq!(dirs[2].filter.len(), 2);
+    }
+
+    #[test]
+    fn parse_reads_rejects_unknown_entry_field() {
+        // `deny_unknown_fields` on entry types - a typo (`paht` for
+        // `path`) is a parse error, not a silent skip.
+        let f = write_json(
+            r#"{
+              "reads": { "files": [ { "paht": "go.mod" } ] }
+            }"#,
+        );
+        let err = parse_fragment(f.path()).unwrap_err();
+        assert!(matches!(err, DiscoveryError::Json(_, _)));
     }
 
     #[test]
