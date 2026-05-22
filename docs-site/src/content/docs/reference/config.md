@@ -27,11 +27,14 @@ remote:                       # feature-gated; only with --features remote
   tls:
     skip_verify: false
 
+discovery:
+  strict: false               # true = no `reads` manifest is an error
+
 include:                      # discovery targets, run during bootstrap
   - id: "discover:go"
-    inputs: [...]
-    outputs: [...]
-    command: "..."
+    command: "tools/discover-go.sh > .giant/d/go.json"
+    outputs: [".giant/d/go.json"]
+    scope: ["src/"]           # optional; bounds reads + narrows fsmonitor
 
 targets:
   - id: "<unique>"
@@ -89,12 +92,17 @@ for storage details.
 | `auth.password_env` | (basic) env var name for the password. |
 | `tls.skip_verify` | If true, skip TLS cert verification. Don't use in production. |
 
-## `include` and `targets`
+## `discovery`
 
-Both lists hold target definitions with identical schema. The
-difference: `include:` targets run during the bootstrap pass (before
-the main build), and their outputs are JSON files Giant merges into
-the graph. See [Discovery](/concepts/discovery/).
+Workspace-level settings for discovery (`include:` entries).
+
+| Field | Default | Description |
+|---|---|---|
+| `strict` | `false` | When `true`, a discovery whose output omits a `reads` manifest is a hard error instead of a warning. Useful in CI to enforce the cooperative protocol. |
+
+## `targets`
+
+Regular build targets. Schema below.
 
 ### Target fields
 
@@ -135,6 +143,64 @@ inputs:
 
 See [Structural inputs](/concepts/structural-inputs/) for the full
 story. The `files:` can be a string or list.
+
+## `include`
+
+Discovery entries: subprocesses that emit JSON to be merged into the
+graph. See [Discovery](/concepts/discovery/) for the workflow. The
+field set differs from `targets:` in a few ways:
+
+| Field | Required | Type | Description |
+|---|---|---|---|
+| `id` | yes | string | Unique target ID. |
+| `command` | yes | string | The discovery command. |
+| `outputs` | yes | list | The JSON file(s) the command writes. |
+| `deps` | no | list of strings | Explicit dependencies (e.g. on a compiled discovery tool). |
+| `cwd` | no | string | Working dir, workspace-relative. |
+| `env` | no | map | Env vars. Hashed into the discovery cache key. |
+| `scope` | no | list of strings | Directory prefixes the discovery may read from. Used as the sandbox fence (if sandboxing is on) and the fsmonitor narrowing hint. Contributes to the cache key. |
+| `exists` | no | string | Same as on regular targets. |
+| `timeout` | no | int | Same as on regular targets. |
+
+`inputs:` is **not accepted** on `include:` entries. The loader rejects
+it with a migration message pointing at the cooperative protocol.
+Discovery invalidation comes from the `reads` manifest the script
+emits in its output, not from declared globs.
+
+### Discovery output shape
+
+The JSON each discovery's `command` writes:
+
+```jsonc
+{
+  "schema_version": 1,
+  "targets": [ /* TargetSpec entries, same schema as `targets:` above */ ],
+  "include": [ /* nested discovery entries, processed recursively */ ],
+  "reads": {
+    "files": [
+      { "path": "go.mod" },
+      { "path": "main.go", "lines": ["package ", "import "] }
+    ],
+    "dirs": [
+      { "path": "pkg/", "filter": "*.go" }
+    ]
+  }
+}
+```
+
+`reads.files` entries take two forms:
+
+- **Whole-file**: `{ "path": "go.mod" }` - the verifier hashes the
+  entire file's contents. Any change invalidates.
+- **Excerpt**: `{ "path": "...", "lines": ["^pkg ", "^import "] }`
+  - the verifier hashes only the lines whose prefix matches any
+  pattern. Function-body edits that don't touch those lines leave
+  the recorded hash unchanged.
+
+`reads.dirs` entries hash a directory's listing (no recursion). With
+`filter:` set, only entry names matching any of the glob patterns
+contribute. Single-string and array forms both work for `lines:` and
+`filter:`.
 
 ## Schema version
 
