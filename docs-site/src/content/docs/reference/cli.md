@@ -108,12 +108,36 @@ Show what feeds a target's cache key. The first thing to reach for
 when "why did this rebuild?" comes up.
 
 ```
-giant explain <TARGET>
+giant explain <TARGET> [--diff <OTHER_TARGET>]
 ```
 
 Output covers: the cache key itself, the command, cwd, env vars, file
 inputs (with their content hashes), structural inputs (with their
 fingerprints), and dep output hashes.
+
+`--diff <other-target>` swaps the breakdown for a side-by-side
+comparison: only the fields that differ between the two targets are
+printed. Useful for "why does `bin:server` have a different key than
+`bin:server-debug`?" and similar.
+
+## `giant logs`
+
+Replay a target's captured stdout/stderr from the cache.
+
+```
+giant logs <TARGET> [--key <hex>] [--stdout-only | --stderr-only | --merged]
+```
+
+| Flag | Description |
+|---|---|
+| `--key <hex>` | Look up by an explicit cache key. Defaults to the current key (what a fresh build would compute). |
+| `--stdout-only` | Print stdout only. |
+| `--stderr-only` | Print stderr only. |
+| `--merged` | Interleave stdout and stderr (default behavior). |
+
+Errors out if the action-cache entry has no captured logs (a target
+that ran with log capture disabled, or a cold target that's never
+been built).
 
 ## `giant clean`
 
@@ -121,13 +145,22 @@ Clear the local cache. By default interactive: shows a summary, asks
 for confirmation, then wipes the cache directory.
 
 ```
-giant clean [-y] [--dry-run]
+giant clean [-y] [--dry-run] [--older-than <duration>] [PATTERNS...]
 ```
 
 | Flag | Description |
 |---|---|
 | `-y, --yes` | Skip the confirmation prompt. |
 | `--dry-run` | Print what would be deleted; touch nothing. |
+| `--older-than <duration>` | Only clean entries older than this (`30d`, `12h`, `15m`, `45s`). |
+| `[PATTERNS...]` | Target-id patterns. Same selection language as `giant build` - exact ids, globs (`go:*`, `**:test:*`), exclusions (`!go:test:*`). |
+
+With no patterns or `--older-than`, the entire cache is cleared (the
+historical behavior). Combine both for surgical eviction:
+
+```bash
+giant clean 'go:*' --older-than 14d -y
+```
 
 For automatic LRU eviction (which happens after every build when
 configured), see the `cache.max_size_gb` setting in
@@ -148,8 +181,9 @@ giant session --events ndjson <commands.jsonl >events.jsonl
 |---|---|---|
 | `--events <fmt>` | `ndjson` | Only `ndjson` today; flag shape matches `giant build`. |
 
-Commands accepted on stdin: `build`, `watch.start`, `watch.stop`,
-`cancel`, `shutdown`. See [Event protocol - Command channel](/reference/events/#command-channel)
+Commands accepted on stdin: `build`, `cancel`, `watch.start`,
+`watch.stop`, `affected.subscribe`, `affected.unsubscribe`,
+`shutdown`. See [Event protocol - Command channel](/reference/events/#command-channel)
 for the full wire format and ack semantics.
 
 ## Porcelain dispatch

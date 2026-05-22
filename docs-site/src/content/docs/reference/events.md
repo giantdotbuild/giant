@@ -128,6 +128,26 @@ The `t` field discriminates. All other fields are type-specific.
   "added_tasks": [] }
 ```
 
+### Affected subscription
+
+Fired in response to `affected.subscribe`. The first event is the
+initial snapshot; the engine then keeps a file watcher pinned and
+re-emits whenever the affected set changes.
+
+```jsonc
+{ "t": "affected.changed",
+  "base": "main",
+  "target_ids": ["go:bin:server", "rust:lib:core"] }
+
+{ "t": "affected.error",
+  "base": "origin/missing",
+  "message": "git diff against origin/missing: unknown revision" }
+```
+
+The subscription is single-shot per session - a second
+`affected.subscribe` replaces the first, and `affected.unsubscribe`
+ends it.
+
 ### Backpressure
 
 If the consumer is slow, Giant drops log events first (build lifecycle
@@ -183,8 +203,15 @@ Command shapes (full list in `crates/giant/src/commands.rs`):
   "command_id": "c_4",
   "build": "b_4f9c" }
 
+{ "c": "affected.subscribe",
+  "command_id": "c_5",
+  "base": "main" }
+
+{ "c": "affected.unsubscribe",
+  "command_id": "c_6" }
+
 { "c": "shutdown",
-  "command_id": "c_5" }
+  "command_id": "c_7" }
 ```
 
 Each command is acknowledged with a `command.accepted` (carrying the

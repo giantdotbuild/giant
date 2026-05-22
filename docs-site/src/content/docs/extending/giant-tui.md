@@ -76,6 +76,8 @@ language](/concepts/selection/)).
 | `/` | Open the search input. `Esc` cancels, `Enter` accepts. |
 | `t` | Open the tag picker (multi-select include/exclude) |
 | `T` | Toggle "test targets only" |
+| `A` | Affected-mode filter - prompts for a git ref baseline; engine computes the set, keeps a file watcher pinned, and re-emits when the set changes. `A` again clears it. |
+| `R` | Force a refresh of the affected set (re-subscribes to the same base) |
 | `Tab` / `f` | Cycle the status filter (`all` → `failed` → `cached` → `built` → `all`) |
 | `c` | Clear all filters |
 | `j` / `k` / `↑` / `↓` | Move cursor |
@@ -86,10 +88,17 @@ language](/concepts/selection/)).
 
 ### During a build (or watch)
 
+The build view has two panes - the target list on top, the log pane
+on the bottom. `Tab` switches focus between them; the focused pane's
+border is highlighted.
+
 | Key | Action |
 |---|---|
-| `j` / `k` | Move cursor between targets (the right pane shows logs for the cursored target) |
-| `Tab` / `f` | Cycle status filter on the running list |
+| `Tab` | Switch focus (target list ↔ log pane) |
+| `j` / `k` / `g` / `G` / `PgUp` / `PgDn` | Scroll the focused pane |
+| `Ctrl-↑` / `Ctrl-↓` | Shrink / grow the log pane |
+| `/` | Substring-filter the log pane (case-insensitive). `Esc` clears, `Enter` commits. |
+| `f` | Cycle status filter on the running list |
 | `c` | Clear filters |
 | `Esc` | Cancel the in-flight build (or `watch.stop` when watching) |
 | `Ctrl-C` | Same as `Esc` while running; quits otherwise |
@@ -128,6 +137,23 @@ A status badge in the top-right shows the engine state:
 - `building` - a one-shot build is in progress
 - `WATCHING` - a watch session is active; file changes trigger
   rebuilds until you press `Esc` (or `Ctrl-C`)
+
+The browser also shows a row of filter chips for whatever's
+narrowing the catalog: the search query, included/excluded tags,
+`tests-only`, and (if affected mode is on) an
+`affected:<ref>` chip with the current count. The chip also surfaces
+the refresh state - `affected:main…` while the engine is computing,
+`affected:main (error: …)` if the git ref couldn't resolve.
+
+During a build, the header shows a live summary:
+
+```
+giant - building 7/949 · 34 built · 120 cached · 1 failed · 12s
+```
+
+These counts update as `target.finished` events arrive - you don't
+have to wait for the build to complete to see how things are
+trending.
 
 During a build, each target's stdout/stderr streams into a side
 pane keyed to your cursor. Selecting a target shows that target's

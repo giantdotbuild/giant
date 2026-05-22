@@ -142,5 +142,6 @@ $ giant build go:bin:server
 The verb tells you which layer answered.
 
 `giant explain` also shows whether a target is configured for remote
-cache, and `giant explain <target> --logs` (planned) will let you see
-the stdout/stderr of the last cached invocation.
+cache. The stdout/stderr of the cached invocation is replayed
+automatically on any cache hit (local or remote) - see
+[Log capture and replay](/reference/cache-layout/#log-capture-and-replay).

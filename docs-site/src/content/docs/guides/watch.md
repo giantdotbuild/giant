@@ -120,3 +120,16 @@ For a 10k-file workspace, the no-change side of a cycle is sub-50ms.
 
 Ctrl-C sends SIGINT. Giant cancels the in-flight build (if any), drains
 the event queue, prints a "cancelled" note, and exits 0.
+
+## Related: `giant task <name> --watch`
+
+`giant watch` rebuilds *targets*. To re-run a *task* (lint, fmt,
+deploy, an ad-hoc script) on file changes, use the task-runner's
+own `--watch`:
+
+```bash
+giant task test:unit --watch
+```
+
+Declare `inputs:` on the task to narrow what triggers a re-run. See
+[`giant-task`](/extending/giant-task/#watch-mode).

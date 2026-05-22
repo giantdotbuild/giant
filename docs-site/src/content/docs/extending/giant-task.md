@@ -97,7 +97,35 @@ tasks:
       KEY: "value"
     cwd: "..."                  # workspace-relative; default = root
     timeout_secs: 300           # kill after N seconds; default = no timeout
+    inputs: ["..."]             # optional; file globs that, with --watch,
+                                # narrow which file changes trigger a re-run
 ```
+
+## Watch mode
+
+`giant task <name> --watch` runs the task once, then re-runs it
+whenever workspace files change. Ctrl-C exits.
+
+```console
+$ giant task test:unit --watch
+· initial run
+…
+· watching tests/**/*.go - Ctrl-C to exit
+· 3 file(s) changed, re-running
+…
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--watch` | off | Re-run on file changes. |
+| `--quiet-ms <n>` | 100 | Coalesce events within this idle window. |
+| `--max-delay-ms <n>` | 500 | Force-flush a batch this long after the first event. |
+
+If the task declares `inputs:`, only changes matching one of those
+globs trigger a re-run. Without `inputs:`, every file change in the
+workspace (minus `.git/`, the state directory, and common build
+output dirs) re-runs the task - useful as a smoke loop but noisy in
+large workspaces, so declare `inputs:` where you can.
 
 Task names follow the same rules as workspace names (alphanumeric,
 hyphen, underscore; no leading digit). Names that would shadow a

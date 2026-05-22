@@ -33,6 +33,23 @@ reproducibility):
 `outputs:` are NOT in the cache key. The recipe determines what
 gets built; the recipe's hash determines if we've seen it before.
 
+### Discovery targets
+
+Discovery targets (`include:` entries) use a separate composition:
+
+1. **The command, cwd, env, scope** - as above.
+2. **Content inputs** - the union of (a) every argv token in the
+   command that resolves to a real file in the workspace (including
+   `$PATH` lookups whose target lives in-tree, e.g.
+   `bin/my-discover`), and (b) any files matched by a declared
+   `inputs:` glob. Deduped on workspace-relative path so a file
+   caught both ways contributes once.
+
+No file inputs from the regular schema, no dep cache keys - the
+recorded-reads manifest (see [Discovery](/concepts/discovery/)) is
+the warm-path verifier, and dep edges from declared `deps:` order
+execution without leaking into the discovery's own key.
+
 ## What's NOT in the hash
 
 - **The current time, current user, current host.** Two users on two
@@ -75,6 +92,30 @@ dep_outputs (2):
 `giant explain` is the first thing to reach for when "why did this
 rebuild?" comes up.
 
+### Comparing two breakdowns
+
+When you want to know *what's different* between two targets'
+keys - same recipe, different arch flag; same target before/after a
+refactor - pass `--diff <other-target>`:
+
+```console
+$ giant explain go:bin:server --diff go:bin:server-debug
+comparing:
+  -  go:bin:server         (3a7f9c4e…)
+  +  go:bin:server-debug   (8d2b1f4a…)
+
+── command ──
+  - go build -o bin/server ./cmd/server
+  + go build -gcflags='all=-N -l' -o bin/server-debug ./cmd/server
+
+── env (user) ──
+  - CGO_ENABLED=0
+  + CGO_ENABLED=1
+```
+
+Identical fields are suppressed. If the keys match, you get a
+"cache keys are identical" line and nothing else.
+
 ## Early cutoff
 
 A subtle but valuable property: an upstream rebuild doesn't always
@@ -115,11 +156,14 @@ Alternatively, derive it on the fly via a discovery target:
 ```yaml
 include:
   - id: "discover:toolchain-versions"
-    inputs:
-      - "go.mod"     # version is hinted here
-    outputs: [".giant/d/toolchains.json"]
     command: "tools/get-versions.sh > .giant/d/toolchains.json"
+    outputs: [".giant/d/toolchains.json"]
+    scope: ["."]
 ```
+
+The discovery's script reads `go.mod` (and whatever else) and emits
+that in its `reads.files` manifest, so changes to the pinned version
+re-run the discovery automatically.
 
 And reference the resulting target IDs as deps. When the version
 changes, the discovery target's outputs shift, the cache keys shift,

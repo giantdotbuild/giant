@@ -40,9 +40,10 @@ include:
 ```
 
 That's the entire static config. Discovery produces everything else.
-Note there's no `inputs:` on the `include:` entry - discoveries are
-invalidated by the `reads` manifest they emit (below), not by
-declared globs.
+The `include:` entry has no `inputs:` declared - the discovery script
+is hashed into the cache key automatically (the argv walk catches
+`tools/discover-go.sh`) and the `reads` manifest the script emits
+(below) handles warm-path verification.
 
 ## `tools/discover-go.sh`
 

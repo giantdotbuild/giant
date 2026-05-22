@@ -35,8 +35,9 @@ src/
 ├── watcher.rs           # notify-based file watcher
 ├── renderer.rs          # event-to-line renderer
 ├── events.rs            # NDJSON event types
-├── git.rs               # affected_files_since for --affected --base
-├── paths.rs             # AbsPath / WsRelPath / OutputPath newtypes
+├── git.rs               # gix-based status/index queries for --affected --base
+├── fsmonitor.rs         # git fsmonitor hook protocol v2 client (TDD-0016)
+├── paths.rs             # AbsPath / WsRelPath / OutputPath newtypes + mtime_ns helper
 └── types.rs             # GlobPattern newtype
 ```
 
@@ -98,15 +99,36 @@ exact bytes.
 
 ## Discovery bootstrap
 
-`cli::prep::prepare` runs every `include:` target through the normal
-build pipeline (it gets its own `BuildJob` with `build_id` like
-`bootstrap_<hash>`). After each succeeds, its output JSON is parsed
-and merged into the graph. Then output-based dep inference runs over
-the merged graph.
+`cli::prep::prepare` runs every `include:` target through a worklist:
+the initial pending set is the top-level `include:` entries; each
+round, every pending discovery is either short-circuited by its
+sidecar (`.giant/discovery/<key>.json`) or dispatched through the
+normal build pipeline. Any `include:` entries emitted by completing
+discoveries get appended to the worklist for the next round; the
+loop terminates when nothing is pending. Each round's `BuildJob`
+carries a `build_id` like `bootstrap_r<round>_<hash>`. A per-target
+chain-depth counter (cap currently 8 generations) catches runaway
+emitters with a precise error reporting the chain.
 
-In the renderer, events with a `bootstrap_*` build id are filtered out
-of human output - the user sees one summary per real build, not two.
-Failures still surface.
+After each successful dispatch, the discovery's output JSON is
+parsed, its `reads` manifest is materialized into recorded hashes,
+and a fresh sidecar is written. Sidecar hits skip the merge-from-disk
+path and re-use the cached `targets` / `include` straight from the
+sidecar's payload. Output-based dep inference runs over the fully
+merged graph once all discoveries settle.
+
+When a sidecar mismatches (or is missing), the bootstrap pushes the
+discovery onto the per-build `force_fresh` set instead of deleting a
+specific AC entry. The executor consults this set ahead of the AC
+lookup and short-circuits any cache hit for those targets. That
+sidesteps the cache-key alignment problem for discoveries that
+declare `deps:` - their regular cache key includes dep output hashes
+the bootstrap can't see (deps haven't run yet at that point), so a
+straight `delete_ac` would target the wrong key and leak a stale hit.
+
+In the renderer, events with a `bootstrap_*` build id are filtered
+out of human output - the user sees one summary per real build, not
+two. Failures still surface.
 
 ## Structural inputs
 
@@ -124,6 +146,21 @@ Three stages, all in `structural.rs`:
 
 Stage 3 lets a 10k-file workspace answer a warm structural query in a
 few milliseconds.
+
+## fsmonitor
+
+When the workspace's git config sets `core.fsmonitor`, the engine
+opens a client against either the builtin daemon
+(`git fsmonitor--daemon query`) or a hook script (`<script> 2 <token>`)
+once per build. The returned set of changed paths narrows the
+recorded-reads verifier: file entries outside the set short-circuit to
+`Match`, dir entries skip if no changed path lives under them, and a
+fresh-instance signal forces a full check.
+
+Token storage at `.giant/fsmonitor-token` is updated only after the
+bootstrap completes - committing earlier would lose change reports on
+crash. Source in `fsmonitor.rs`; details in
+[TDD-0016](https://github.com/johnae/giant/blob/main/docs/tdd/0016-fsmonitor-client.md).
 
 ## Watch loop
 

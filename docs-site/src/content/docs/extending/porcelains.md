@@ -77,7 +77,16 @@ Use lowercase, hyphen-separated names. `giant-task`, `giant-tui`,
 filesystems.
 
 Reserved built-in names (don't shadow these): `build`, `test`,
-`watch`, `affected`, `graph`, `clean`, `explain`.
+`watch`, `affected`, `graph`, `clean`, `explain`, `logs`, `session`.
+
+## First-party porcelains
+
+Two ship with Giant today:
+
+- **`giant-task`** - task runner. `giant task fmt`, `giant task
+  deploy`. See [giant-task](/extending/giant-task/).
+- **`giant-tui`** - interactive target browser + build runner. See
+  [giant-tui](/extending/giant-tui/).
 
 ## Communicating with the engine
 

@@ -73,6 +73,17 @@ targets:
 The two-threshold setup avoids "always-evicting" behavior: trigger at
 100%, evict down to 80%, leaving a 20% buffer before the next round.
 
+## `state`
+
+| Field | Default | Description |
+|---|---|---|
+| `dir` | `.giant` | Per-workspace state directory. Holds discovery sidecars, the fsmonitor token, build logs - anything Giant writes that's specific to this workspace (vs. content-addressed blobs, which live under `cache.dir`). Relative paths resolve under the workspace root. |
+
+Splitting state from cache lets the cache live in a shared user-wide
+directory while per-workspace state stays put. The default keeps
+both backwards-compatible (state defaults to `.giant/` in the
+workspace root, which is where it already was).
+
 Log capture/replay is what makes cache hits informative: without it
 you'd see `CACHE go:bin:server` and nothing else, even if the original
 build printed test failures, deprecation warnings, or compiler hints.
@@ -156,16 +167,18 @@ field set differs from `targets:` in a few ways:
 | `command` | yes | string | The discovery command. |
 | `outputs` | yes | list | The JSON file(s) the command writes. |
 | `deps` | no | list of strings | Explicit dependencies (e.g. on a compiled discovery tool). |
+| `inputs` | no | list | Explicit files to content-hash into the discovery cache key. Optional - Giant already pulls in any argv token that resolves to a workspace file (the script, an in-tree binary on `$PATH`, etc.). Use this to declare helpers and embedded data the argv walk can't see (sourced shell libraries, config templates). Same `File`/`Structural` shapes as `targets.inputs`. |
 | `cwd` | no | string | Working dir, workspace-relative. |
 | `env` | no | map | Env vars. Hashed into the discovery cache key. |
 | `scope` | no | list of strings | Directory prefixes the discovery may read from. Used as the sandbox fence (if sandboxing is on) and the fsmonitor narrowing hint. Contributes to the cache key. |
 | `exists` | no | string | Same as on regular targets. |
 | `timeout` | no | int | Same as on regular targets. |
 
-`inputs:` is **not accepted** on `include:` entries. The loader rejects
-it with a migration message pointing at the cooperative protocol.
-Discovery invalidation comes from the `reads` manifest the script
-emits in its output, not from declared globs.
+The discovery cache key is
+`cmd + cwd + env + scope + content`, where `content` is the deduped
+union of the argv-walk hits and any `inputs:` matches. Cooperatively-
+emitted `reads` from the script's JSON still drives the warm-path
+verifier - the two mechanisms compose.
 
 ### Discovery output shape
 

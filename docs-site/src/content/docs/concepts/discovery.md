@@ -24,9 +24,13 @@ Three things to notice:
 
 - It's under `include:`, not `targets:`. That's how Giant knows to run
   it during the bootstrap pass before the main build.
-- It has **no `inputs:`** field - the loader rejects it. What
-  invalidates a discovery's cached output is the `reads` manifest the
-  script emits in its JSON (below), not user-declared globs.
+- `inputs:` is optional. Most discoveries don't need it - the cache
+  key already pulls in the script/binary itself (any argv token that
+  resolves to a file in the workspace) and the cooperative `reads`
+  manifest below covers what the script actually read. Use `inputs:`
+  only for files the argv walk can't see (sourced helpers, embedded
+  data); they get content-hashed into the key just like for regular
+  targets.
 - `scope:` is optional. It bounds where the discovery may read from
   (useful when sandboxing is on) and narrows the path-change query
   when fsmonitor is configured.
@@ -110,13 +114,17 @@ about a subset of its children.
 
 ## How the bootstrap pass works
 
-1. **Config load.** Giant parses `giant.yaml`, sees the `include:`
-   entries, rejects any that declare `inputs:`.
+1. **Config load.** Giant parses `giant.yaml` and sees the `include:`
+   entries.
 2. **Sidecar lookup.** For each pending discovery, Giant checks
-   `.giant/discovery/<key>.json` (key = `cmd + env + cwd + scope`).
-   If a sidecar exists and every entry in its `reads` manifest
-   matches the live filesystem, the cached output is restored to disk
-   and the script doesn't run.
+   `.giant/discovery/<key>.json`. The key is
+   `cmd + cwd + env + scope + content`, where `content` is the merged
+   set of (a) argv tokens that resolve to a real file in the
+   workspace (the script, its helpers if invoked by relative path, an
+   in-tree binary on `$PATH`) and (b) anything the user declared via
+   `inputs:`, all content-hashed. If a sidecar exists and every entry
+   in its `reads` manifest still matches the live filesystem, the
+   cached output is restored to disk and the script doesn't run.
 3. **Bootstrap build.** Discoveries with no usable sidecar dispatch
    through the normal build pipeline. Their commands run, the output
    JSON is written, the `reads` manifest is materialized into recorded
@@ -213,10 +221,11 @@ binary. Three properties fall out for free:
 - **Remote-shareable.** CI machines pull the compiled binary from the
   remote cache, never compile it locally. The compile happens on the
   one machine that warms the cache, then propagates.
-- **Source changes invalidate correctly.** Editing the discovery tool's
-  source changes its output binary, which appears in the discovery's
-  `reads.files` manifest (the tool itself is read on every run), which
-  invalidates the discovery's sidecar.
+- **Source changes invalidate correctly.** Editing the discovery
+  tool's source rebuilds `bin/my-discover`. Its new content hash
+  flows into the discovery cache key automatically - the argv walk
+  notices `./bin/my-discover` is a workspace file and includes it
+  - so the discovery sidecar invalidates on the next run.
 
 ### Why this isn't circular
 
@@ -255,11 +264,10 @@ When a shell + jq script is enough, leave it as a shell + jq script.
 - **It doesn't have access to the engine.** Discovery is a normal
   subprocess. It can't query the cache, can't see what other targets
   exist, can't invoke giant recursively.
-- **It doesn't run on every build.** If its `reads` manifest still
-  matches the filesystem, the cached output is reused without
-  executing the script.
-- **It can't declare `inputs:`.** The loader rejects them. The
-  recorded-reads manifest is the only invalidation signal.
+- **It doesn't run on every build.** If its content-hashed inputs
+  (argv files + declared `inputs:`) are unchanged and its `reads`
+  manifest still matches the filesystem, the cached output is
+  reused without executing the script.
 
 ## Recursive discovery
 
