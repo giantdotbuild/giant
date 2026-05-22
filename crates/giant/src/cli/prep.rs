@@ -83,9 +83,12 @@ pub async fn prepare(
             // Sidecar short-circuit: for each pending discovery, try
             // the sidecar before dispatching.
             //
-            // - Match: skip the command entirely and restore the cached
+            // - Match: skip the command entirely. Restore the cached
             //   output from the sidecar's recorded fragment so
-            //   downstream targets see consistent contents on disk.
+            //   downstream targets see consistent contents on disk,
+            //   and merge directly from the sidecar without re-hashing
+            //   (which would rewrite the sidecar with an unchanged
+            //   payload but a fresh mtime).
             // - Mismatch / Missing: invalidate the regular AC entry
             //   for this target (cmd + env + cwd + empty inputs is
             //   stable across runs; without invalidation the regular
@@ -94,6 +97,7 @@ pub async fn prepare(
             //
             // `--fresh` bypasses the sidecar entirely.
             let mut to_dispatch: Vec<TargetId> = Vec::with_capacity(current_wave.len());
+            let mut sidecar_hits: Vec<(TargetId, discovery::DiscoverySidecar)> = Vec::new();
             for id in &current_wave {
                 let spec = graph.get(id).expect("present in current wave").clone();
                 if fresh {
@@ -125,6 +129,7 @@ pub async fn prepare(
                         std::fs::write(&abs, &bytes)?;
                     }
                     tracing::debug!(target = %id, "discovery restored from sidecar");
+                    sidecar_hits.push((id.clone(), sidecar));
                 } else {
                     // Invalidate the regular AC entry so the bootstrap
                     // actually re-runs the command instead of hitting
@@ -148,7 +153,7 @@ pub async fn prepare(
             if !to_dispatch.is_empty() {
                 let bootstrap_job = BuildJob {
                     graph: Arc::new(graph.clone()),
-                    selection: to_dispatch,
+                    selection: to_dispatch.clone(),
                     cache: cache.clone(),
                     workspace_root: workspace_abs.clone(),
                     parallelism,
@@ -175,30 +180,44 @@ pub async fn prepare(
                 }
             }
 
-            // Collect (id, spec, output_path) triples; cloning the spec
-            // releases the immutable borrow on the graph before merge.
-            // Specs are tiny in practice so the clone is fine.
-            let wave_outputs: Vec<(TargetId, crate::model::TargetSpec, PathBuf)> = current_wave
-                .iter()
-                .flat_map(|id| {
-                    let spec = graph.get(id).expect("present in current wave").clone();
-                    spec.outputs
-                        .iter()
-                        .map(|p| {
-                            (
-                                id.clone(),
-                                spec.clone(),
-                                workspace_abs.as_path().join(p.as_path()),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-
-            // Merge each wave's outputs. Nested includes returned by
-            // merge_into feed the next wave (de-duplicated via `seen`).
             let mut next_wave: Vec<TargetId> = Vec::new();
-            for (id, spec, abs) in wave_outputs {
+
+            // Sidecar hits: merge the cached targets/include directly
+            // into the graph. No re-parse, no re-materialize, no
+            // sidecar rewrite. Nested includes feed the next wave the
+            // same way they would from a cold run.
+            for (_id, sidecar) in sidecar_hits {
+                let fragment = discovery::fragment_from_sidecar(&sidecar);
+                let new_includes = discovery::merge_into(&mut graph, fragment)?;
+                for nid in new_includes {
+                    if seen.insert(nid.clone()) {
+                        next_wave.push(nid);
+                    }
+                }
+            }
+
+            // Dispatched discoveries: parse their freshly-written
+            // output file, materialize the reads manifest, write the
+            // sidecar for the next run, merge into the graph.
+            let dispatched_outputs: Vec<(TargetId, crate::model::TargetSpec, PathBuf)> =
+                to_dispatch
+                    .iter()
+                    .flat_map(|id| {
+                        let spec = graph.get(id).expect("present in dispatched set").clone();
+                        spec.outputs
+                            .iter()
+                            .map(|p| {
+                                (
+                                    id.clone(),
+                                    spec.clone(),
+                                    workspace_abs.as_path().join(p.as_path()),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+
+            for (id, spec, abs) in dispatched_outputs {
                 let fragment = discovery::parse_fragment(&abs)?;
 
                 // Cooperative protocol (ADR-0013): if the discovery

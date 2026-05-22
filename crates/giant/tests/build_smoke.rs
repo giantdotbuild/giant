@@ -1354,6 +1354,137 @@ fn fixture_discover_go_runs_end_to_end() {
         ws.join("bin/root").exists(),
         "expected bin/root binary to exist after build"
     );
+
+    // The discovery emitted a `reads` manifest, so the engine should
+    // have written a sidecar under .giant/discovery/. (TDD-0015.)
+    let sidecar_count = std::fs::read_dir(ws.join(".giant/discovery"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(
+        sidecar_count, 1,
+        "discover-go.sh emits a reads manifest, expected one sidecar"
+    );
+}
+
+#[test]
+fn fixture_discover_go_warm_skips_discovery_when_nothing_changed() {
+    // Cooperative discovery: cold run writes a sidecar; warm run with no
+    // filesystem changes should not re-execute discover-go.sh. We prove
+    // it by capturing the sidecar's mtime - if discovery re-ran, the
+    // sidecar would be rewritten.
+    if !have_program("go") || !have_program("jq") {
+        eprintln!("skipping: go or jq not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    copy_dir(&fixture_path("discover-go"), ws).unwrap();
+
+    let env_pairs = [
+        (
+            "GOCACHE",
+            ws.join(".gocache").to_string_lossy().into_owned(),
+        ),
+        (
+            "GOMODCACHE",
+            ws.join(".gomodcache").to_string_lossy().into_owned(),
+        ),
+    ];
+
+    let mut cmd1 = Command::new(giant_bin());
+    cmd1.arg("build").current_dir(ws);
+    for (k, v) in &env_pairs {
+        cmd1.env(k, v);
+    }
+    let out1 = cmd1.output().expect("spawn giant");
+    assert!(
+        out1.status.success(),
+        "cold build failed: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+
+    let sidecar_dir = ws.join(".giant/discovery");
+    let sidecar_path = std::fs::read_dir(&sidecar_dir)
+        .expect("sidecar dir exists")
+        .next()
+        .expect("at least one sidecar")
+        .expect("readable dir entry")
+        .path();
+    let mtime1 = std::fs::metadata(&sidecar_path)
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let mut cmd2 = Command::new(giant_bin());
+    cmd2.arg("build").current_dir(ws);
+    for (k, v) in &env_pairs {
+        cmd2.env(k, v);
+    }
+    let out2 = cmd2.output().expect("spawn giant");
+    assert!(out2.status.success());
+
+    let mtime2 = std::fs::metadata(&sidecar_path)
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(
+        mtime1, mtime2,
+        "sidecar should not be rewritten on warm run (discovery skipped)"
+    );
+
+    // Now edit pkg/util/util.go's body without touching package/import
+    // lines. The excerpt verifier should report Match → still no rerun.
+    let util_path = ws.join("pkg/util/util.go");
+    let before = std::fs::read_to_string(&util_path).unwrap();
+    let edited = before.replace(
+        "func Greet",
+        "// inserted comment unrelated to package/import\nfunc Greet",
+    );
+    assert_ne!(before, edited, "the replace should have changed the file");
+    std::fs::write(&util_path, &edited).unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let mut cmd3 = Command::new(giant_bin());
+    cmd3.arg("build").current_dir(ws);
+    for (k, v) in &env_pairs {
+        cmd3.env(k, v);
+    }
+    let out3 = cmd3.output().expect("spawn giant");
+    assert!(out3.status.success());
+
+    let mtime3 = std::fs::metadata(&sidecar_path)
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(
+        mtime1, mtime3,
+        "function-body edits shouldn't invalidate the discovery sidecar"
+    );
+
+    // Editing go.mod (a whole-file entry in reads) should re-run.
+    std::fs::write(
+        ws.join("go.mod"),
+        "module example.com/giantfixture\n\ngo 1.21\n",
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let mut cmd4 = Command::new(giant_bin());
+    cmd4.arg("build").current_dir(ws);
+    for (k, v) in &env_pairs {
+        cmd4.env(k, v);
+    }
+    let out4 = cmd4.output().expect("spawn giant");
+    assert!(out4.status.success());
+
+    let mtime4 = std::fs::metadata(&sidecar_path)
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_ne!(
+        mtime1, mtime4,
+        "go.mod edit should have invalidated the sidecar and re-run discovery"
+    );
 }
 
 #[test]
