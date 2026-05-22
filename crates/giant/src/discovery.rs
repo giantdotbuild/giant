@@ -310,6 +310,95 @@ pub fn verify_reads(
     Ok(VerifyOutcome::Match)
 }
 
+/// Sidecar schema. Bump (and migrate / reject) when the on-disk shape
+/// changes incompatibly.
+const SIDECAR_SCHEMA: u32 = 1;
+
+/// On-disk representation of a discovery target's cached output and the
+/// `RecordedReads` manifest used to verify it. One per cache key, under
+/// `.giant/discovery/<key>.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoverySidecar {
+    pub schema: u32,
+    pub cache_key: CacheKey,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<TargetSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<TargetSpec>,
+    pub reads: RecordedReads,
+}
+
+impl DiscoverySidecar {
+    pub fn new(
+        cache_key: CacheKey,
+        targets: Vec<TargetSpec>,
+        include: Vec<TargetSpec>,
+        reads: RecordedReads,
+    ) -> Self {
+        Self {
+            schema: SIDECAR_SCHEMA,
+            cache_key,
+            targets,
+            include,
+            reads,
+        }
+    }
+}
+
+fn sidecar_path(workspace_root: &std::path::Path, key: CacheKey) -> std::path::PathBuf {
+    workspace_root
+        .join(".giant")
+        .join("discovery")
+        .join(format!("{}.json", key.to_hex()))
+}
+
+/// Write a sidecar atomically: serialize to `.tmp`, fsync, rename into
+/// place. Concurrent invocations on the same key resolve "last
+/// finisher wins" without corrupting the file.
+pub fn write_sidecar(
+    workspace_root: &std::path::Path,
+    sidecar: &DiscoverySidecar,
+) -> std::io::Result<()> {
+    let final_path = sidecar_path(workspace_root, sidecar.cache_key);
+    if let Some(parent) = final_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp_path = final_path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec(sidecar)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    std::fs::write(&tmp_path, &bytes)?;
+    std::fs::rename(&tmp_path, &final_path)?;
+    Ok(())
+}
+
+/// Read a sidecar for the given key. Returns `Ok(None)` when the file
+/// is absent or has an incompatible schema (treated as a cache miss -
+/// the caller will re-run the discovery and rewrite). I/O errors and
+/// malformed JSON propagate so the caller can surface diagnostics.
+pub fn read_sidecar(
+    workspace_root: &std::path::Path,
+    key: CacheKey,
+) -> std::io::Result<Option<DiscoverySidecar>> {
+    let path = sidecar_path(workspace_root, key);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let sidecar: DiscoverySidecar = serde_json::from_str(&raw)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    if sidecar.schema != SIDECAR_SCHEMA {
+        return Ok(None);
+    }
+    if sidecar.cache_key != key {
+        // Self-check: the file's recorded key doesn't match the lookup
+        // key. Treat as a miss so the caller rewrites.
+        return Ok(None);
+    }
+    Ok(Some(sidecar))
+}
+
 fn hash_file_entry(
     entry: &ReadFileEntry,
     workspace_root: &std::path::Path,
@@ -791,6 +880,119 @@ mod tests {
         let r1 = materialize_reads(&reads, dir.path()).unwrap();
         let r2 = materialize_reads(&reads, dir.path()).unwrap();
         assert_eq!(r1.dirs[0].listing_hash, r2.dirs[0].listing_hash);
+    }
+
+    // ------------ sidecar I/O ------------
+
+    fn sample_sidecar(key: CacheKey) -> DiscoverySidecar {
+        DiscoverySidecar::new(
+            key,
+            vec![],
+            vec![],
+            RecordedReads {
+                files: vec![RecordedFile {
+                    path: WsRelPath::new("go.mod").unwrap(),
+                    lines: vec![],
+                    content_hash: ContentHash::of_bytes(b"module x\n"),
+                }],
+                dirs: vec![],
+            },
+        )
+    }
+
+    #[test]
+    fn sidecar_round_trip() {
+        let ws = tempfile::tempdir().unwrap();
+        let key = CacheKey::new(ContentHash::of_bytes(b"key1"));
+        let s = sample_sidecar(key);
+        write_sidecar(ws.path(), &s).unwrap();
+
+        let back = read_sidecar(ws.path(), key).unwrap().unwrap();
+        assert_eq!(back.cache_key, key);
+        assert_eq!(back.reads.files.len(), 1);
+        assert_eq!(
+            back.reads.files[0].content_hash,
+            s.reads.files[0].content_hash
+        );
+    }
+
+    #[test]
+    fn sidecar_missing_returns_none() {
+        let ws = tempfile::tempdir().unwrap();
+        let key = CacheKey::new(ContentHash::of_bytes(b"never-written"));
+        assert!(read_sidecar(ws.path(), key).unwrap().is_none());
+    }
+
+    #[test]
+    fn sidecar_unknown_schema_returns_none() {
+        let ws = tempfile::tempdir().unwrap();
+        let key = CacheKey::new(ContentHash::of_bytes(b"k"));
+        let path = sidecar_path(ws.path(), key);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Hand-written sidecar with a schema we don't support.
+        let body = serde_json::json!({
+            "schema": 99,
+            "cache_key": key,
+            "reads": { "files": [], "dirs": [] }
+        });
+        std::fs::write(&path, serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(read_sidecar(ws.path(), key).unwrap().is_none());
+    }
+
+    #[test]
+    fn sidecar_key_mismatch_returns_none() {
+        // The file on disk says it was written for key A; the lookup
+        // asks for key B (e.g., file was renamed manually, or there's a
+        // hash collision in the truncated filename). Treat as a miss.
+        let ws = tempfile::tempdir().unwrap();
+        let key_a = CacheKey::new(ContentHash::of_bytes(b"a"));
+        let key_b = CacheKey::new(ContentHash::of_bytes(b"b"));
+        let mut s = sample_sidecar(key_a);
+        s.cache_key = key_a;
+        // Write the file under key_b's filename but keep key_a in the body.
+        let path = sidecar_path(ws.path(), key_b);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = serde_json::to_vec(&s).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+
+        assert!(read_sidecar(ws.path(), key_b).unwrap().is_none());
+    }
+
+    #[test]
+    fn sidecar_malformed_json_is_error() {
+        let ws = tempfile::tempdir().unwrap();
+        let key = CacheKey::new(ContentHash::of_bytes(b"k"));
+        let path = sidecar_path(ws.path(), key);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(read_sidecar(ws.path(), key).is_err());
+    }
+
+    #[test]
+    fn sidecar_overwrites_existing() {
+        let ws = tempfile::tempdir().unwrap();
+        let key = CacheKey::new(ContentHash::of_bytes(b"k"));
+        let mut s = sample_sidecar(key);
+        write_sidecar(ws.path(), &s).unwrap();
+
+        s.reads.files[0].content_hash = ContentHash::of_bytes(b"different bytes");
+        write_sidecar(ws.path(), &s).unwrap();
+
+        let back = read_sidecar(ws.path(), key).unwrap().unwrap();
+        assert_eq!(
+            back.reads.files[0].content_hash,
+            ContentHash::of_bytes(b"different bytes")
+        );
+    }
+
+    #[test]
+    fn sidecar_write_leaves_no_tmp_file() {
+        // Atomic rename should not leave the .tmp companion behind.
+        let ws = tempfile::tempdir().unwrap();
+        let key = CacheKey::new(ContentHash::of_bytes(b"k"));
+        write_sidecar(ws.path(), &sample_sidecar(key)).unwrap();
+        let tmp = sidecar_path(ws.path(), key).with_extension("json.tmp");
+        assert!(!tmp.exists(), "stale .tmp file: {}", tmp.display());
     }
 
     // ------------ original parse tests below ------------
