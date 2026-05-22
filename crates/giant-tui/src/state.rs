@@ -95,6 +95,28 @@ pub enum Mode {
     /// Multi-select tag picker modal. Tracks a cursor; space cycles
     /// the cursor row through neutral → include → exclude → neutral.
     TagPicker,
+    /// Entering the git ref baseline for affected mode. Typed chars
+    /// accumulate in `state.affected_input`; Enter submits, Esc cancels.
+    AffectedPrompt,
+    /// Searching within the log pane. Typed chars accumulate in
+    /// `state.log_search`; the pane filters to matching lines until the
+    /// query is cleared (Esc or empty + Enter).
+    LogSearch,
+}
+
+/// "Affected since <base>" filter on the catalog. While set, the
+/// browser shows only target IDs the engine reports as affected vs
+/// the git baseline. Recomputed automatically when the workspace
+/// changes (TUI runs a file watcher behind the scenes).
+#[derive(Debug, Clone)]
+pub struct AffectedState {
+    pub base: String,
+    pub ids: HashSet<TargetId>,
+    /// True while a recompute is in flight. The status badge shows
+    /// "refreshing…" so the user knows the displayed set may be stale.
+    pub refreshing: bool,
+    pub last_error: Option<String>,
+    pub last_refresh: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +135,16 @@ impl TargetStatus {
     pub fn is_terminal(self) -> bool {
         !matches!(self, Self::Queued | Self::Running)
     }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LiveCounts {
+    pub queued: usize,
+    pub running: usize,
+    pub built: usize,
+    pub cached: usize,
+    pub failed: usize,
+    pub skipped: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +221,42 @@ pub struct State {
     /// sorted/filtered build targets; clamped on each access. The
     /// selected target's logs render in the bottom pane.
     pub build_cursor: usize,
+
+    /// "Affected since <base>" filter. None = off.
+    pub affected: Option<AffectedState>,
+    /// Buffer for the `AffectedPrompt` text input.
+    pub affected_input: String,
+    /// Workspace root absolute path. Populated from `engine.hello`'s
+    /// `workspace` field once the session has reported it; needed for
+    /// spawning the file watcher that drives affected auto-refresh.
+    pub workspace_root: Option<std::path::PathBuf>,
+
+    /// Substring filter applied to the log pane. Case-insensitive.
+    /// Empty means "show everything." Cleared by Esc or empty Enter
+    /// in `Mode::LogSearch`.
+    pub log_search: String,
+
+    /// Which pane the build view's keys act on. Tab cycles. Catalog
+    /// is the target list at the top; Log is the recent-output pane
+    /// at the bottom.
+    pub focus: Focus,
+
+    /// Number of lines the log pane occupies in the build view.
+    /// Clamped to a safe range in the renderer. None = use the
+    /// default (`FOOTER_HEIGHT` from `ui.rs`).
+    pub log_pane_rows: Option<u16>,
+
+    /// How far up from the tail of the log buffer the user has
+    /// scrolled with j/k while the log pane is focused. 0 = follow
+    /// tail; bumped up by k, down by j.
+    pub log_scroll_back: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    #[default]
+    Catalog,
+    Log,
 }
 
 impl State {
@@ -218,6 +286,11 @@ impl State {
                     },
                 );
             }
+            Event::EngineHello { workspace, .. } => {
+                if !workspace.is_empty() {
+                    self.workspace_root = Some(std::path::PathBuf::from(workspace));
+                }
+            }
             Event::EngineReady if self.screen == Screen::Loading => {
                 self.screen = Screen::Browser;
             }
@@ -226,6 +299,29 @@ impl State {
             }
             Event::CatalogReady => {
                 // Catalog is fresh; nothing more to do here.
+            }
+            Event::AffectedChanged { base, target_ids } => {
+                // Reconcile against our local subscription state.
+                // The engine is authoritative; if the user clicked
+                // "clear" we'll have dropped state.affected already,
+                // and a stray event (in-flight when we unsubscribed)
+                // is ignored.
+                if let Some(aff) = self.affected.as_mut()
+                    && aff.base == base
+                {
+                    aff.ids = target_ids.into_iter().collect();
+                    aff.refreshing = false;
+                    aff.last_error = None;
+                    aff.last_refresh = Some(Instant::now());
+                }
+            }
+            Event::AffectedError { base, message } => {
+                if let Some(aff) = self.affected.as_mut()
+                    && aff.base == base
+                {
+                    aff.refreshing = false;
+                    aff.last_error = Some(message);
+                }
             }
             // ----- Build events -------------------------------------
             Event::BuildStarted {
@@ -355,6 +451,24 @@ impl State {
             .count()
     }
 
+    /// Live counts for the in-flight build. Used in the build header.
+    pub fn live_counts(&self) -> LiveCounts {
+        let mut c = LiveCounts::default();
+        for v in self.targets.values() {
+            match v.status {
+                TargetStatus::Queued => c.queued += 1,
+                TargetStatus::Running => c.running += 1,
+                TargetStatus::Cached | TargetStatus::Remote | TargetStatus::External => {
+                    c.cached += 1
+                }
+                TargetStatus::Built => c.built += 1,
+                TargetStatus::Failed => c.failed += 1,
+                TargetStatus::Skipped => c.skipped += 1,
+            }
+        }
+        c
+    }
+
     pub fn build_target_count(&self) -> usize {
         self.targets.len()
     }
@@ -392,6 +506,11 @@ impl State {
             return false;
         }
         if self.filters.test_only && !entry.test {
+            return false;
+        }
+        if let Some(aff) = &self.affected
+            && !aff.ids.contains(id)
+        {
             return false;
         }
         true
@@ -588,6 +707,48 @@ impl State {
                 self.scroll_offset = self.visible_count().saturating_sub(1);
             }
         }
+    }
+
+    /// Toggle which pane the build view's keys act on. Always
+    /// resets log_scroll_back when switching to Catalog focus, so
+    /// the next time the user moves to Log they get a fresh window
+    /// at the tail.
+    pub fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Catalog => Focus::Log,
+            Focus::Log => {
+                self.log_scroll_back = 0;
+                Focus::Catalog
+            }
+        };
+    }
+
+    pub fn log_scroll_up(&mut self, n: usize) {
+        self.log_scroll_back = self.log_scroll_back.saturating_add(n);
+    }
+
+    pub fn log_scroll_down(&mut self, n: usize) {
+        self.log_scroll_back = self.log_scroll_back.saturating_sub(n);
+    }
+
+    pub fn log_scroll_to_bottom(&mut self) {
+        self.log_scroll_back = 0;
+    }
+
+    pub fn log_scroll_to_top(&mut self) {
+        self.log_scroll_back = usize::MAX; // clamped in the renderer
+    }
+
+    /// Resize the log pane. The renderer clamps to a sane range; we
+    /// just bump the stored row count and let the clamp do its job.
+    pub fn grow_log_pane(&mut self) {
+        let current = self.log_pane_rows.unwrap_or(8);
+        self.log_pane_rows = Some(current.saturating_add(2));
+    }
+
+    pub fn shrink_log_pane(&mut self) {
+        let current = self.log_pane_rows.unwrap_or(8);
+        self.log_pane_rows = Some(current.saturating_sub(2).max(4));
     }
 
     fn move_build_cursor(&mut self, delta: isize) {

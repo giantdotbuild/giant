@@ -39,6 +39,10 @@ indexmap = { version = "2", features = ["serde"] }
 anyhow = "1"
 thiserror = "2"
 
+# Watch mode: glob matching for task `inputs:` patterns.
+glob = "0.3"
+tracing = "0.1"
+
 # Colored verbs in giant-task's output - keep the look consistent with
 # the giant build renderer. anstyle is in the workspace tree via clap.
 anstyle = "1"

@@ -3,7 +3,8 @@
 
 use crate::colors::{status_icon, status_label, status_style};
 use crate::state::{
-    CatalogEntry, LogLine, Mode, Screen, State, StatusFilter, TagState, TargetStatus, TargetView,
+    CatalogEntry, Focus, LogLine, Mode, Screen, State, StatusFilter, TagState, TargetStatus,
+    TargetView,
 };
 use giant::events::LogStream;
 use giant::model::TargetId;
@@ -38,6 +39,9 @@ pub fn draw(frame: &mut Frame, state: &State) {
     }
     if state.mode == Mode::TagPicker {
         draw_tag_picker(frame, area, state);
+    }
+    if state.mode == Mode::AffectedPrompt {
+        draw_affected_prompt(frame, area, state);
     }
     if let Some(err) = &state.last_error {
         draw_error_banner(frame, area, err);
@@ -199,7 +203,7 @@ fn draw_browser_footer(frame: &mut Frame, area: Rect, state: &State) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Enter build · / search · t tag · T test · Tab status · c clear · ? help "),
+            .title(" Enter build · / search · t tag · T test · A affected · R refresh · c clear · ? help "),
     );
     frame.render_widget(para, area);
 }
@@ -209,17 +213,31 @@ fn draw_browser_footer(frame: &mut Frame, area: Rect, state: &State) {
 // ============================================================
 
 fn draw_build_view(frame: &mut Frame, area: Rect, state: &State) {
+    let log_h = log_pane_height(area, state);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(HEADER_HEIGHT),
             Constraint::Min(0),
-            Constraint::Length(FOOTER_HEIGHT),
+            Constraint::Length(log_h),
         ])
         .split(area);
     draw_build_header(frame, chunks[0], state);
     draw_build_target_list(frame, chunks[1], state);
     draw_recent_logs(frame, chunks[2], state);
+}
+
+/// Effective height for the log pane. Honors the user's resize input
+/// (state.log_pane_rows) but clamps to the area so the target list
+/// never disappears entirely. Min 4 keeps the title bar + 2 lines
+/// visible; max is area.height - header - 5.
+fn log_pane_height(area: Rect, state: &State) -> u16 {
+    let max = area
+        .height
+        .saturating_sub(HEADER_HEIGHT)
+        .saturating_sub(5)
+        .max(4);
+    state.log_pane_rows.unwrap_or(FOOTER_HEIGHT).clamp(4, max)
 }
 
 fn draw_build_header(frame: &mut Frame, area: Rect, state: &State) {
@@ -244,10 +262,18 @@ fn draw_build_header(frame: &mut Frame, area: Rect, state: &State) {
         } else {
             "building"
         };
+        let c = state.live_counts();
         format!(
-            " giant - {verb} {} of {} targets · {} ",
-            state.running_count(),
+            " giant - {verb} {}/{} · {} built · {} cached{} · {} ",
+            c.running,
             total,
+            c.built,
+            c.cached,
+            if c.failed > 0 {
+                format!(" · {} failed", c.failed)
+            } else {
+                String::new()
+            },
             format_duration_ms(elapsed_ms)
         )
     };
@@ -354,20 +380,66 @@ fn target_row<'a>(id: &'a TargetId, v: &'a TargetView, selected: bool) -> Line<'
 fn draw_recent_logs(frame: &mut Frame, area: Rect, state: &State) {
     let height = area.height.saturating_sub(2) as usize;
     let logs = state.selected_target_logs();
-    // Take the last `height` lines so the most recent output is
-    // always visible, regardless of how chatty the target is.
-    let start = logs.len().saturating_sub(height);
+    // Apply the log-pane substring filter (case-insensitive) before
+    // we slice down to the last `height` lines, so the user always
+    // sees matches against the full buffer - not just what happened
+    // to fall into the visible window.
+    let q = state.log_search.to_lowercase();
+    let filtered: Vec<&LogLine> = if q.is_empty() {
+        logs.iter().collect()
+    } else {
+        logs.iter()
+            .filter(|l| l.line.to_lowercase().contains(&q))
+            .collect()
+    };
+    // scroll_back lifts the visible window away from the tail; when
+    // the user pages up they want to hold position even as new lines
+    // arrive. Clamp so an aggressively-scrolled window never falls
+    // off the buffer.
+    let max_back = filtered.len().saturating_sub(height);
+    let back = state.log_scroll_back.min(max_back);
+    let end = filtered.len().saturating_sub(back);
+    let start = end.saturating_sub(height);
     let mut lines: Vec<Line> = Vec::with_capacity(height);
-    for l in &logs[start..] {
+    for l in &filtered[start..end] {
         lines.extend(log_lines(l));
     }
-    let title = match state.selected_build_target() {
+    let base_title = match state.selected_build_target() {
         Some(id) if !logs.is_empty() => format!(" logs - {} ", id.as_str()),
         Some(id) => format!(" logs - {} (no output yet) ", id.as_str()),
         None => " logs ".to_string(),
     };
+    let title = if state.mode == Mode::LogSearch {
+        format!(
+            " logs - /{}_ ({} of {} lines) ",
+            state.log_search,
+            filtered.len(),
+            logs.len()
+        )
+    } else if !state.log_search.is_empty() {
+        format!(
+            " logs - /{} ({} of {} lines) · Esc clears ",
+            state.log_search,
+            filtered.len(),
+            logs.len()
+        )
+    } else {
+        base_title
+    };
+    let border_style = if state.focus == Focus::Log {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let para = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .title(title),
+        )
         .wrap(Wrap { trim: false });
     frame.render_widget(para, area);
 
@@ -467,7 +539,56 @@ fn filter_chips(state: &State) -> Vec<Span<'static>> {
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    if let Some(aff) = &state.affected {
+        let label = if aff.refreshing {
+            format!(" affected:{}… ", aff.base)
+        } else if let Some(err) = &aff.last_error {
+            format!(" affected:{} (error: {}) ", aff.base, truncate(err, 30))
+        } else {
+            format!(" affected:{} ({}) ", aff.base, aff.ids.len())
+        };
+        chips.push(Span::styled(
+            label,
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     chips
+}
+
+fn draw_affected_prompt(frame: &mut Frame, area: Rect, state: &State) {
+    let w: u16 = 60.min(area.width.saturating_sub(4));
+    let h: u16 = 5;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, rect);
+    let lines = vec![
+        Line::from(Span::raw(" git ref to diff against (e.g. main, HEAD~1):")),
+        Line::from(Span::styled(
+            format!("  › {}", state.affected_input),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            " Enter to accept · Esc to cancel ",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" affected since… "),
+    );
+    frame.render_widget(para, rect);
 }
 
 fn draw_search_bar(frame: &mut Frame, area: Rect, state: &State) {
@@ -574,7 +695,7 @@ fn draw_tag_picker(frame: &mut Frame, area: Rect, state: &State) {
 
 fn draw_help_overlay(frame: &mut Frame, area: Rect) {
     let w = 60.min(area.width.saturating_sub(2));
-    let h = 18.min(area.height.saturating_sub(2));
+    let h = 26.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let rect = Rect {
@@ -594,9 +715,17 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("    T            toggle test-only filter"),
         Line::from("    Tab / f      cycle status filter (build screens)"),
         Line::from("    c            clear all filters"),
+        Line::from("    A            affected since <ref> (auto-refreshes"),
+        Line::from("                 on file change)"),
+        Line::from("    R            re-run affected refresh"),
         Line::from("    j/k g/G PgUp/PgDn   scroll"),
         Line::from(""),
         Line::from("  Build:"),
+        Line::from("    Tab          switch focus (target list ↔ log pane)"),
+        Line::from("    j/k g/G PgUp/PgDn   scroll the focused pane"),
+        Line::from("    Ctrl-↑ / Ctrl-↓    shrink / grow the log pane"),
+        Line::from("    /            substring-filter the log pane"),
+        Line::from("                 (Esc clears, Enter commits)"),
         Line::from("    Esc / Ctrl-C    stop build, return to browser"),
         Line::from(""),
         Line::from("    q / Ctrl-C  (when no build) quit"),

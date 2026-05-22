@@ -16,6 +16,7 @@ mod render;
 mod runner;
 mod schema;
 mod services;
+mod watch;
 mod workspace;
 
 use clap::{CommandFactory, Parser};
@@ -59,6 +60,23 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "SHELL", value_enum)]
     completions: Option<completions::ShellChoice>,
 
+    /// Re-run the task on file changes. Watches the task's `inputs:`
+    /// patterns (if declared) or the workspace root (excluding the
+    /// cache and `.giant/` state) otherwise. Ctrl-C to exit.
+    #[arg(long)]
+    watch: bool,
+
+    /// Quiet window in ms for the watcher (events that arrive this
+    /// close together are coalesced into one rebuild). Default 100ms.
+    #[arg(long, default_value_t = 100, requires = "watch")]
+    quiet_ms: u64,
+
+    /// Max delay in ms for the watcher: flush a batch this long after
+    /// the FIRST event in it, even if events keep streaming. Default
+    /// 500ms.
+    #[arg(long, default_value_t = 500, requires = "watch")]
+    max_delay_ms: u64,
+
     /// Pass-through args go after `--` and are appended to the task's
     /// command line (`sh -c '<command>' -- <passthrough...>`).
     #[arg(last = true)]
@@ -89,12 +107,16 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
         return Ok(0);
     }
 
-    let cfg_path = match cli.config {
-        // Canonicalise the user-supplied path so `--config giant.yaml`
-        // (relative, no parent dir) still resolves to a real workspace
-        // root. Falls back to the raw path if canonicalize fails (e.g.
-        // the file doesn't exist; we want the load error, not a
-        // confusing canonicalise error).
+    // Precedence: --config flag → GIANT_CONFIG env var → walk up from cwd
+    // looking for giant.yaml / giant.json.
+    let cfg_path = match cli
+        .config
+        .or_else(|| std::env::var_os("GIANT_CONFIG").map(std::path::PathBuf::from))
+    {
+        // Canonicalise so a relative path still resolves to a real
+        // workspace root. Falls back to the raw path if canonicalize
+        // fails (e.g. file doesn't exist; we want the load error, not
+        // a confusing canonicalise error).
         Some(p) => p.canonicalize().unwrap_or(p),
         None => workspace::find_config(&std::env::current_dir()?)?,
     };
@@ -118,13 +140,27 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?
         .to_path_buf();
 
-    runner::run(
-        &cfg,
-        &name,
-        &cli.args,
-        &cli.passthrough,
-        &workspace_root,
-        cli.verbose,
-    )
-    .await
+    if cli.watch {
+        watch::loop_forever(
+            &cfg,
+            &name,
+            &cli.args,
+            &cli.passthrough,
+            &workspace_root,
+            cli.verbose,
+            std::time::Duration::from_millis(cli.quiet_ms),
+            std::time::Duration::from_millis(cli.max_delay_ms),
+        )
+        .await
+    } else {
+        runner::run(
+            &cfg,
+            &name,
+            &cli.args,
+            &cli.passthrough,
+            &workspace_root,
+            cli.verbose,
+        )
+        .await
+    }
 }

@@ -312,6 +312,7 @@ mod tests {
             env: HashMap::new(),
             cwd: None,
             timeout_secs: None,
+            inputs: vec![],
         }
     }
 

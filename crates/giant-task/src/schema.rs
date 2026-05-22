@@ -85,6 +85,14 @@ pub struct TaskSpec {
     /// Seconds before the command is killed. None = no timeout.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+
+    /// Optional input globs the task is sensitive to. Only consulted by
+    /// `giant-task --watch <name>`: file events under these paths
+    /// retrigger the task. Same glob syntax as core target inputs.
+    /// Empty = `giant-task --watch` falls back to watching the
+    /// workspace root, with the cache + state dirs excluded.
+    #[serde(default)]
+    pub inputs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

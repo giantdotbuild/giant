@@ -1,9 +1,9 @@
 //! Key event → Action mapping. Screen + mode aware.
 
-use crate::state::{Mode, Screen, State};
+use crate::state::{Focus, Mode, Screen, State};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// State mutated locally; redraw needed.
     Redraw,
@@ -18,6 +18,15 @@ pub enum Action {
     StartWatch,
     /// Send {"c":"watch.stop"} to exit watch mode.
     StopWatch,
+    /// User submitted a base ref in the affected prompt - main loop
+    /// should kick off a background `giant affected` computation
+    /// against the given base and spin up the workspace file watcher.
+    RefreshAffected { base: String },
+    /// Re-run `giant affected` against the existing base (manual
+    /// refresh keystroke).
+    RefreshAffectedAgain,
+    /// Drop the affected filter; tear down the file watcher.
+    ClearAffected,
     /// Key consumed but no UI effect.
     Ignore,
 }
@@ -39,6 +48,8 @@ pub fn handle(state: &mut State, key: KeyEvent) -> Action {
         Mode::Help => return handle_help(state, key),
         Mode::Search => return handle_search(state, key),
         Mode::TagPicker => return handle_tag_picker(state, key),
+        Mode::AffectedPrompt => return handle_affected_prompt(state, key),
+        Mode::LogSearch => return handle_log_search(state, key),
         Mode::Normal => {}
     }
     // Any non-Ctrl-C input clears the last-error banner.
@@ -72,6 +83,25 @@ fn handle_browser(state: &mut State, key: KeyEvent) -> Action {
         KeyCode::Char('T') => {
             state.toggle_test_only();
             Action::Redraw
+        }
+        KeyCode::Char('A') => {
+            // Toggle affected mode: enter prompt if off, clear if on.
+            if state.affected.is_some() {
+                Action::ClearAffected
+            } else {
+                state.mode = Mode::AffectedPrompt;
+                state.affected_input.clear();
+                Action::Redraw
+            }
+        }
+        KeyCode::Char('R') => {
+            // Manual refresh of the affected set. Only meaningful when
+            // affected mode is on.
+            if state.affected.is_some() {
+                Action::RefreshAffectedAgain
+            } else {
+                Action::Ignore
+            }
         }
         KeyCode::Tab | KeyCode::Char('f') => {
             state.cycle_status();
@@ -110,8 +140,66 @@ fn handle_browser(state: &mut State, key: KeyEvent) -> Action {
 }
 
 fn handle_running_build(state: &mut State, key: KeyEvent) -> Action {
+    // Pane resize: Ctrl-Up / Ctrl-Down grow / shrink the log pane.
+    // Independent of which pane has focus, since both panes benefit
+    // from the user being able to dial in the split.
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Up => {
+                state.shrink_log_pane();
+                return Action::Redraw;
+            }
+            KeyCode::Down => {
+                state.grow_log_pane();
+                return Action::Redraw;
+            }
+            _ => {}
+        }
+    }
+    // Tab toggles focus between the target list (top) and the log
+    // pane (bottom). Each focus interprets j/k differently.
+    if matches!(key.code, KeyCode::Tab) {
+        state.toggle_focus();
+        return Action::Redraw;
+    }
+    // Log-pane keys when the log has focus: j/k page-scroll the
+    // pane (offset from tail), g/G snap to top/bottom of buffer.
+    if state.focus == Focus::Log {
+        match key.code {
+            KeyCode::Char('k') | KeyCode::Up => {
+                state.log_scroll_up(1);
+                return Action::Redraw;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                state.log_scroll_down(1);
+                return Action::Redraw;
+            }
+            KeyCode::PageUp => {
+                state.log_scroll_up(10);
+                return Action::Redraw;
+            }
+            KeyCode::PageDown => {
+                state.log_scroll_down(10);
+                return Action::Redraw;
+            }
+            KeyCode::Char('G') => {
+                state.log_scroll_to_top();
+                return Action::Redraw;
+            }
+            KeyCode::Char('g') => {
+                state.log_scroll_to_bottom();
+                return Action::Redraw;
+            }
+            _ => {}
+        }
+    }
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
+        KeyCode::Char('/') => {
+            state.mode = Mode::LogSearch;
+            state.log_search.clear();
+            Action::Redraw
+        }
         // Esc semantics:
         // - In Watching: stop the watch (it has no single build to
         //   cancel; watch.stop ends the whole loop).
@@ -208,6 +296,65 @@ fn handle_tag_picker(state: &mut State, key: KeyEvent) -> Action {
         KeyCode::Char('j') | KeyCode::Down => {
             state.move_tag_cursor(1);
             Action::Redraw
+        }
+        _ => Action::Ignore,
+    }
+}
+
+fn handle_log_search(state: &mut State, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc => {
+            state.log_search.clear();
+            state.mode = Mode::Normal;
+            Action::Redraw
+        }
+        KeyCode::Enter => {
+            state.mode = Mode::Normal;
+            Action::Redraw
+        }
+        KeyCode::Backspace => {
+            state.log_search.pop();
+            Action::Redraw
+        }
+        KeyCode::Char(c) => {
+            if !c.is_control() && !key.modifiers.contains(KeyModifiers::CONTROL) {
+                state.log_search.push(c);
+                Action::Redraw
+            } else {
+                Action::Ignore
+            }
+        }
+        _ => Action::Ignore,
+    }
+}
+
+fn handle_affected_prompt(state: &mut State, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc => {
+            state.mode = Mode::Normal;
+            state.affected_input.clear();
+            Action::Redraw
+        }
+        KeyCode::Enter => {
+            let base = state.affected_input.trim().to_string();
+            state.mode = Mode::Normal;
+            if base.is_empty() {
+                Action::Redraw
+            } else {
+                Action::RefreshAffected { base }
+            }
+        }
+        KeyCode::Backspace => {
+            state.affected_input.pop();
+            Action::Redraw
+        }
+        KeyCode::Char(c) => {
+            if !c.is_control() && !key.modifiers.contains(KeyModifiers::CONTROL) {
+                state.affected_input.push(c);
+                Action::Redraw
+            } else {
+                Action::Ignore
+            }
         }
         _ => Action::Ignore,
     }
@@ -418,5 +565,154 @@ mod tests {
         s.last_error = Some("oops".into());
         handle(&mut s, key(KeyCode::Char('j')));
         assert!(s.last_error.is_none());
+    }
+
+    #[test]
+    fn a_opens_affected_prompt() {
+        let mut s = browser();
+        assert_eq!(handle(&mut s, key(KeyCode::Char('A'))), Action::Redraw);
+        assert_eq!(s.mode, Mode::AffectedPrompt);
+    }
+
+    #[test]
+    fn affected_prompt_enter_submits_base() {
+        let mut s = browser();
+        s.mode = Mode::AffectedPrompt;
+        s.affected_input = "main".into();
+        let action = handle(&mut s, key(KeyCode::Enter));
+        match action {
+            Action::RefreshAffected { base } => assert_eq!(base, "main"),
+            other => panic!("expected RefreshAffected, got {other:?}"),
+        }
+        assert_eq!(s.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn affected_prompt_esc_cancels() {
+        let mut s = browser();
+        s.mode = Mode::AffectedPrompt;
+        s.affected_input = "main".into();
+        handle(&mut s, key(KeyCode::Esc));
+        assert_eq!(s.mode, Mode::Normal);
+        assert!(s.affected_input.is_empty());
+    }
+
+    #[test]
+    fn a_clears_when_affected_active() {
+        use giant_core_aliases::{AffectedState as A};
+        let mut s = browser();
+        s.affected = Some(A {
+            base: "main".into(),
+            ids: Default::default(),
+            refreshing: false,
+            last_error: None,
+            last_refresh: None,
+        });
+        assert_eq!(handle(&mut s, key(KeyCode::Char('A'))), Action::ClearAffected);
+    }
+
+    #[test]
+    fn tab_in_building_toggles_focus() {
+        let mut s = State {
+            screen: Screen::Building,
+            ..State::default()
+        };
+        assert_eq!(s.focus, Focus::Catalog);
+        handle(&mut s, key(KeyCode::Tab));
+        assert_eq!(s.focus, Focus::Log);
+        handle(&mut s, key(KeyCode::Tab));
+        assert_eq!(s.focus, Focus::Catalog);
+    }
+
+    #[test]
+    fn j_in_log_focus_scrolls_log() {
+        let mut s = State {
+            screen: Screen::Building,
+            focus: Focus::Log,
+            ..State::default()
+        };
+        s.log_scroll_back = 5;
+        handle(&mut s, key(KeyCode::Char('j')));
+        assert_eq!(s.log_scroll_back, 4);
+        handle(&mut s, key(KeyCode::Char('k')));
+        handle(&mut s, key(KeyCode::Char('k')));
+        assert_eq!(s.log_scroll_back, 6);
+    }
+
+    #[test]
+    fn ctrl_down_grows_log_pane() {
+        let mut s = State {
+            screen: Screen::Building,
+            ..State::default()
+        };
+        handle(&mut s, ctrl_arrow(KeyCode::Down));
+        let after = s.log_pane_rows.unwrap_or(8);
+        handle(&mut s, ctrl_arrow(KeyCode::Down));
+        assert!(s.log_pane_rows.unwrap() > after);
+    }
+
+    fn ctrl_arrow(c: KeyCode) -> KeyEvent {
+        KeyEvent::new(c, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn slash_in_building_enters_log_search() {
+        let mut s = State {
+            screen: Screen::Building,
+            ..State::default()
+        };
+        assert_eq!(handle(&mut s, key(KeyCode::Char('/'))), Action::Redraw);
+        assert_eq!(s.mode, Mode::LogSearch);
+    }
+
+    #[test]
+    fn log_search_typing_appends_then_enter_commits() {
+        let mut s = State {
+            screen: Screen::Building,
+            mode: Mode::LogSearch,
+            ..State::default()
+        };
+        handle(&mut s, key(KeyCode::Char('e')));
+        handle(&mut s, key(KeyCode::Char('r')));
+        handle(&mut s, key(KeyCode::Char('r')));
+        assert_eq!(s.log_search, "err");
+        handle(&mut s, key(KeyCode::Enter));
+        assert_eq!(s.mode, Mode::Normal);
+        assert_eq!(s.log_search, "err"); // persists after commit
+    }
+
+    #[test]
+    fn log_search_esc_clears() {
+        let mut s = State {
+            screen: Screen::Building,
+            mode: Mode::LogSearch,
+            log_search: "warn".into(),
+            ..State::default()
+        };
+        handle(&mut s, key(KeyCode::Esc));
+        assert_eq!(s.mode, Mode::Normal);
+        assert!(s.log_search.is_empty());
+    }
+
+    #[test]
+    fn r_triggers_refresh_when_affected_active() {
+        use giant_core_aliases::{AffectedState as A};
+        let mut s = browser();
+        s.affected = Some(A {
+            base: "main".into(),
+            ids: Default::default(),
+            refreshing: false,
+            last_error: None,
+            last_refresh: None,
+        });
+        assert_eq!(
+            handle(&mut s, key(KeyCode::Char('R'))),
+            Action::RefreshAffectedAgain
+        );
+    }
+
+    /// Avoid the long crate-internal path in the tests above.
+    mod giant_core_aliases {
+        pub use crate::state::AffectedState;
     }
 }

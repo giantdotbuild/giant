@@ -44,21 +44,33 @@ const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
     disable_help_subcommand = true
 )]
 struct Cli {
+    /// Path to giant.yaml / giant.json. Defaults to the `GIANT_CONFIG`
+    /// env var, then walking up from cwd. Passed through to the
+    /// `giant session` subprocess the TUI drives.
+    #[arg(long, value_name = "PATH")]
+    config: Option<std::path::PathBuf>,
+
     /// Selection patterns to pre-seed the search filter. Empty = the
     /// browser opens on the full catalog.
     #[arg(value_name = "PATTERN")]
     patterns: Vec<String>,
 }
 
+const GIANT_CONFIG_ENV: &str = "GIANT_CONFIG";
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
+    let config = cli
+        .config
+        .clone()
+        .or_else(|| std::env::var_os(GIANT_CONFIG_ENV).map(std::path::PathBuf::from));
 
     if !std::io::stdout().is_terminal() {
-        return passthrough(&cli.patterns).await;
+        return passthrough(&cli.patterns, config.as_deref()).await;
     }
 
-    match run(&cli.patterns).await {
+    match run(&cli.patterns, config.as_deref()).await {
         Ok(code) => ExitCode::from(code as u8),
         Err(e) => {
             let _ = restore_terminal();
@@ -68,11 +80,16 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(initial_patterns: &[String]) -> Result<i32> {
+async fn run(initial_patterns: &[String], config: Option<&std::path::Path>) -> Result<i32> {
     // ---- Spawn the engine session ---------------------------------
     let bin = std::env::var_os(GIANT_BIN_ENV).unwrap_or_else(|| OsString::from("giant"));
-    let mut child = TokioCommand::new(&bin)
-        .args(["session", "--events", "ndjson"])
+    let mut cmd = TokioCommand::new(&bin);
+    // `--config` is a global giant flag and goes BEFORE the subcommand.
+    if let Some(p) = config {
+        cmd.arg("--config").arg(p);
+    }
+    cmd.args(["session", "--events", "ndjson"]);
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -169,6 +186,46 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
                             }).await;
                             state.return_to_browser();
                         }
+                        Action::RefreshAffected { base } => {
+                            // Seed an empty refreshing state so the
+                            // badge updates immediately, then ask the
+                            // engine to take over: it computes the
+                            // initial set and keeps a watcher pinned,
+                            // emitting affected.changed when the set
+                            // changes. No subprocess, no own watcher.
+                            state.affected = Some(giant_tui::state::AffectedState {
+                                base: base.clone(),
+                                ids: Default::default(),
+                                refreshing: true,
+                                last_error: None,
+                                last_refresh: None,
+                            });
+                            let _ = cmd_tx.send(Command::AffectedSubscribe {
+                                command_id: Some(format!("c_{}", new_command_seq())),
+                                base,
+                            }).await;
+                        }
+                        Action::RefreshAffectedAgain => {
+                            // Re-subscribing with the same base is the
+                            // engine's "force-refresh" primitive: the
+                            // old subscription is dropped and a new
+                            // computation kicks off immediately.
+                            if let Some(aff) = state.affected.as_mut() {
+                                aff.refreshing = true;
+                                aff.last_error = None;
+                                let base = aff.base.clone();
+                                let _ = cmd_tx.send(Command::AffectedSubscribe {
+                                    command_id: Some(format!("c_{}", new_command_seq())),
+                                    base,
+                                }).await;
+                            }
+                        }
+                        Action::ClearAffected => {
+                            state.affected = None;
+                            let _ = cmd_tx.send(Command::AffectedUnsubscribe {
+                                command_id: Some(format!("c_{}", new_command_seq())),
+                            }).await;
+                        }
                         Action::Ignore => {}
                     }
                 }
@@ -236,13 +293,13 @@ async fn run(initial_patterns: &[String]) -> Result<i32> {
     Ok(state.exit_code())
 }
 
-async fn passthrough(patterns: &[String]) -> ExitCode {
+async fn passthrough(patterns: &[String], config: Option<&std::path::Path>) -> ExitCode {
     let bin = std::env::var_os(GIANT_BIN_ENV).unwrap_or_else(|| "giant".into());
-    let status = TokioCommand::new(&bin)
-        .arg("build")
-        .args(patterns)
-        .status()
-        .await;
+    let mut cmd = TokioCommand::new(&bin);
+    if let Some(p) = config {
+        cmd.arg("--config").arg(p);
+    }
+    let status = cmd.arg("build").args(patterns).status().await;
     match status {
         Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
         Err(e) => {
@@ -314,3 +371,4 @@ fn new_command_seq() -> u64 {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     SEQ.fetch_add(1, Ordering::Relaxed)
 }
+

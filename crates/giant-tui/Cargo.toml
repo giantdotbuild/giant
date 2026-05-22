@@ -16,7 +16,9 @@ giant = { path = "../giant" }
 
 # Async runtime - single-process tokio app.
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "fs", "signal", "time", "sync"] }
+tokio-util = "0.7"
 futures-util = "0.3"
+tracing = "0.1"
 
 # TUI framework + terminal backend.
 ratatui = "0.29"
