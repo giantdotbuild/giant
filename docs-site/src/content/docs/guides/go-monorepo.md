@@ -34,18 +34,15 @@ cache:
 
 include:
   - id: "discover:go"
-    inputs:
-      - "go.mod"
-      - "go.sum"
-      - "tools/discover-go.sh"
-      - kind: structural
-        files: "**/*.go"
-        lines: ["package ", "import ", "//go:embed "]
-    outputs: [".giant/d/go.json"]
     command: "tools/discover-go.sh > .giant/d/go.json"
+    outputs: [".giant/d/go.json"]
+    scope: ["."]
 ```
 
 That's the entire static config. Discovery produces everything else.
+Note there's no `inputs:` on the `include:` entry - discoveries are
+invalidated by the `reads` manifest they emit (below), not by
+declared globs.
 
 ## `tools/discover-go.sh`
 
@@ -55,7 +52,9 @@ set -euo pipefail
 
 mkdir -p .giant/d
 
-go list -json ./... | jq -s '
+# Collect the per-package Go file paths and dirs as we go so the
+# `reads` manifest can list them precisely.
+go list -json ./... | jq -s --arg cwd "$PWD" '
   def to_target:
     {
       id: ("go:" + (if .Name == "main" then "bin:" + (.ImportPath | sub(".*/"; "")) else "pkg:" + .ImportPath end)),
@@ -68,9 +67,32 @@ go list -json ./... | jq -s '
         end
       )
     };
-  { targets: map(to_target) }
+
+  ({
+     targets: map(to_target),
+     reads: {
+       files: (
+         [{path: "go.mod"}, {path: "go.sum"}]
+         + (map(
+             (((.GoFiles // []) + (.TestGoFiles // []) + (.CgoFiles // []))
+              | map((.Dir | sub("^" + $cwd + "/?"; "")) + "/" + .))
+            )
+           | add // []
+           | map({path: ., lines: ["package ", "import ", "//go:embed "]}))
+       ),
+       dirs: (map(.Dir | sub("^" + $cwd + "/?"; "")) | unique
+              | map({path: ., filter: "*.go"}))
+     }
+   })
 '
 ```
+
+The `reads` manifest is what gives the discovery its caching
+behavior: `go.mod`, `go.sum`, and every `.go` file's `package` /
+`import` / `//go:embed` lines feed the hash. Edit a function body in
+any of those `.go` files and the recorded hash doesn't move →
+discovery doesn't re-run. Add a new package directory → the parent's
+directory listing changes → discovery does re-run.
 
 A real-world script handles more cases (test packages, build tags,
 cgo); this is the minimum to see the shape.
