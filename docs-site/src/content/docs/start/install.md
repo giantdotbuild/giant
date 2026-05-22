@@ -51,6 +51,34 @@ cargo install --path . --features remote
 
 Requires Rust 1.95 or newer.
 
+## Nix flake
+
+The repo ships a flake exposing every first-party binary as its own
+package, plus a `giant-suite` meta-package that bundles all of them:
+
+```bash
+# Everything (giant + giant-task + giant-tui)
+nix profile install github:johnae/giant
+
+# Or pick individual binaries
+nix profile install github:johnae/giant#giant
+nix profile install github:johnae/giant#giant-tui
+
+# Run without installing
+nix run github:johnae/giant -- build
+nix run github:johnae/giant#giant-tui
+
+# Build locally and inspect the result
+git clone https://github.com/johnae/giant
+cd giant
+nix build .#giant-suite
+./result/bin/giant --version
+```
+
+The flake doesn't replace `devenv.nix` - devenv stays the dev shell
+(`devenv shell` for the full toolchain). The flake's `devShells.default`
+is a thin fallback for people who don't run devenv.
+
 ## Verify the install
 
 ```console
