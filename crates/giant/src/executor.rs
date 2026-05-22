@@ -918,13 +918,11 @@ fn expand_globs_batched(
     cache: &LocalCache,
 ) -> Result<Vec<PathBuf>, std::io::Error> {
     let mut out: Vec<PathBuf> = Vec::new();
-    let mut recursive: Vec<(String, glob::Pattern)> = Vec::new();
+    let mut recursive: Vec<String> = Vec::new();
 
     for &g in globs {
         if g.contains("**") {
-            let pat = glob::Pattern::new(g)
-                .map_err(|e| std::io::Error::other(format!("bad glob {g:?}: {e}")))?;
-            recursive.push((g.to_string(), pat));
+            recursive.push(g.to_string());
         } else if has_glob_metachars(g) {
             // Shallow glob - let the glob crate handle it; it'll only
             // read the directories actually referenced by the pattern.
@@ -949,30 +947,53 @@ fn expand_globs_batched(
         return Ok(out);
     }
 
-    // Shared parallel walk for all recursive patterns. `ignore::WalkParallel`
-    // distributes directory entries across a worker pool, with each match
-    // pushed to a shared `Vec` behind a mutex. Mutex contention is minor -
-    // only files matching the glob list actually contend.
+    // Compile all recursive patterns into a single GlobSet. Internally
+    // this builds Aho-Corasick literal prefilters across all patterns,
+    // so matching a path against N globs costs roughly the same as
+    // matching one. With per-pattern `glob::Pattern::matches_path` in a
+    // loop, cost grew O(N) per file visited.
+    let mut gs = globset::GlobSetBuilder::new();
+    for g in &recursive {
+        let glob = globset::Glob::new(g)
+            .map_err(|e| std::io::Error::other(format!("bad glob {g:?}: {e}")))?;
+        gs.add(glob);
+    }
+    let glob_set = Arc::new(
+        gs.build()
+            .map_err(|e| std::io::Error::other(format!("glob set build: {e}")))?,
+    );
+
+    // Shared parallel walk for all recursive patterns.
     //
-    // We turn off standard filters (.gitignore / .ignore / hidden) so the
-    // semantics match `glob::glob` exactly: declared inputs are matched
-    // against the literal filesystem, not against what git tracks.
+    // Standard filters off so the semantics match `glob::glob` exactly:
+    // declared inputs are matched against the literal filesystem, not
+    // against what git tracks.
     let cache_dir = cache.root().as_path().to_path_buf();
-    let skip_names: &[&str] = &[".git", ".giant", ".direnv", ".devenv"];
+
+    // Dot-prefixed VCS/tool dirs and common build outputs: walking
+    // them is pure waste for input matching, and excluding them gives
+    // a substantial speedup on real-world monorepos. If a user really
+    // does have inputs underneath one of these, they'd be in the
+    // gitignored territory and using giant from there is unusual; we
+    // can revisit if a real case shows up.
+    let skip_names: &[&str] = &[
+        ".git",
+        ".giant",
+        ".direnv",
+        ".devenv",
+        "node_modules",
+        "target",
+    ];
 
     let matches: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let workspace_root_owned = workspace_root.to_path_buf();
-    let recursive = Arc::new(recursive);
 
     ignore::WalkBuilder::new(workspace_root)
         .standard_filters(false)
         .hidden(false)
         .follow_links(false)
         .filter_entry(move |entry| {
-            // Don't descend into noise dirs (matches old prototype's
-            // sequential prune). cache root identified by full path
-            // equality; the others by file_name.
             let path = entry.path();
             if path == cache_dir.as_path() {
                 return false;
@@ -988,7 +1009,7 @@ fn expand_globs_batched(
         .run(|| {
             let matches = Arc::clone(&matches);
             let workspace_root = workspace_root_owned.clone();
-            let recursive = Arc::clone(&recursive);
+            let glob_set = Arc::clone(&glob_set);
             Box::new(move |result| {
                 let Ok(entry) = result else {
                     return ignore::WalkState::Continue;
@@ -998,7 +1019,7 @@ fn expand_globs_batched(
                 }
                 let path = entry.path();
                 let rel = path.strip_prefix(&workspace_root).unwrap_or(path);
-                if recursive.iter().any(|(_, pat)| pat.matches_path(rel)) {
+                if glob_set.is_match(rel) {
                     matches.lock().unwrap().push(path.to_path_buf());
                 }
                 ignore::WalkState::Continue
