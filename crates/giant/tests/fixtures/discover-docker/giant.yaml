@@ -5,8 +5,6 @@ cache:
 
 include:
   - id: "discover:docker"
-    inputs:
-      - "tools/discover-docker.sh"
-      - "**/Dockerfile"
     outputs: [".giant/d/docker.json"]
     command: "tools/discover-docker.sh > .giant/d/docker.json"
+    scope: [".", "tools/"]

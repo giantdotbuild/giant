@@ -306,6 +306,7 @@ mod tests {
             test: false,
             tags: Default::default(),
             label: None,
+            scope: Vec::new(),
             inferred_deps: Default::default(),
         }
     }
@@ -384,6 +385,7 @@ mod tests {
             test: false,
             tags: Default::default(),
             label: None,
+            scope: Vec::new(),
             inferred_deps: Default::default(),
         }]);
         let aff = affected_targets(&g, &[Path::new("internal/util.go")]);

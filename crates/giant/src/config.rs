@@ -220,6 +220,33 @@ impl Config {
             )));
         }
 
+        // Discovery entries are invalidated by the recorded-reads manifest
+        // in their output, not by declared inputs (ADR-0013).
+        for inc in &self.include {
+            if !inc.inputs.is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "discovery entry '{}' declares `inputs:`; \
+                     discovery targets are invalidated by the `reads` \
+                     manifest in their output, not by declared inputs. \
+                     Remove `inputs:` and (optionally) add `scope:` to \
+                     bound where the discovery may read.",
+                    inc.id
+                )));
+            }
+        }
+
+        // `scope:` is discovery-only; reject on regular targets so a typo
+        // isn't silently ignored.
+        for t in &self.targets {
+            if !t.scope.is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "target '{}' declares `scope:`; that field is only \
+                     valid on `include:` (discovery) entries.",
+                    t.id
+                )));
+            }
+        }
+
         // target ID uniqueness across `include` and `targets`
         let mut seen = HashSet::new();
         for t in self.include.iter().chain(self.targets.iter()) {
@@ -452,5 +479,80 @@ workspace: { name: p }
         let err = Config::load(f.path()).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("schema_version 999"), "got: {msg}");
+    }
+
+    #[test]
+    fn reject_inputs_on_include_entry() {
+        let f = write_yaml(
+            r#"
+workspace: { name: p }
+include:
+  - id: "discover:go"
+    inputs: ["**/*.go", "go.mod"]
+    outputs: [".giant/d/go.json"]
+    command: "tools/discover-go.sh"
+"#,
+        );
+        let err = Config::load(f.path()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("discover:go") && msg.contains("`inputs:`"),
+            "expected migration message naming the entry and `inputs:`, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn reject_scope_on_regular_target() {
+        let f = write_yaml(
+            r#"
+workspace: { name: p }
+targets:
+  - id: "rust:build"
+    inputs: ["src/**/*.rs"]
+    outputs: ["bin/app"]
+    command: "cargo build"
+    scope: ["src/"]
+"#,
+        );
+        let err = Config::load(f.path()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("rust:build") && msg.contains("scope"),
+            "expected error naming the target and scope, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn accept_include_with_scope_and_no_inputs() {
+        let f = write_yaml(
+            r#"
+workspace: { name: p }
+include:
+  - id: "discover:go"
+    outputs: [".giant/d/go.json"]
+    command: "tools/discover-go.sh > .giant/d/go.json"
+    scope: ["pkg/", "cmd/"]
+"#,
+        );
+        let cfg = Config::load(f.path()).unwrap();
+        assert_eq!(cfg.include.len(), 1);
+        assert_eq!(cfg.include[0].scope.len(), 2);
+        assert!(cfg.include[0].inputs.is_empty());
+    }
+
+    #[test]
+    fn accept_include_without_scope() {
+        let f = write_yaml(
+            r#"
+workspace: { name: p }
+include:
+  - id: "discover:protos"
+    outputs: [".giant/d/protos.json"]
+    command: "tools/discover-protos.sh > .giant/d/protos.json"
+"#,
+        );
+        let cfg = Config::load(f.path()).unwrap();
+        assert_eq!(cfg.include.len(), 1);
+        assert!(cfg.include[0].scope.is_empty());
     }
 }

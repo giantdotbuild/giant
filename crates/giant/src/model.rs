@@ -141,6 +141,7 @@ impl From<String> for TargetId {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetSpec {
     pub id: TargetId,
+    #[serde(default)]
     pub inputs: Vec<Input>,
     #[serde(default)]
     pub outputs: Vec<OutputPath>,
@@ -165,6 +166,11 @@ pub struct TargetSpec {
     pub tags: HashSet<String>,
     #[serde(default)]
     pub label: Option<String>,
+
+    /// Discovery-only: directory prefixes the entry is permitted to
+    /// read from. Empty on regular targets. See ADR-0013.
+    #[serde(default)]
+    pub scope: Vec<WsRelPath>,
 
     /// Runtime-only: the subset of `deps` populated by output-based
     /// inference. Display metadata for `giant explain`; never serialized.

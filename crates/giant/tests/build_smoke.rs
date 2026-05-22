@@ -452,9 +452,9 @@ cache:
   dir: ./cache
 include:
   - id: "discover:svc"
-    inputs: ["tools/discover.sh"]
     outputs: [".giant/d/svc.json"]
     command: "./tools/discover.sh"
+    scope: ["tools/"]
 targets:
   - id: "downstream"
     inputs: ["svc-hello.txt"]
@@ -527,9 +527,9 @@ cat > .giant/d/wave1.json <<'JSON'
   "include": [
     {
       "id": "discover:wave2",
-      "inputs": ["tools/wave2.sh"],
       "outputs": [".giant/d/wave2.json"],
-      "command": "./tools/wave2.sh"
+      "command": "./tools/wave2.sh",
+      "scope": ["tools/"]
     }
   ]
 }
@@ -580,9 +580,9 @@ cache:
   dir: ./cache
 include:
   - id: "discover:wave1"
-    inputs: ["tools/wave1.sh"]
     outputs: [".giant/d/wave1.json"]
     command: "./tools/wave1.sh"
+    scope: ["tools/"]
 "#,
     )
     .unwrap();
@@ -606,9 +606,7 @@ include:
         "deep:target (from wave-2 discovery) should build; output:\n{s}"
     );
     assert_eq!(
-        std::fs::read_to_string(ws.join("deep.txt"))
-            .unwrap()
-            .trim(),
+        std::fs::read_to_string(ws.join("deep.txt")).unwrap().trim(),
         "from_deep_discovery"
     );
 }
@@ -632,9 +630,9 @@ cat > .giant/d/loop.json <<'JSON'
   "include": [
     {
       "id": "discover:loop",
-      "inputs": ["tools/self-emit.sh"],
       "outputs": [".giant/d/loop.json"],
-      "command": "./tools/self-emit.sh"
+      "command": "./tools/self-emit.sh",
+      "scope": ["tools/"]
     }
   ],
   "targets": [
@@ -670,9 +668,9 @@ cache:
   dir: ./cache
 include:
   - id: "discover:loop"
-    inputs: ["tools/self-emit.sh"]
     outputs: [".giant/d/loop.json"]
     command: "./tools/self-emit.sh"
+    scope: ["tools/"]
 "#,
     )
     .unwrap();
@@ -688,7 +686,10 @@ include:
         String::from_utf8_lossy(&out.stderr),
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(built(&s, "loop:result"), "non-cyclic target should still build; {s}");
+    assert!(
+        built(&s, "loop:result"),
+        "non-cyclic target should still build; {s}"
+    );
 }
 
 #[test]
