@@ -56,6 +56,12 @@ pub struct BuildJob {
     pub workspace_root: AbsPath,
     pub parallelism: usize,
     pub fresh: bool,
+    /// Per-target opt-out of the cache lookup. Populated by the
+    /// discovery bootstrap on sidecar mismatch; `None` everywhere else.
+    /// (We can't `delete_ac` precisely because discoveries with `deps:`
+    /// have a cache key depending on dep output hashes only visible
+    /// inside the executor.)
+    pub force_fresh: Option<Arc<HashSet<TargetId>>>,
     pub events: EventSender,
     pub cancel: CancellationToken,
     pub build_id: String,
@@ -199,6 +205,7 @@ struct TargetCtx {
     cache: LocalCache,
     workspace_root: AbsPath,
     fresh: bool,
+    force_fresh: Option<Arc<HashSet<TargetId>>>,
     events: EventSender,
     cancel: CancellationToken,
     build_id: String,
@@ -290,6 +297,7 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
         cache: job.cache.clone(),
         workspace_root: job.workspace_root.clone(),
         fresh: job.fresh,
+        force_fresh: job.force_fresh.clone(),
         events: job.events.clone(),
         cancel: job.cancel.clone(),
         build_id: job.build_id.clone(),
@@ -492,7 +500,12 @@ async fn dispatch_target(
     //      registry, S3, etc.). The command runs with $GIANT_CACHE_KEY in
     //      env. Exit 0 → ExternalCacheHit, skip the build.
     //   4. run the target's command.
-    let (result, output_hash) = if !ctx.fresh {
+    let bypass_cache = ctx.fresh
+        || ctx
+            .force_fresh
+            .as_ref()
+            .is_some_and(|s| s.contains(&spec.id));
+    let (result, output_hash) = if !bypass_cache {
         if let Some((r, oh)) = try_cache_hit(&ctx, &spec.id, &key).await? {
             (r, Some(oh))
         } else if let Some((r, oh)) = try_remote_hit(&ctx, &spec.id, &key).await? {

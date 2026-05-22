@@ -164,6 +164,10 @@ struct SessionState {
     /// builds in v1 - `build` while watching is rejected, and
     /// `watch.start` while a build is in flight is rejected.
     watch: Option<WatchSession>,
+    /// Active affected subscription, if any. Independent of builds /
+    /// watch - clients (the TUI) keep this alive while filtering by
+    /// affected, and it auto-recomputes on file changes.
+    affected: Option<AffectedSubscription>,
     next_build_seq: u64,
 }
 
@@ -185,6 +189,11 @@ struct WatchSession {
     handle: tokio::task::JoinHandle<()>,
 }
 
+struct AffectedSubscription {
+    cancel: CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+}
+
 impl SessionState {
     fn new(prepared: prep::Prepared, event_tx: EventSender, fresh_default: bool) -> Self {
         let cache_root = prep::resolve_cache_dir(&prepared.config.cache.dir)
@@ -202,6 +211,7 @@ impl SessionState {
             running: None,
             queued: None,
             watch: None,
+            affected: None,
             next_build_seq: 0,
         }
     }
@@ -309,8 +319,49 @@ impl SessionState {
                 )
                 .await;
             }
+            Command::AffectedSubscribe { command_id, base } => {
+                // Replace any existing subscription. A re-subscribe
+                // with the same base is the natural "force-refresh"
+                // primitive - the new task computes immediately.
+                if let Some(prev) = self.affected.take() {
+                    prev.cancel.cancel();
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        prev.handle,
+                    )
+                    .await;
+                }
+                self.start_affected(base);
+                self.ack(command_id, None).await;
+            }
+            Command::AffectedUnsubscribe { command_id } => {
+                if let Some(a) = self.affected.take() {
+                    a.cancel.cancel();
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        a.handle,
+                    )
+                    .await;
+                }
+                self.ack(command_id, None).await;
+            }
         }
         false
+    }
+
+    fn start_affected(&mut self, base: String) {
+        let cancel = CancellationToken::new();
+        let ctx = AffectedCtx {
+            graph: self.graph.clone(),
+            workspace_root: self.workspace_root.clone(),
+            cache_root: self.cache_root.clone(),
+            event_tx: self.event_tx.clone(),
+        };
+        let cancel_for_task = cancel.clone();
+        let handle = tokio::spawn(async move {
+            affected_loop(ctx, base, cancel_for_task).await;
+        });
+        self.affected = Some(AffectedSubscription { cancel, handle });
     }
 
     fn start_watch(&mut self, selection: Vec<TargetId>) {
@@ -363,6 +414,7 @@ impl SessionState {
             workspace_root: self.workspace_root.clone(),
             parallelism: prep::num_cpus_estimate(),
             fresh,
+            force_fresh: None,
             events: self.event_tx.clone(),
             cancel: cancel.clone(),
             build_id: build_id.clone(),
@@ -438,6 +490,10 @@ impl SessionState {
     }
 
     async fn shutdown(&mut self) {
+        if let Some(a) = self.affected.take() {
+            a.cancel.cancel();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), a.handle).await;
+        }
         if let Some(w) = self.watch.take() {
             w.cancel.cancel();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(2), w.handle).await;
@@ -703,6 +759,143 @@ struct CycleArgs<'a> {
     build_id: String,
 }
 
+/// State shared with the affected subscription task. Mirrors
+/// `WatchCtx` - same workspace + cache_root excludes - but without
+/// the executor plumbing since we only compute the set, not build.
+struct AffectedCtx {
+    graph: Arc<BuildGraph>,
+    workspace_root: AbsPath,
+    cache_root: AbsPath,
+    event_tx: EventSender,
+}
+
+/// Long-running task that owns one affected subscription.
+///
+/// 1. Compute the affected set against `base`, emit one
+///    `affected.changed` (or `affected.error` if git fails).
+/// 2. Spin up a file watcher with the same excludes as `watch.start`.
+/// 3. On every debounced batch, recompute and re-emit *only when the
+///    set actually changed* (saves the client's renderer from
+///    spurious redraws).
+async fn affected_loop(ctx: AffectedCtx, base: String, cancel: CancellationToken) {
+    let AffectedCtx {
+        graph,
+        workspace_root,
+        cache_root,
+        event_tx,
+    } = ctx;
+
+    let mut last: Option<Vec<TargetId>> = match compute_affected(&graph, &workspace_root, &base) {
+        Ok(ids) => {
+            let _ = event_tx
+                .send(Event::AffectedChanged {
+                    base: base.clone(),
+                    target_ids: ids.clone(),
+                })
+                .await;
+            Some(ids)
+        }
+        Err(e) => {
+            let _ = event_tx
+                .send(Event::AffectedError {
+                    base: base.clone(),
+                    message: e,
+                })
+                .await;
+            None
+        }
+    };
+
+    // Same exclusions as watch_loop - declared outputs, .git, .giant,
+    // cache root - so the engine's own writes don't loop the watcher.
+    let mut excludes: Vec<std::path::PathBuf> = vec![
+        workspace_root.as_path().join(".git"),
+        workspace_root.as_path().join(".giant"),
+        cache_root.as_path().to_path_buf(),
+    ];
+    for (_, spec) in graph.iter() {
+        for o in &spec.outputs {
+            excludes.push(workspace_root.as_path().join(o.as_path()));
+        }
+    }
+    let (_w_handle, mut rx) = match crate::watcher::spawn(workspace_root.as_path(), excludes) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = event_tx
+                .send(Event::AffectedError {
+                    base: base.clone(),
+                    message: format!("file watcher failed: {e}"),
+                })
+                .await;
+            // Wait for cancellation rather than busy-looping. A
+            // missing watcher means no refreshes; the snapshot above
+            // is the user's only datapoint until they re-subscribe.
+            cancel.cancelled().await;
+            return;
+        }
+    };
+
+    let mut debouncer = super::watch::Debouncer::new(
+        std::time::Duration::from_millis(200),
+        std::time::Duration::from_millis(800),
+    );
+
+    loop {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let batch = match debouncer.next_batch(&mut rx, &cancel).await {
+            Some(b) if !b.is_empty() => b,
+            Some(_) => continue,
+            None => break,
+        };
+        // Drop the batch contents - we recompute the *whole* set
+        // from git on each tick. The batch is just our trigger.
+        drop(batch);
+
+        match compute_affected(&graph, &workspace_root, &base) {
+            Ok(ids) => {
+                if last.as_ref() != Some(&ids) {
+                    let _ = event_tx
+                        .send(Event::AffectedChanged {
+                            base: base.clone(),
+                            target_ids: ids.clone(),
+                        })
+                        .await;
+                    last = Some(ids);
+                }
+            }
+            Err(e) => {
+                let _ = event_tx
+                    .send(Event::AffectedError {
+                        base: base.clone(),
+                        message: e,
+                    })
+                    .await;
+                last = None;
+            }
+        }
+    }
+}
+
+/// Compute "affected since <base>" in-process. Mirrors
+/// `cli::affected::execute` minus the I/O - git diff for changed
+/// paths, then the graph intersection. Returns user-facing error
+/// strings (the session emits them as `affected.error.message`).
+fn compute_affected(
+    graph: &BuildGraph,
+    workspace_root: &AbsPath,
+    base: &str,
+) -> std::result::Result<Vec<TargetId>, String> {
+    let changed = crate::git::affected_files_since(workspace_root.as_path(), base)
+        .map_err(|e| format!("git diff against {base}: {e}"))?;
+    let changed_refs: Vec<&std::path::Path> = changed.iter().map(|p| p.as_path()).collect();
+    let affected = crate::selection::affected_targets(graph, &changed_refs);
+    let mut out: Vec<TargetId> = affected.into_iter().collect();
+    out.sort();
+    Ok(out)
+}
+
 async fn run_watch_cycle(a: CycleArgs<'_>) {
     let job = BuildJob {
         graph: a.graph.clone(),
@@ -711,6 +904,7 @@ async fn run_watch_cycle(a: CycleArgs<'_>) {
         workspace_root: a.workspace_root.clone(),
         parallelism: prep::num_cpus_estimate(),
         fresh: a.fresh,
+        force_fresh: None,
         events: a.event_tx,
         cancel: a.cancel,
         build_id: a.build_id,

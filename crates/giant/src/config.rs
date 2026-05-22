@@ -46,11 +46,42 @@ pub struct Config {
     pub cache: CacheConfig,
 
     #[serde(default)]
+    pub state: StateConfig,
+
+    #[serde(default)]
     pub discovery: DiscoveryConfig,
 
     #[cfg(feature = "remote")]
     #[serde(default)]
     pub remote: RemoteConfig,
+}
+
+/// Workspace-local engine state. Distinct from `cache.dir` (which can
+/// be shared / remote) - state is the small set of files giant writes
+/// next to the workspace so concurrent runs and other tools can see
+/// them: discovery sidecars, the fsmonitor token, build logs.
+///
+/// Defaults to `.giant/` at the workspace root. Override when sharing
+/// a workspace with another tool that already owns `.giant/` (e.g.
+/// giant 1 coexistence) or when state files want a non-gitignored
+/// location.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateConfig {
+    #[serde(default = "default_state_dir")]
+    pub dir: String,
+}
+
+impl Default for StateConfig {
+    fn default() -> Self {
+        Self {
+            dir: default_state_dir(),
+        }
+    }
+}
+
+fn default_state_dir() -> String {
+    ".giant".into()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -235,20 +266,12 @@ impl Config {
             )));
         }
 
-        // Discovery entries are invalidated by the recorded-reads manifest
-        // in their output, not by declared inputs (ADR-0013).
-        for inc in &self.include {
-            if !inc.inputs.is_empty() {
-                return Err(ConfigError::Validation(format!(
-                    "discovery entry '{}' declares `inputs:`; \
-                     discovery targets are invalidated by the `reads` \
-                     manifest in their output, not by declared inputs. \
-                     Remove `inputs:` and (optionally) add `scope:` to \
-                     bound where the discovery may read.",
-                    inc.id
-                )));
-            }
-        }
+        // Discovery entries traditionally relied on the cooperative
+        // `reads` manifest. As of ADR-0013-v2 they may *also* declare
+        // `inputs:` - explicit content-hashed files that feed the
+        // cache key and are policed by the warm-path verifier even
+        // when the discovery script doesn't report them. The two
+        // mechanisms compose; no validation needed here.
 
         // `scope:` is discovery-only; reject on regular targets so a typo
         // isn't silently ignored.
@@ -496,24 +519,25 @@ workspace: { name: p }
         assert!(msg.contains("schema_version 999"), "got: {msg}");
     }
 
+    /// Discovery entries may declare `inputs:` - these flow into the
+    /// discovery cache key (content-hashed) alongside the argv-walk
+    /// detection. The opposite of the v1 behavior, which rejected
+    /// the field outright (see ADR-0013-v2).
     #[test]
-    fn reject_inputs_on_include_entry() {
+    fn accept_inputs_on_include_entry() {
         let f = write_yaml(
             r#"
 workspace: { name: p }
 include:
   - id: "discover:go"
-    inputs: ["**/*.go", "go.mod"]
+    inputs: ["tools/lib/**/*.sh"]
     outputs: [".giant/d/go.json"]
     command: "tools/discover-go.sh"
 "#,
         );
-        let err = Config::load(f.path()).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("discover:go") && msg.contains("`inputs:`"),
-            "expected migration message naming the entry and `inputs:`, got: {msg}"
-        );
+        let cfg = Config::load(f.path()).expect("inputs on discovery should load");
+        assert_eq!(cfg.include.len(), 1);
+        assert_eq!(cfg.include[0].id.as_str(), "discover:go");
     }
 
     #[test]

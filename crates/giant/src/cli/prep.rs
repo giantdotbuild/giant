@@ -69,8 +69,28 @@ pub async fn prepare(
     // `MAX_CHAIN_GENERATIONS`, we abort with the full chain so the
     // user sees which discoveries kept emitting new descendants. A
     // dedup `seen` set silently drops already-known targets.
+    let state_dir = workspace_abs.as_path().join(&config.state.dir);
+
     if !config.include.is_empty() {
         const MAX_CHAIN_GENERATIONS: u32 = 8;
+
+        // fsmonitor: query once, share across every discovery in this
+        // bootstrap. On any query failure, degrade to fresh-instance so
+        // the verifier still does a full check.
+        let mut fsmonitor_client =
+            crate::fsmonitor::FsmonitorClient::open(workspace_abs.as_path(), &state_dir)
+                .await
+                .map_err(|e| anyhow::anyhow!("fsmonitor open: {e}"))?;
+        let changeset = match fsmonitor_client.as_mut() {
+            Some(c) => match c.query().await {
+                Ok(cs) => Some(cs),
+                Err(e) => {
+                    tracing::warn!(error = %e, "fsmonitor query failed; degrading to fresh-instance");
+                    Some(crate::fsmonitor::ChangeSet::FreshInstance)
+                }
+            },
+            None => None,
+        };
 
         let mut pending: Vec<TargetId> = config.include.iter().map(|t| t.id.clone()).collect();
         let mut seen: std::collections::HashSet<TargetId> = pending.iter().cloned().collect();
@@ -105,10 +125,14 @@ pub async fn prepare(
                     to_dispatch.push(id.clone());
                     continue;
                 }
-                let key = discovery::discovery_cache_key(&spec);
-                let hit = match discovery::read_sidecar(workspace_abs.as_path(), key) {
+                let key = discovery::discovery_cache_key(&spec, &workspace_abs);
+                let hit = match discovery::read_sidecar(&state_dir, key) {
                     Ok(Some(sidecar)) => {
-                        match discovery::verify_reads(&sidecar.reads, workspace_abs.as_path())? {
+                        match discovery::verify_reads_with_fsmonitor(
+                            &sidecar.reads,
+                            workspace_abs.as_path(),
+                            changeset.as_ref(),
+                        )? {
                             discovery::VerifyOutcome::Match => Some(sidecar),
                             discovery::VerifyOutcome::Mismatch { .. } => None,
                         }
@@ -132,26 +156,16 @@ pub async fn prepare(
                     tracing::debug!(target = %id, "discovery restored from sidecar");
                     sidecar_hits.push((id.clone(), sidecar));
                 } else {
-                    // Invalidate the regular AC entry so the bootstrap
-                    // actually re-runs the command instead of hitting
-                    // a stale cache entry. The regular key for a
-                    // discovery is computed by the executor via
-                    // compute_cache_key_with_breakdown; we mirror the
-                    // computation here. Empty file_inputs makes this
-                    // cheap (no globbing or hashing).
-                    let (regular_key, _bd) = crate::executor::compute_cache_key_with_breakdown(
-                        &spec,
-                        &workspace_abs,
-                        &cache,
-                        std::collections::BTreeMap::new(),
-                    )
-                    .await?;
-                    cache.delete_ac(&regular_key).await?;
+                    // Sidecar missing/mismatched → flag the target on
+                    // BuildJob.force_fresh; the executor bypasses the
+                    // AC for the listed IDs. See BuildJob::force_fresh
+                    // docs for why we can't delete_ac directly.
                     to_dispatch.push(id.clone());
                 }
             }
-
             if !to_dispatch.is_empty() {
+                let force_fresh: Arc<std::collections::HashSet<TargetId>> =
+                    Arc::new(to_dispatch.iter().cloned().collect());
                 let bootstrap_job = BuildJob {
                     graph: Arc::new(graph.clone()),
                     selection: to_dispatch.clone(),
@@ -159,6 +173,7 @@ pub async fn prepare(
                     workspace_root: workspace_abs.clone(),
                     parallelism,
                     fresh,
+                    force_fresh: Some(force_fresh),
                     events: events.clone(),
                     cancel: cancel.clone(),
                     build_id: format!("bootstrap_r{round}_{}", short_random()),
@@ -232,7 +247,7 @@ pub async fn prepare(
                 // mode, error in strict mode (discovery.strict).
                 match &fragment.reads {
                     Some(reads) => {
-                        let key = discovery::discovery_cache_key(&spec);
+                        let key = discovery::discovery_cache_key(&spec, &workspace_abs);
                         let recorded =
                             discovery::materialize_reads(reads, workspace_abs.as_path())?;
                         let sidecar = discovery::DiscoverySidecar::new(
@@ -241,7 +256,7 @@ pub async fn prepare(
                             fragment.include.clone(),
                             recorded,
                         );
-                        discovery::write_sidecar(workspace_abs.as_path(), &sidecar)?;
+                        discovery::write_sidecar(&state_dir, &sidecar)?;
                     }
                     None => {
                         if config.discovery.strict {
@@ -281,6 +296,12 @@ pub async fn prepare(
 
             pending = next_pending;
             round += 1;
+        }
+
+        if let Some(client) = fsmonitor_client.as_ref()
+            && let Err(e) = client.persist_token().await
+        {
+            tracing::warn!(error = %e, "fsmonitor token persist failed");
         }
     }
 

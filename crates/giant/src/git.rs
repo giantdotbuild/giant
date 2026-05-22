@@ -36,12 +36,12 @@ pub struct StatusFast {
     pub untracked: Vec<PathBuf>,
 }
 
-fn open(workspace_root: &Path) -> Result<gix::Repository, GitError> {
+/// Discover the git repository containing `workspace_root`. Distinguishes
+/// "not a repo" from real errors so callers can fall back gracefully.
+pub fn open(workspace_root: &Path) -> Result<gix::Repository, GitError> {
     match gix::discover(workspace_root) {
         Ok(repo) => Ok(repo),
         Err(e) => {
-            // Distinguish "not a repo" from real errors so callers can fall
-            // back gracefully.
             let msg = e.to_string();
             if msg.contains("not a git repository") || msg.contains("does not exist") {
                 Err(GitError::NotARepo(workspace_root.to_path_buf()))

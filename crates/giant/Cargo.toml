@@ -63,6 +63,7 @@ dirs = "6"
 notify = "8"
 tempfile = "3"
 shell-escape = "0.1"
+shell-words = "1"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }

@@ -139,7 +139,7 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
     let cache_root_abs = prep::resolve_cache_dir(&prepared.config.cache.dir)?;
     let mut excludes: Vec<PathBuf> = vec![
         workspace_root.as_path().join(".git"),
-        workspace_root.as_path().join(".giant"),
+        workspace_root.as_path().join(&prepared.config.state.dir),
         cache_root_abs.clone(),
     ];
     excludes.extend(initial_outputs.iter().cloned());
@@ -314,6 +314,7 @@ async fn run_build(
         workspace_root: prepared.workspace_root.clone(),
         parallelism,
         fresh,
+        force_fresh: None,
         events: tx,
         cancel,
         build_id: format!("watch_{}", prep::short_random()),

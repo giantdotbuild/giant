@@ -22,6 +22,17 @@ pub struct ExplainArgs {
     /// Target ID to explain.
     #[arg(add = clap_complete::ArgValueCompleter::new(super::dynamic::complete_target_ids))]
     pub target: String,
+
+    /// Compare this target's cache-key breakdown against another
+    /// target's. Useful for "why does target X have a different key
+    /// than target Y?" The output is a unified diff of command, cwd,
+    /// env, file inputs, structural inputs, and dep outputs.
+    #[arg(
+        long,
+        value_name = "OTHER_TARGET",
+        add = clap_complete::ArgValueCompleter::new(super::dynamic::complete_target_ids)
+    )]
+    pub diff: Option<String>,
 }
 
 pub async fn execute(args: ExplainArgs, global: &super::GlobalFlags) -> anyhow::Result<()> {
@@ -51,25 +62,51 @@ pub async fn execute(args: ExplainArgs, global: &super::GlobalFlags) -> anyhow::
         anyhow::bail!("target {:?} not found in graph", args.target);
     }
 
-    // Recursively compute cache keys for the target's dep closure so
-    // dep_outputs reflects real prior-build state where available.
     let mut memo: BTreeMap<TargetId, (CacheKey, Option<ContentHash>)> = BTreeMap::new();
+    let (key, breakdown, output_hash) = breakdown_for_target(&prepared, &target_id, &mut memo).await?;
+
+    if let Some(other) = &args.diff {
+        let other_id = TargetId::new(other);
+        if prepared.graph.get(&other_id).is_none() {
+            anyhow::bail!("target {:?} not found in graph", other);
+        }
+        let (other_key, other_bd, _) = breakdown_for_target(&prepared, &other_id, &mut memo).await?;
+        print_diff(
+            (&target_id, key, &breakdown),
+            (&other_id, other_key, &other_bd),
+        );
+        return Ok(());
+    }
+
+    let ac = prepared.cache.get_ac(&key).await.ok().flatten();
+    print_breakdown(&target_id, key, &breakdown, ac.as_ref(), output_hash);
+    Ok(())
+}
+
+async fn breakdown_for_target(
+    prepared: &prep::Prepared,
+    target_id: &TargetId,
+    memo: &mut BTreeMap<TargetId, (CacheKey, Option<ContentHash>)>,
+) -> anyhow::Result<(CacheKey, CacheKeyBreakdown, Option<ContentHash>)> {
     let (key, output_hash) = walk_target(
         &prepared.graph,
         &prepared.cache,
         &prepared.workspace_root,
-        &target_id,
-        &mut memo,
+        target_id,
+        memo,
     )
     .await?;
 
     let dep_outputs: BTreeMap<TargetId, ContentHash> = prepared
         .graph
-        .direct_deps(&target_id)
+        .direct_deps(target_id)
         .into_iter()
         .filter_map(|d| memo.get(&d).and_then(|(_, oh)| oh.map(|h| (d, h))))
         .collect();
-    let spec = prepared.graph.get(&target_id).expect("checked above");
+    let spec = prepared
+        .graph
+        .get(target_id)
+        .ok_or_else(|| anyhow::anyhow!("target {target_id:?} missing"))?;
     let (verify_key, breakdown) = compute_cache_key_with_breakdown(
         spec,
         &prepared.workspace_root,
@@ -77,15 +114,8 @@ pub async fn execute(args: ExplainArgs, global: &super::GlobalFlags) -> anyhow::
         dep_outputs,
     )
     .await?;
-    debug_assert_eq!(
-        key, verify_key,
-        "two paths for the same key disagreed - bug in explain"
-    );
-
-    let ac = prepared.cache.get_ac(&key).await.ok().flatten();
-
-    print_breakdown(&target_id, key, &breakdown, ac.as_ref(), output_hash);
-    Ok(())
+    debug_assert_eq!(key, verify_key, "two paths for the same key disagreed");
+    Ok((key, breakdown, output_hash))
 }
 
 /// Compute (cache_key, output_content_hash) for a target by walking
@@ -247,6 +277,217 @@ fn print_breakdown(
     }
 
     let _ = w.flush();
+}
+
+/// Render a side-by-side diff of two breakdowns: any field that
+/// differs gets a section. Identical fields are summarised so the
+/// output stays focused on what's actually different.
+fn print_diff(
+    left: (&TargetId, CacheKey, &CacheKeyBreakdown),
+    right: (&TargetId, CacheKey, &CacheKeyBreakdown),
+) {
+    let stdout = std::io::stdout();
+    let mut w = stdout.lock();
+    let (lid, lkey, lbd) = left;
+    let (rid, rkey, rbd) = right;
+
+    let _ = writeln!(w, "comparing:");
+    let _ = writeln!(w, "  -  {lid}  ({})", lkey.to_hex());
+    let _ = writeln!(w, "  +  {rid}  ({})", rkey.to_hex());
+    if lkey == rkey {
+        let _ = writeln!(w);
+        let _ = writeln!(w, "(cache keys are identical - no diff to show)");
+        return;
+    }
+    let _ = writeln!(w);
+
+    diff_scalar(&mut w, "command", &lbd.command, &rbd.command);
+    diff_scalar(&mut w, "cwd", &lbd.cwd, &rbd.cwd);
+
+    diff_env_map(&mut w, "env (user)", &lbd.user_env, &rbd.user_env);
+    diff_env_map(&mut w, "env (built-in)", &lbd.built_in_env, &rbd.built_in_env);
+
+    diff_file_inputs(&mut w, &lbd.file_inputs, &rbd.file_inputs);
+
+    diff_dep_outputs(&mut w, &lbd.dep_outputs, &rbd.dep_outputs);
+
+    // Structural inputs: compare by index, ordered the same as in the
+    // key. We treat them as opaque blobs keyed on fingerprint - that's
+    // what feeds the cache key. A mismatch points the user at one of
+    // the discovery-time aggregations.
+    diff_structural(&mut w, &lbd.structural_inputs, &rbd.structural_inputs);
+
+    let _ = w.flush();
+}
+
+fn diff_scalar<W: Write>(w: &mut W, label: &str, left: &str, right: &str) {
+    if left == right {
+        return;
+    }
+    let _ = writeln!(w, "── {label} ──");
+    let _ = writeln!(w, "  - {left}");
+    let _ = writeln!(w, "  + {right}");
+    let _ = writeln!(w);
+}
+
+fn diff_env_map<W: Write>(
+    w: &mut W,
+    label: &str,
+    left: &BTreeMap<String, String>,
+    right: &BTreeMap<String, String>,
+) {
+    let mut keys: std::collections::BTreeSet<&String> = left.keys().collect();
+    keys.extend(right.keys());
+    let mut wrote_header = false;
+    for k in keys {
+        match (left.get(k), right.get(k)) {
+            (Some(l), Some(r)) if l == r => {}
+            (l, r) => {
+                if !wrote_header {
+                    let _ = writeln!(w, "── {label} ──");
+                    wrote_header = true;
+                }
+                let _ = writeln!(
+                    w,
+                    "  - {k}={}",
+                    l.map(String::as_str).unwrap_or("<unset>")
+                );
+                let _ = writeln!(
+                    w,
+                    "  + {k}={}",
+                    r.map(String::as_str).unwrap_or("<unset>")
+                );
+            }
+        }
+    }
+    if wrote_header {
+        let _ = writeln!(w);
+    }
+}
+
+fn diff_file_inputs<W: Write>(
+    w: &mut W,
+    left: &[crate::executor::FileInputContribution],
+    right: &[crate::executor::FileInputContribution],
+) {
+    let left_map: BTreeMap<&str, &crate::executor::FileInputContribution> =
+        left.iter().map(|f| (f.rel_path.as_str(), f)).collect();
+    let right_map: BTreeMap<&str, &crate::executor::FileInputContribution> =
+        right.iter().map(|f| (f.rel_path.as_str(), f)).collect();
+    let mut paths: std::collections::BTreeSet<&str> = left_map.keys().copied().collect();
+    paths.extend(right_map.keys().copied());
+    let mut wrote_header = false;
+    for p in paths {
+        match (left_map.get(p), right_map.get(p)) {
+            (Some(l), Some(r)) if l.content_hash == r.content_hash && l.size == r.size => {}
+            (l, r) => {
+                if !wrote_header {
+                    let _ = writeln!(w, "── file inputs ──");
+                    wrote_header = true;
+                }
+                let _ = writeln!(
+                    w,
+                    "  - {:<60} {}",
+                    p,
+                    l.map(|f| f.content_hash.to_hex()[..16].to_string())
+                        .unwrap_or_else(|| "<absent>".into())
+                );
+                let _ = writeln!(
+                    w,
+                    "  + {:<60} {}",
+                    p,
+                    r.map(|f| f.content_hash.to_hex()[..16].to_string())
+                        .unwrap_or_else(|| "<absent>".into())
+                );
+            }
+        }
+    }
+    if wrote_header {
+        let _ = writeln!(w);
+    }
+}
+
+fn diff_dep_outputs<W: Write>(
+    w: &mut W,
+    left: &BTreeMap<TargetId, ContentHash>,
+    right: &BTreeMap<TargetId, ContentHash>,
+) {
+    let mut deps: std::collections::BTreeSet<&TargetId> = left.keys().collect();
+    deps.extend(right.keys());
+    let mut wrote_header = false;
+    for d in deps {
+        match (left.get(d), right.get(d)) {
+            (Some(l), Some(r)) if l == r => {}
+            (l, r) => {
+                if !wrote_header {
+                    let _ = writeln!(w, "── dep outputs ──");
+                    wrote_header = true;
+                }
+                let _ = writeln!(
+                    w,
+                    "  - {:<60} {}",
+                    d,
+                    l.map(|h| h.to_hex()[..16].to_string())
+                        .unwrap_or_else(|| "<absent>".into())
+                );
+                let _ = writeln!(
+                    w,
+                    "  + {:<60} {}",
+                    d,
+                    r.map(|h| h.to_hex()[..16].to_string())
+                        .unwrap_or_else(|| "<absent>".into())
+                );
+            }
+        }
+    }
+    if wrote_header {
+        let _ = writeln!(w);
+    }
+}
+
+fn diff_structural<W: Write>(
+    w: &mut W,
+    left: &[crate::executor::StructuralContribution],
+    right: &[crate::executor::StructuralContribution],
+) {
+    let n = left.len().max(right.len());
+    let mut wrote_header = false;
+    for i in 0..n {
+        let l = left.get(i);
+        let r = right.get(i);
+        let same = match (l, r) {
+            (Some(a), Some(b)) => a.fingerprint == b.fingerprint,
+            _ => false,
+        };
+        if same {
+            continue;
+        }
+        if !wrote_header {
+            let _ = writeln!(w, "── structural inputs ──");
+            wrote_header = true;
+        }
+        match l {
+            Some(s) => {
+                let _ = writeln!(w, "  - [{}] {}", i + 1, s.fingerprint.to_hex());
+                let _ = writeln!(w, "      files: {}", s.files.join(", "));
+            }
+            None => {
+                let _ = writeln!(w, "  - [{}] <absent>", i + 1);
+            }
+        }
+        match r {
+            Some(s) => {
+                let _ = writeln!(w, "  + [{}] {}", i + 1, s.fingerprint.to_hex());
+                let _ = writeln!(w, "      files: {}", s.files.join(", "));
+            }
+            None => {
+                let _ = writeln!(w, "  + [{}] <absent>", i + 1);
+            }
+        }
+    }
+    if wrote_header {
+        let _ = writeln!(w);
+    }
 }
 
 /// Human-readable byte sizes; short and stable. Plenty good for explain

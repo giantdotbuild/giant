@@ -67,6 +67,28 @@ pub enum Command {
         #[serde(default)]
         command_id: Option<String>,
     },
+
+    /// Subscribe to the "affected since <base>" target set. The
+    /// engine computes the set immediately, emits one
+    /// `affected.changed` event, and keeps a file watcher pinned so
+    /// it can re-emit whenever the set actually changes.
+    ///
+    /// At most one subscription is active per session. A second
+    /// `affected.subscribe` replaces the first; the old watcher is
+    /// torn down.
+    #[serde(rename = "affected.subscribe")]
+    AffectedSubscribe {
+        #[serde(default)]
+        command_id: Option<String>,
+        base: String,
+    },
+
+    /// End the active affected subscription, if any. No-op if none.
+    #[serde(rename = "affected.unsubscribe")]
+    AffectedUnsubscribe {
+        #[serde(default)]
+        command_id: Option<String>,
+    },
 }
 
 impl Command {
@@ -78,7 +100,9 @@ impl Command {
             | Command::WatchStart { command_id, .. }
             | Command::WatchStop { command_id, .. }
             | Command::ConfigReload { command_id, .. }
-            | Command::Shutdown { command_id, .. } => command_id.as_deref(),
+            | Command::Shutdown { command_id, .. }
+            | Command::AffectedSubscribe { command_id, .. }
+            | Command::AffectedUnsubscribe { command_id, .. } => command_id.as_deref(),
         }
     }
 }

@@ -7,23 +7,37 @@
 
 use crate::graph::{BuildGraph, GraphError};
 use crate::model::{CacheKey, ContentHash, TargetSpec};
-use crate::paths::WsRelPath;
+use crate::paths::{AbsPath, WsRelPath};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
-const DISCOVERY_KEY_SCHEMA: &str = "disc-v1";
+const DISCOVERY_KEY_SCHEMA: &str = "disc-v2";
 const GIANT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TARGET_TRIPLE: &str = env!("GIANT_TARGET_TRIPLE");
 
 /// Compute the cache key for a discovery target per ADR-0013:
-/// `cmd + env + cwd + scope` (no file inputs, no dep keys). The returned
-/// key is the lookup key for the discovery sidecar; whether the cached
-/// output is *valid* still depends on verifying the `reads` manifest
-/// against the live filesystem.
+/// `cmd + env + cwd + scope + executable-content` (no file inputs from
+/// the `inputs:` schema, no dep cache keys). The returned key is the
+/// lookup key for the discovery sidecar; whether the cached output is
+/// *valid* still depends on verifying the `reads` manifest against the
+/// live filesystem.
 ///
-/// Stable across runs given the same command/env/cwd/scope and the same
-/// giant binary; sensitive to engine version bumps (the schema marker
-/// and `GIANT_VERSION` are mixed in).
-pub fn discovery_cache_key(spec: &TargetSpec) -> CacheKey {
+/// "executable content" is any argv token that resolves to an existing
+/// file under `workspace_root` (after joining with the target's cwd).
+/// That covers the common cases automatically:
+///   - `bash scripts/discover.sh`  → hashes `scripts/discover.sh`
+///   - `./bin/discover foo`         → hashes `bin/discover`
+///   - `tools/discover foo`         → hashes `tools/discover`
+/// System interpreters (`bash`, `python3`) live outside the workspace
+/// and are intentionally not hashed - they'd make the key host-specific.
+/// Binaries on PATH aren't resolved either; users wiring an external
+/// binary should pin the path or wire a dep target whose output the
+/// discovery target consumes.
+///
+/// Stable across runs given the same command/env/cwd/scope/executable
+/// content; sensitive to engine version bumps (the schema marker and
+/// `GIANT_VERSION` are mixed in).
+pub fn discovery_cache_key(spec: &TargetSpec, workspace_root: &AbsPath) -> CacheKey {
     let mut h = ContentHash::hasher();
     h.update(DISCOVERY_KEY_SCHEMA.as_bytes());
     h.update(b"\0");
@@ -64,7 +78,160 @@ pub fn discovery_cache_key(spec: &TargetSpec) -> CacheKey {
         h.update(b"\0");
     }
 
+    // Two sources of executable / data content feed the key, merged
+    // and deduped: argv-walk (the discovery binary/script and any
+    // path-shaped args inside the workspace) and the target's
+    // declared `inputs:` (explicit list for helpers / data files the
+    // argv walk can't see). Sorted by relative path so the ordering
+    // is independent of declaration order.
+    let mut content_inputs: Vec<(PathBuf, ContentHash)> = Vec::new();
+    content_inputs.extend(resolve_executable_inputs(
+        &spec.command,
+        spec.cwd.as_path(),
+        workspace_root,
+    ));
+    content_inputs.extend(expand_declared_inputs(spec, workspace_root));
+    content_inputs.sort_by(|a, b| a.0.cmp(&b.0));
+    content_inputs.dedup_by(|a, b| a.0 == b.0);
+
+    h.update(b"content\0");
+    for (rel, content_hash) in &content_inputs {
+        h.update(rel.to_string_lossy().as_bytes());
+        h.update(b"=");
+        h.update(content_hash.as_bytes());
+        h.update(b"\0");
+    }
+
     CacheKey::new(h.finalize())
+}
+
+/// Expand the discovery target's declared `inputs:` to (workspace-
+/// relative path, content hash) pairs. Globs are resolved against
+/// `workspace_root`. `Input::Structural` is ignored - that variant
+/// is for regular targets' wave-mode inputs and doesn't apply here.
+fn expand_declared_inputs(
+    spec: &TargetSpec,
+    workspace_root: &AbsPath,
+) -> Vec<(PathBuf, ContentHash)> {
+    use crate::model::Input;
+    let ws = workspace_root.as_path();
+    let mut out: Vec<(PathBuf, ContentHash)> = Vec::new();
+    for input in &spec.inputs {
+        let Input::File { glob } = input else {
+            continue;
+        };
+        let pattern = ws.join(glob.as_str());
+        let Some(pattern_str) = pattern.to_str() else {
+            continue;
+        };
+        let Ok(matched) = glob::glob(pattern_str) else {
+            continue;
+        };
+        for entry in matched.flatten() {
+            let Ok(canon) = entry.canonicalize() else {
+                continue;
+            };
+            let Ok(rel) = canon.strip_prefix(ws) else {
+                continue;
+            };
+            let Ok(meta) = std::fs::metadata(&canon) else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let Ok(hash) = ContentHash::of_file(&canon) else {
+                continue;
+            };
+            out.push((rel.to_path_buf(), hash));
+        }
+    }
+    out
+}
+
+/// Walk the command's argv looking for tokens that resolve to a real
+/// file inside `workspace_root`. Each hit contributes (workspace-
+/// relative path, content hash) to the caller. Sorted by relative
+/// path so the order doesn't depend on argv position.
+///
+/// Three resolution strategies, in order:
+///   1. **Absolute path** (`/abs/path/...`): use as-is.
+///   2. **Path containing `/`**: join with the target's `cwd` (which
+///      is itself joined onto `workspace_root`).
+///   3. **Bare name** (no `/`, only meaningful for `argv[0]`): walk
+///      the target's `PATH` env (with the process env as fallback)
+///      and pick the first hit.
+///
+/// In all cases we then check that the resolved path lives under
+/// `workspace_root`. System tools (`bash`, `/usr/bin/grep`) land
+/// outside and get skipped - they'd otherwise make the key
+/// host-specific. In-tree binaries dropped into a PATH-listed dir
+/// like `bin/` get hashed, so editing the discover binary
+/// invalidates the discovery cache even when invoked by bare name.
+fn resolve_executable_inputs(
+    command: &str,
+    cwd: &Path,
+    workspace_root: &AbsPath,
+) -> Vec<(PathBuf, ContentHash)> {
+    let Ok(argv) = shell_words::split(command) else {
+        return Vec::new();
+    };
+    let workspace_abs = workspace_root.as_path();
+    let cwd_abs = workspace_abs.join(cwd);
+    let mut out: Vec<(PathBuf, ContentHash)> = Vec::new();
+    for (i, tok) in argv.iter().enumerate() {
+        if tok.starts_with('-') {
+            continue;
+        }
+        let candidates = candidate_paths(tok, &cwd_abs, i == 0);
+        for candidate in candidates {
+            let Ok(canon) = candidate.canonicalize() else {
+                continue;
+            };
+            let Ok(rel) = canon.strip_prefix(workspace_abs) else {
+                continue;
+            };
+            let Ok(meta) = std::fs::metadata(&canon) else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let Ok(hash) = ContentHash::of_file(&canon) else {
+                continue;
+            };
+            out.push((rel.to_path_buf(), hash));
+            break; // first hit wins for this token
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.dedup_by(|a, b| a.0 == b.0);
+    out
+}
+
+/// Build the ordered list of paths to try for one argv token. For
+/// non-argv0 or path-shaped tokens it's a single candidate; for a
+/// bare argv0 we walk `$PATH` (process env) so workspace-local PATH
+/// entries - `bin/`, `target/release/`, `node_modules/.bin/` - are
+/// reached.
+fn candidate_paths(tok: &str, cwd_abs: &Path, is_argv0: bool) -> Vec<PathBuf> {
+    if Path::new(tok).is_absolute() {
+        return vec![PathBuf::from(tok)];
+    }
+    if tok.contains('/') || !is_argv0 {
+        return vec![cwd_abs.join(tok)];
+    }
+    // Bare argv0: try the cwd first (sometimes scripts ship there),
+    // then each `$PATH` entry. The shell wouldn't try cwd unless
+    // `.` is on PATH, but doing it here is cheap and covers the
+    // common ad-hoc case.
+    let mut out: Vec<PathBuf> = vec![cwd_abs.join(tok)];
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            out.push(dir.join(tok));
+        }
+    }
+    out
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -202,6 +369,15 @@ pub struct RecordedFile {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lines: Vec<String>,
     pub content_hash: ContentHash,
+
+    /// `(mtime, size)` from the cold-compute pass. The verifier trusts
+    /// the recorded `content_hash` when both still match. Optional for
+    /// backward compatibility with sidecars written before this field
+    /// landed; missing values force a full re-hash on warm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,6 +387,13 @@ pub struct RecordedDir {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filter: Vec<String>,
     pub listing_hash: ContentHash,
+
+    /// Directory mtime from the cold-compute pass. Adding or removing
+    /// entries bumps the parent's mtime on every common filesystem; an
+    /// mtime match lets the verifier skip the listing rehash. Optional
+    /// for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime_ns: Option<u64>,
 }
 
 /// Outcome of verifying a `RecordedReads` manifest against the live
@@ -221,93 +404,226 @@ pub enum VerifyOutcome {
     Mismatch { reason: String },
 }
 
-/// Convert a discovery-emitted `reads` manifest into a `RecordedReads`
-/// snapshot by hashing every entry against the workspace. Called once
-/// after a cold discovery run, before writing the sidecar.
+/// Hash every entry in `reads` against the workspace, capturing
+/// (mtime, size) alongside the content hash so warm verification can
+/// stat-skip unchanged files. Parallel via rayon.
 pub fn materialize_reads(
     reads: &DiscoveryReads,
     workspace_root: &std::path::Path,
 ) -> std::io::Result<RecordedReads> {
-    let files = reads
+    use rayon::prelude::*;
+
+    let files: Result<Vec<RecordedFile>, std::io::Error> = reads
         .files
-        .iter()
+        .par_iter()
         .map(|e| {
+            let abs = workspace_root.join(e.path.as_path());
+            let (mtime_ns, size) = match abs.metadata() {
+                Ok(m) => (crate::paths::mtime_ns(&m), Some(m.len())),
+                Err(_) => (None, None),
+            };
             let content_hash = hash_file_entry(e, workspace_root)?;
-            Ok::<_, std::io::Error>(RecordedFile {
+            Ok(RecordedFile {
                 path: e.path.clone(),
                 lines: e.lines.clone(),
                 content_hash,
+                mtime_ns,
+                size,
             })
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect();
 
-    let dirs = reads
+    let dirs: Result<Vec<RecordedDir>, std::io::Error> = reads
         .dirs
-        .iter()
+        .par_iter()
         .map(|e| {
+            let abs = workspace_root.join(e.path.as_path());
+            let mtime_ns = abs.metadata().ok().and_then(|m| crate::paths::mtime_ns(&m));
             let listing_hash = hash_dir_entry(e, workspace_root)?;
-            Ok::<_, std::io::Error>(RecordedDir {
+            Ok(RecordedDir {
                 path: e.path.clone(),
                 filter: e.filter.clone(),
                 listing_hash,
+                mtime_ns,
             })
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect();
 
-    Ok(RecordedReads { files, dirs })
+    Ok(RecordedReads {
+        files: files?,
+        dirs: dirs?,
+    })
 }
 
-/// Recompute hashes for every entry in `recorded` against the workspace,
-/// returning `Match` only if every entry's current hash matches what was
-/// recorded. The first mismatch is reported; remaining entries aren't
-/// checked since any single change invalidates the whole cached output.
+/// Verify every entry in `recorded` against the workspace. Returns
+/// `Match` only when nothing has shifted.
+///
+/// Two fast paths layered ahead of the rehash:
+///
+///   1. **mtime + size skip.** For file entries with recorded
+///      `(mtime_ns, size)`, the verifier stats the current file and
+///      reuses the recorded `content_hash` when both still match.
+///      Same idea as the structural-input sidecar's Stage 2 path.
+///   2. **mtime skip for dirs.** Adding or removing a child file bumps
+///      the parent dir's mtime on every common filesystem, so an
+///      unchanged dir mtime means the listing hash is still valid.
+///
+/// The remaining hash work runs in parallel via rayon. First mismatch
+/// reported deterministically (the file/dir with the lex-smallest path
+/// among the mismatching entries).
 pub fn verify_reads(
     recorded: &RecordedReads,
     workspace_root: &std::path::Path,
 ) -> std::io::Result<VerifyOutcome> {
-    for f in &recorded.files {
-        let entry = ReadFileEntry {
-            path: f.path.clone(),
-            lines: f.lines.clone(),
-        };
-        match hash_file_entry(&entry, workspace_root) {
-            Ok(current) if current == f.content_hash => {}
-            Ok(_) => {
-                return Ok(VerifyOutcome::Mismatch {
-                    reason: format!("file content changed: {}", f.path.as_path().display()),
-                });
+    verify_reads_with_fsmonitor(recorded, workspace_root, None)
+}
+
+/// As [`verify_reads`], but consults an optional fsmonitor change set
+/// to skip entries the monitor confirmed unchanged. Returns the first
+/// mismatch any rayon worker observes; remaining workers see the
+/// answer-already-decided signal via `find_map_any` and stop.
+pub fn verify_reads_with_fsmonitor(
+    recorded: &RecordedReads,
+    workspace_root: &std::path::Path,
+    changeset: Option<&crate::fsmonitor::ChangeSet>,
+) -> std::io::Result<VerifyOutcome> {
+    use rayon::prelude::*;
+
+    let files_result: Option<std::io::Result<VerifyOutcome>> = recorded
+        .files
+        .par_iter()
+        .find_map_any(|f| {
+            if changeset.is_some_and(|cs| !cs.file_might_have_changed(f.path.as_path())) {
+                return None;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(VerifyOutcome::Mismatch {
-                    reason: format!("file missing: {}", f.path.as_path().display()),
-                });
-            }
-            Err(e) => return Err(e),
-        }
+            verify_entry(
+                workspace_root,
+                f.path.as_path(),
+                EntryKind::File {
+                    lines: &f.lines,
+                    recorded_hash: f.content_hash,
+                    recorded_mtime: f.mtime_ns,
+                    recorded_size: f.size,
+                },
+            )
+        });
+    if let Some(r) = files_result {
+        return r;
     }
 
-    for d in &recorded.dirs {
-        let entry = ReadDirEntry {
-            path: d.path.clone(),
-            filter: d.filter.clone(),
-        };
-        match hash_dir_entry(&entry, workspace_root) {
-            Ok(current) if current == d.listing_hash => {}
-            Ok(_) => {
-                return Ok(VerifyOutcome::Mismatch {
-                    reason: format!("directory listing changed: {}", d.path.as_path().display()),
-                });
+    let dirs_result: Option<std::io::Result<VerifyOutcome>> = recorded
+        .dirs
+        .par_iter()
+        .find_map_any(|d| {
+            if changeset.is_some_and(|cs| !cs.dir_might_have_changed(d.path.as_path())) {
+                return None;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(VerifyOutcome::Mismatch {
-                    reason: format!("directory missing: {}", d.path.as_path().display()),
-                });
-            }
-            Err(e) => return Err(e),
-        }
+            verify_entry(
+                workspace_root,
+                d.path.as_path(),
+                EntryKind::Dir {
+                    filter: &d.filter,
+                    recorded_hash: d.listing_hash,
+                    recorded_mtime: d.mtime_ns,
+                },
+            )
+        });
+    if let Some(r) = dirs_result {
+        return r;
     }
 
     Ok(VerifyOutcome::Match)
+}
+
+/// Shared verifier body: (mtime, size)-skip first, then content-hash
+/// recompute. Returns `Some(Mismatch)` on diff, `Some(Err)` on I/O
+/// failure, `None` when the entry is unchanged (so `find_map_any`
+/// keeps scanning).
+enum EntryKind<'a> {
+    File {
+        lines: &'a [String],
+        recorded_hash: ContentHash,
+        recorded_mtime: Option<u64>,
+        recorded_size: Option<u64>,
+    },
+    Dir {
+        filter: &'a [String],
+        recorded_hash: ContentHash,
+        recorded_mtime: Option<u64>,
+    },
+}
+
+fn verify_entry(
+    workspace_root: &std::path::Path,
+    rel: &std::path::Path,
+    kind: EntryKind<'_>,
+) -> Option<std::io::Result<VerifyOutcome>> {
+    let abs = workspace_root.join(rel);
+
+    let (mtime_ok, label) = match &kind {
+        EntryKind::File {
+            recorded_mtime,
+            recorded_size,
+            ..
+        } => {
+            let want = recorded_mtime.zip(*recorded_size);
+            let ok = want.and_then(|(t, s)| {
+                let m = abs.metadata().ok()?;
+                (m.len() == s && crate::paths::mtime_ns(&m) == Some(t)).then_some(())
+            });
+            (ok.is_some(), "file")
+        }
+        EntryKind::Dir { recorded_mtime, .. } => {
+            let ok = recorded_mtime.and_then(|t| {
+                let m = abs.metadata().ok()?;
+                (crate::paths::mtime_ns(&m) == Some(t)).then_some(())
+            });
+            (ok.is_some(), "directory")
+        }
+    };
+
+    if mtime_ok {
+        return None;
+    }
+
+    // Fast-path didn't trigger (or no recorded baseline). Fall back to
+    // a full rehash; map missing files to a precise Mismatch so the
+    // bootstrap loop can log a useful reason.
+    let (computed, recorded_hash) = match kind {
+        EntryKind::File {
+            lines,
+            recorded_hash,
+            ..
+        } => {
+            let entry = ReadFileEntry {
+                path: WsRelPath::new(rel).expect("rel path"),
+                lines: lines.to_vec(),
+            };
+            (hash_file_entry(&entry, workspace_root), recorded_hash)
+        }
+        EntryKind::Dir {
+            filter,
+            recorded_hash,
+            ..
+        } => {
+            let entry = ReadDirEntry {
+                path: WsRelPath::new(rel).expect("rel path"),
+                filter: filter.to_vec(),
+            };
+            (hash_dir_entry(&entry, workspace_root), recorded_hash)
+        }
+    };
+
+    match computed {
+        Ok(h) if h == recorded_hash => None,
+        Ok(_) => Some(Ok(VerifyOutcome::Mismatch {
+            reason: format!("{label} content changed: {}", rel.display()),
+        })),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Ok(VerifyOutcome::Mismatch {
+            reason: format!("{label} missing: {}", rel.display()),
+        })),
+        Err(e) => Some(Err(e)),
+    }
 }
 
 /// Sidecar schema. Bump (and migrate / reject) when the on-disk shape
@@ -346,9 +662,11 @@ impl DiscoverySidecar {
     }
 }
 
-fn sidecar_path(workspace_root: &std::path::Path, key: CacheKey) -> std::path::PathBuf {
-    workspace_root
-        .join(".giant")
+fn sidecar_path(
+    state_dir: &std::path::Path,
+    key: CacheKey,
+) -> std::path::PathBuf {
+    state_dir
         .join("discovery")
         .join(format!("{}.json", key.to_hex()))
 }
@@ -357,10 +675,10 @@ fn sidecar_path(workspace_root: &std::path::Path, key: CacheKey) -> std::path::P
 /// place. Concurrent invocations on the same key resolve "last
 /// finisher wins" without corrupting the file.
 pub fn write_sidecar(
-    workspace_root: &std::path::Path,
+    state_dir: &std::path::Path,
     sidecar: &DiscoverySidecar,
 ) -> std::io::Result<()> {
-    let final_path = sidecar_path(workspace_root, sidecar.cache_key);
+    let final_path = sidecar_path(state_dir, sidecar.cache_key);
     if let Some(parent) = final_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -418,10 +736,10 @@ pub fn fragment_from_sidecar(sidecar: &DiscoverySidecar) -> DiscoveryFragment {
 /// the caller will re-run the discovery and rewrite). I/O errors and
 /// malformed JSON propagate so the caller can surface diagnostics.
 pub fn read_sidecar(
-    workspace_root: &std::path::Path,
+    state_dir: &std::path::Path,
     key: CacheKey,
 ) -> std::io::Result<Option<DiscoverySidecar>> {
-    let path = sidecar_path(workspace_root, key);
+    let path = sidecar_path(state_dir, key);
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -638,63 +956,73 @@ mod tests {
         }
     }
 
+    fn empty_workspace() -> (tempfile::TempDir, AbsPath) {
+        let dir = tempfile::tempdir().unwrap();
+        let abs = AbsPath::new(dir.path().to_path_buf());
+        (dir, abs)
+    }
+
     #[test]
     fn discovery_key_is_deterministic() {
+        let (_d, ws) = empty_workspace();
         let a = include_spec("d", "tools/d.sh > out.json");
         let b = include_spec("d", "tools/d.sh > out.json");
-        assert_eq!(discovery_cache_key(&a), discovery_cache_key(&b));
+        assert_eq!(discovery_cache_key(&a, &ws), discovery_cache_key(&b, &ws));
     }
 
     #[test]
     fn discovery_key_changes_with_command() {
+        let (_d, ws) = empty_workspace();
         let a = include_spec("d", "tools/d.sh > out.json");
         let b = include_spec("d", "tools/d2.sh > out.json");
-        assert_ne!(discovery_cache_key(&a), discovery_cache_key(&b));
+        assert_ne!(discovery_cache_key(&a, &ws), discovery_cache_key(&b, &ws));
     }
 
     #[test]
     fn discovery_key_changes_with_cwd() {
+        let (_d, ws) = empty_workspace();
         let mut a = include_spec("d", "tools/d.sh");
         let mut b = include_spec("d", "tools/d.sh");
         a.cwd = WsRelPath::new("pkg").unwrap();
         b.cwd = WsRelPath::new("cmd").unwrap();
-        assert_ne!(discovery_cache_key(&a), discovery_cache_key(&b));
+        assert_ne!(discovery_cache_key(&a, &ws), discovery_cache_key(&b, &ws));
     }
 
     #[test]
     fn discovery_key_changes_with_env_value() {
+        let (_d, ws) = empty_workspace();
         let mut a = include_spec("d", "tools/d.sh");
         let mut b = include_spec("d", "tools/d.sh");
         a.env.insert("LANG".into(), "en_US.UTF-8".into());
         b.env.insert("LANG".into(), "C".into());
-        assert_ne!(discovery_cache_key(&a), discovery_cache_key(&b));
+        assert_ne!(discovery_cache_key(&a, &ws), discovery_cache_key(&b, &ws));
     }
 
     #[test]
     fn discovery_key_stable_under_env_declaration_order() {
-        // env is a HashMap so declaration order is already lost, but make
-        // it explicit: same env entries inserted differently produce the
-        // same key thanks to the sort in `discovery_cache_key`.
+        let (_d, ws) = empty_workspace();
         let mut a = include_spec("d", "tools/d.sh");
         let mut b = include_spec("d", "tools/d.sh");
         a.env.insert("A".into(), "1".into());
         a.env.insert("B".into(), "2".into());
         b.env.insert("B".into(), "2".into());
         b.env.insert("A".into(), "1".into());
-        assert_eq!(discovery_cache_key(&a), discovery_cache_key(&b));
+        assert_eq!(discovery_cache_key(&a, &ws), discovery_cache_key(&b, &ws));
     }
 
     #[test]
     fn discovery_key_changes_with_scope() {
+        let (_d, ws) = empty_workspace();
         let mut a = include_spec("d", "tools/d.sh");
         let mut b = include_spec("d", "tools/d.sh");
         a.scope = vec![WsRelPath::new("pkg").unwrap()];
         b.scope = vec![WsRelPath::new("cmd").unwrap()];
-        assert_ne!(discovery_cache_key(&a), discovery_cache_key(&b));
+        assert_ne!(discovery_cache_key(&a, &ws), discovery_cache_key(&b, &ws));
     }
 
     #[test]
     fn discovery_key_stable_under_scope_order() {
+        let (_d, ws) = empty_workspace();
         let mut a = include_spec("d", "tools/d.sh");
         let mut b = include_spec("d", "tools/d.sh");
         a.scope = vec![
@@ -705,15 +1033,171 @@ mod tests {
             WsRelPath::new("cmd").unwrap(),
             WsRelPath::new("pkg").unwrap(),
         ];
-        assert_eq!(discovery_cache_key(&a), discovery_cache_key(&b));
+        assert_eq!(discovery_cache_key(&a, &ws), discovery_cache_key(&b, &ws));
     }
 
     #[test]
     fn discovery_key_empty_scope_vs_set_scope_differ() {
+        let (_d, ws) = empty_workspace();
         let mut a = include_spec("d", "tools/d.sh");
         let b = include_spec("d", "tools/d.sh");
         a.scope = vec![WsRelPath::new("pkg").unwrap()];
-        assert_ne!(discovery_cache_key(&a), discovery_cache_key(&b));
+        assert_ne!(discovery_cache_key(&a, &ws), discovery_cache_key(&b, &ws));
+    }
+
+    /// Editing the discover script changes the key without any change
+    /// to the declared spec - the executable's content is now part of
+    /// the key.
+    #[test]
+    fn discovery_key_changes_when_script_content_changes() {
+        let (_d, ws) = empty_workspace();
+        std::fs::create_dir_all(ws.as_path().join("tools")).unwrap();
+        let script = ws.as_path().join("tools/d.sh");
+        std::fs::write(&script, b"#!/bin/sh\necho a\n").unwrap();
+
+        let spec = include_spec("d", "tools/d.sh");
+        let key_before = discovery_cache_key(&spec, &ws);
+
+        std::fs::write(&script, b"#!/bin/sh\necho b\n").unwrap();
+        let key_after = discovery_cache_key(&spec, &ws);
+
+        assert_ne!(
+            key_before, key_after,
+            "editing the discover script should invalidate the cache"
+        );
+    }
+
+    /// A script-via-interpreter invocation: the interpreter (`bash`)
+    /// lives outside the workspace and is ignored; the script under
+    /// the workspace is hashed.
+    #[test]
+    fn discovery_key_hashes_script_argument_under_interpreter() {
+        let (_d, ws) = empty_workspace();
+        std::fs::create_dir_all(ws.as_path().join("tools")).unwrap();
+        let script = ws.as_path().join("tools/d.sh");
+        std::fs::write(&script, b"v1").unwrap();
+
+        let spec = include_spec("d", "bash tools/d.sh --flag");
+        let key_v1 = discovery_cache_key(&spec, &ws);
+
+        std::fs::write(&script, b"v2").unwrap();
+        let key_v2 = discovery_cache_key(&spec, &ws);
+
+        assert_ne!(key_v1, key_v2);
+    }
+
+    /// PATH-resolved bare binaries that point INSIDE the workspace
+    /// (e.g. an in-tree `bin/discover-go` reachable because the user
+    /// prepended `bin/` to `$PATH`) are hashed. Editing the binary
+    /// invalidates the discovery cache.
+    #[test]
+    fn discovery_key_hashes_path_lookup_when_target_lives_in_workspace() {
+        let (_d, ws) = empty_workspace();
+        std::fs::create_dir_all(ws.as_path().join("bin")).unwrap();
+        let bin = ws.as_path().join("bin/discover-go");
+        std::fs::write(&bin, b"v1").unwrap();
+
+        let prev_path = std::env::var_os("PATH");
+        // Single-thread the test against the global PATH env it
+        // depends on; concurrent tests in this file don't touch PATH,
+        // so a plain set/restore is enough.
+        let new_path = ws.as_path().join("bin").into_os_string();
+        // SAFETY: tests in this module are not multithreaded over PATH.
+        unsafe { std::env::set_var("PATH", &new_path); }
+
+        let spec = include_spec("d", "discover-go pkg/...");
+        let key_v1 = discovery_cache_key(&spec, &ws);
+
+        std::fs::write(&bin, b"v2").unwrap();
+        let key_v2 = discovery_cache_key(&spec, &ws);
+
+        // Restore PATH before any assertion that might panic.
+        match prev_path {
+            // SAFETY: see above
+            Some(p) => unsafe { std::env::set_var("PATH", p); },
+            None => unsafe { std::env::remove_var("PATH"); },
+        }
+
+        assert_ne!(
+            key_v1, key_v2,
+            "editing an in-workspace PATH-resolved discover binary should invalidate the cache"
+        );
+    }
+
+    /// Declared `inputs:` on a discovery target contribute to the
+    /// cache key - editing a helper that the argv walk can't see
+    /// still invalidates the discovery.
+    #[test]
+    fn discovery_key_changes_when_declared_input_changes() {
+        use crate::model::Input;
+        use crate::types::GlobPattern;
+        let (_d, ws) = empty_workspace();
+        std::fs::create_dir_all(ws.as_path().join("tools/lib")).unwrap();
+        let helper = ws.as_path().join("tools/lib/helper.sh");
+        std::fs::write(&helper, b"v1").unwrap();
+
+        let mut spec = include_spec("d", "tools/discover.sh");
+        spec.inputs = vec![Input::File {
+            glob: GlobPattern::new("tools/lib/**/*.sh").unwrap(),
+        }];
+        let key_v1 = discovery_cache_key(&spec, &ws);
+
+        std::fs::write(&helper, b"v2").unwrap();
+        let key_v2 = discovery_cache_key(&spec, &ws);
+
+        assert_ne!(
+            key_v1, key_v2,
+            "editing a declared `inputs:` file should invalidate the discovery cache"
+        );
+    }
+
+    /// Argv walk + declared inputs merge cleanly: a file caught by
+    /// both contributes once (deduped on the workspace-relative
+    /// path), so the cache key doesn't double-count.
+    #[test]
+    fn discovery_key_dedupes_argv_and_declared_overlap() {
+        use crate::model::Input;
+        use crate::types::GlobPattern;
+        let (_d, ws) = empty_workspace();
+        std::fs::create_dir_all(ws.as_path().join("tools")).unwrap();
+        std::fs::write(ws.as_path().join("tools/d.sh"), b"v1").unwrap();
+
+        let mut argv_only = include_spec("d", "tools/d.sh");
+        let mut both = include_spec("d", "tools/d.sh");
+        both.inputs = vec![Input::File {
+            glob: GlobPattern::new("tools/d.sh").unwrap(),
+        }];
+
+        assert_eq!(
+            discovery_cache_key(&argv_only, &ws),
+            discovery_cache_key(&both, &ws),
+            "the same file caught both ways must hash identically"
+        );
+        // Sanity: drop the file used by both, key changes.
+        std::fs::write(ws.as_path().join("tools/d.sh"), b"v2").unwrap();
+        let key_after = discovery_cache_key(&argv_only, &ws);
+        let _ = both;
+        let key_argv_v1 = discovery_cache_key(
+            &{
+                let mut s = include_spec("d", "tools/d.sh");
+                s.cwd = argv_only.cwd.clone();
+                s
+            },
+            &ws,
+        );
+        assert_eq!(key_after, key_argv_v1);
+    }
+
+    /// PATH lookups that resolve outside the workspace (system tools)
+    /// don't contribute to the key - keeps it host-stable.
+    #[test]
+    fn discovery_key_ignores_system_path_lookups() {
+        let (_d, ws) = empty_workspace();
+        // `ls` exists on every POSIX host but lives under /usr/bin or
+        // /bin, neither of which is inside our tempdir workspace.
+        let a = include_spec("d", "ls pkg/");
+        let b = include_spec("d", "ls pkg/");
+        assert_eq!(discovery_cache_key(&a, &ws), discovery_cache_key(&b, &ws));
     }
 
     // ------------ verifier ------------
@@ -935,6 +1419,8 @@ mod tests {
                     path: WsRelPath::new("go.mod").unwrap(),
                     lines: vec![],
                     content_hash: ContentHash::of_bytes(b"module x\n"),
+                    mtime_ns: None,
+                    size: None,
                 }],
                 dirs: vec![],
             },

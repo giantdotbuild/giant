@@ -209,6 +209,7 @@ pub(super) async fn execute_with_mode(
         workspace_root: prepared.workspace_root,
         parallelism,
         fresh: global.fresh,
+        force_fresh: None,
         events: tx,
         cancel,
         build_id,

@@ -428,12 +428,7 @@ fn fingerprint_file_with_skip(
         Err(_) => return Ok(None),
     };
     let size = metadata.len();
-    let mtime_ns = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
+    let mtime_ns = crate::paths::mtime_ns(&metadata).unwrap_or(0);
 
     // mtime-skip: if the prior entry has the same (mtime, size) and we
     // believe the filesystem reports usable mtime (mtime_ns != 0), trust

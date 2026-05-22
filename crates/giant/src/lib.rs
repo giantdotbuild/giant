@@ -13,6 +13,7 @@ pub mod config;
 pub mod discovery;
 pub mod events;
 pub mod executor;
+pub mod fsmonitor;
 pub mod git;
 pub mod graph;
 pub mod model;

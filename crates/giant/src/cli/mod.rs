@@ -17,6 +17,7 @@ pub(crate) mod dynamic;
 mod explain;
 mod external;
 mod graph;
+mod logs;
 pub(crate) mod prep;
 mod session;
 mod test;
@@ -33,7 +34,13 @@ pub struct Cli {
     pub command: Commands,
 
     /// Path to giant.yaml / giant.json. Defaults to walking up from cwd.
-    #[arg(long, global = true)]
+    /// Must appear before the subcommand - `--config` is intentionally
+    /// not `global` so porcelains (giant-task, giant-tui, …) can define
+    /// their own `--config` without colliding with this one through
+    /// trailing args. `overrides_with` lets a later `--config` from a
+    /// wrapper script's outer invocation be replaced by a user's
+    /// explicit one without clap complaining about duplicates.
+    #[arg(long, overrides_with = "config")]
     pub config: Option<std::path::PathBuf>,
 
     /// Force a fresh build (bypass cache).
@@ -62,6 +69,11 @@ pub enum Commands {
     /// Show what feeds a target's cache key - the first thing to reach
     /// for when "why did this rebuild?" comes up.
     Explain(explain::ExplainArgs),
+
+    /// Replay the captured stdout/stderr from the last cached
+    /// invocation of a target - answer "what did the build say?"
+    /// without busting the cache.
+    Logs(logs::LogsArgs),
 
     /// List targets, or show a target's dep tree.
     Graph(graph::GraphArgs),
@@ -163,6 +175,7 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Test(args) => test::execute(args, &global).await,
         Commands::Affected(args) => affected::execute(args, &global).await,
         Commands::Explain(args) => explain::execute(args, &global).await,
+        Commands::Logs(args) => logs::execute(args, &global).await,
         Commands::Graph(args) => graph::execute(args, &global).await,
         Commands::Clean(args) => clean::execute(args, &global).await,
         Commands::Watch(args) => watch::execute(args, &global).await,

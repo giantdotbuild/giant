@@ -184,6 +184,24 @@ pub enum Event {
     /// `target.described` events form the current catalog.
     #[serde(rename = "catalog.ready")]
     CatalogReady,
+
+    /// The "affected since <base>" set was (re)computed. Fired once
+    /// per `affected.subscribe` (the initial snapshot), then again
+    /// whenever a file change causes the set to change. The session
+    /// keeps a file watcher pinned for the lifetime of the
+    /// subscription; clients just render the latest `target_ids`.
+    #[serde(rename = "affected.changed")]
+    AffectedChanged {
+        base: String,
+        target_ids: Vec<TargetId>,
+    },
+
+    /// `affected.subscribe` couldn't compute. Most often a bad git
+    /// ref, but covers any failure from `git::affected_files_since`.
+    /// The subscription stays alive; a follow-up file change might
+    /// succeed (e.g. user `git fetch`-es the missing ref).
+    #[serde(rename = "affected.error")]
+    AffectedError { base: String, message: String },
 }
 
 fn is_false(b: &bool) -> bool {
