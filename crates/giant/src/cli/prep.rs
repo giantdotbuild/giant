@@ -55,31 +55,32 @@ pub async fn prepare(
     std::fs::create_dir_all(&cache_root)?;
     let cache = LocalCache::open(AbsPath::new(cache_root)).await?;
 
-    // Wave-based discovery (TDD-0003 §Recursive discovery).
+    // Worklist-based discovery (TDD-0003 revised).
     //
-    // Each wave is a parallel build of the current set of include
-    // targets. Their outputs are parsed; any nested `include:` entries
-    // they emit feed the next wave. Loop until no new includes appear,
-    // or hit MAX_DISCOVERY_DEPTH (cycle / runaway safety net).
+    // Top-level `include:` entries seed `pending`. Each round, every
+    // pending discovery is dispatched (or short-circuited by its
+    // sidecar) in parallel through the executor. Any `include:`
+    // entries that those discoveries emit get appended to
+    // `next_pending`, and we loop. Termination is "worklist empty"
+    // rather than a fixed wave count.
     //
-    // Cycle detection: we track every include target ID we've already
-    // built in `seen`. If a later wave emits an include we've already
-    // processed, it's silently skipped - same target can't run twice.
+    // Cycle / runaway detection: every enqueued target records its
+    // chain depth (parent's depth + 1). If a target would exceed
+    // `MAX_CHAIN_GENERATIONS`, we abort with the full chain so the
+    // user sees which discoveries kept emitting new descendants. A
+    // dedup `seen` set silently drops already-known targets.
     if !config.include.is_empty() {
-        const MAX_DISCOVERY_DEPTH: u32 = 32;
-        let mut current_wave: Vec<TargetId> = config.include.iter().map(|t| t.id.clone()).collect();
-        let mut seen: std::collections::HashSet<TargetId> = current_wave.iter().cloned().collect();
-        let mut depth: u32 = 0;
+        const MAX_CHAIN_GENERATIONS: u32 = 8;
 
-        while !current_wave.is_empty() {
-            if depth >= MAX_DISCOVERY_DEPTH {
-                anyhow::bail!(
-                    "discovery exceeded {MAX_DISCOVERY_DEPTH} wave depth - \
-                     possible cycle? Last wave's target ids: {:?}",
-                    current_wave,
-                );
-            }
+        let mut pending: Vec<TargetId> = config.include.iter().map(|t| t.id.clone()).collect();
+        let mut seen: std::collections::HashSet<TargetId> = pending.iter().cloned().collect();
+        let mut chain_depth: std::collections::HashMap<TargetId, u32> =
+            pending.iter().cloned().map(|id| (id, 0)).collect();
+        let mut parent_of: std::collections::HashMap<TargetId, TargetId> =
+            std::collections::HashMap::new();
+        let mut round: u32 = 0;
 
+        while !pending.is_empty() {
             // Sidecar short-circuit: for each pending discovery, try
             // the sidecar before dispatching.
             //
@@ -96,10 +97,10 @@ pub async fn prepare(
             //   queue for dispatch.
             //
             // `--fresh` bypasses the sidecar entirely.
-            let mut to_dispatch: Vec<TargetId> = Vec::with_capacity(current_wave.len());
+            let mut to_dispatch: Vec<TargetId> = Vec::with_capacity(pending.len());
             let mut sidecar_hits: Vec<(TargetId, discovery::DiscoverySidecar)> = Vec::new();
-            for id in &current_wave {
-                let spec = graph.get(id).expect("present in current wave").clone();
+            for id in &pending {
+                let spec = graph.get(id).expect("present in pending worklist").clone();
                 if fresh {
                     to_dispatch.push(id.clone());
                     continue;
@@ -160,7 +161,7 @@ pub async fn prepare(
                     fresh,
                     events: events.clone(),
                     cancel: cancel.clone(),
-                    build_id: format!("bootstrap_w{depth}_{}", short_random()),
+                    build_id: format!("bootstrap_r{round}_{}", short_random()),
                     log_capture: crate::executor::LogCapture::from_cache_config(&config.cache),
                     // Discovery doesn't currently use the remote cache -
                     // discoveries are per-workspace dynamic and aren't
@@ -174,26 +175,30 @@ pub async fn prepare(
                 let bootstrap = build(bootstrap_job).await?;
                 if bootstrap.counts.failed > 0 {
                     anyhow::bail!(
-                        "discovery failed at wave {depth}: {} include target(s) failed",
+                        "discovery failed in round {round}: {} include target(s) failed",
                         bootstrap.counts.failed
                     );
                 }
             }
 
-            let mut next_wave: Vec<TargetId> = Vec::new();
+            let mut next_pending: Vec<TargetId> = Vec::new();
 
             // Sidecar hits: merge the cached targets/include directly
             // into the graph. No re-parse, no re-materialize, no
-            // sidecar rewrite. Nested includes feed the next wave the
-            // same way they would from a cold run.
-            for (_id, sidecar) in sidecar_hits {
+            // sidecar rewrite. Nested includes feed the next round
+            // the same way they would from a cold run.
+            for (parent_id, sidecar) in sidecar_hits {
                 let fragment = discovery::fragment_from_sidecar(&sidecar);
                 let new_includes = discovery::merge_into(&mut graph, fragment)?;
-                for nid in new_includes {
-                    if seen.insert(nid.clone()) {
-                        next_wave.push(nid);
-                    }
-                }
+                enqueue_descendants(
+                    &parent_id,
+                    new_includes,
+                    &mut seen,
+                    &mut chain_depth,
+                    &mut parent_of,
+                    &mut next_pending,
+                    MAX_CHAIN_GENERATIONS,
+                )?;
             }
 
             // Dispatched discoveries: parse their freshly-written
@@ -217,14 +222,14 @@ pub async fn prepare(
                     })
                     .collect();
 
-            for (id, spec, abs) in dispatched_outputs {
+            for (parent_id, spec, abs) in dispatched_outputs {
                 let fragment = discovery::parse_fragment(&abs)?;
 
                 // Cooperative protocol (ADR-0013): if the discovery
                 // emitted a `reads` manifest, materialize it and write
                 // the sidecar so the next run can short-circuit. If
                 // absent, this run is uncacheable - warn in lenient
-                // mode, error in strict mode (strict not yet wired).
+                // mode, error in strict mode (discovery.strict).
                 match &fragment.reads {
                     Some(reads) => {
                         let key = discovery::discovery_cache_key(&spec);
@@ -241,7 +246,7 @@ pub async fn prepare(
                     None => {
                         if config.discovery.strict {
                             anyhow::bail!(
-                                "discovery '{id}' emitted no `reads` manifest. Strict mode \
+                                "discovery '{parent_id}' emitted no `reads` manifest. Strict mode \
                                  (discovery.strict: true) requires every discovery to declare \
                                  what it read so the engine can verify the cached output on \
                                  later runs. Add a `reads` block to the script's output, or \
@@ -249,7 +254,7 @@ pub async fn prepare(
                             );
                         }
                         tracing::warn!(
-                            target = %id,
+                            target = %parent_id,
                             "discovery emitted no `reads` manifest; output cannot be cached \
                              across runs. Have the discovery emit `reads.files` / \
                              `reads.dirs` to enable warm-skip (TDD-0015)."
@@ -258,20 +263,24 @@ pub async fn prepare(
                 }
 
                 let new_includes = discovery::merge_into(&mut graph, fragment)?;
-                for nid in new_includes {
-                    if seen.insert(nid.clone()) {
-                        next_wave.push(nid);
-                    }
-                }
+                enqueue_descendants(
+                    &parent_id,
+                    new_includes,
+                    &mut seen,
+                    &mut chain_depth,
+                    &mut parent_of,
+                    &mut next_pending,
+                    MAX_CHAIN_GENERATIONS,
+                )?;
             }
 
-            // Validate edges between waves: next-wave includes may
-            // declare deps on this-wave targets, and we need the graph
-            // consistent before executing them.
+            // Validate edges between rounds: the next round's includes
+            // may declare deps on this round's targets, and we need
+            // the graph consistent before executing them.
             graph.build_edges_and_validate()?;
 
-            current_wave = next_wave;
-            depth += 1;
+            pending = next_pending;
+            round += 1;
         }
     }
 
@@ -281,6 +290,59 @@ pub async fn prepare(
         workspace_root: workspace_abs,
         config,
     })
+}
+
+/// Enqueue a parent discovery's emitted includes onto the worklist.
+/// Skips already-seen IDs, records each new entry's chain depth, and
+/// errors out with the full chain if the depth would exceed
+/// `max_generations` - that's where a runaway-emitter cycle gets
+/// caught.
+#[allow(clippy::too_many_arguments)]
+fn enqueue_descendants(
+    parent_id: &TargetId,
+    new_includes: Vec<TargetId>,
+    seen: &mut std::collections::HashSet<TargetId>,
+    chain_depth: &mut std::collections::HashMap<TargetId, u32>,
+    parent_of: &mut std::collections::HashMap<TargetId, TargetId>,
+    next_pending: &mut Vec<TargetId>,
+    max_generations: u32,
+) -> anyhow::Result<()> {
+    let parent_gen = *chain_depth.get(parent_id).unwrap_or(&0);
+    let child_gen = parent_gen + 1;
+    if child_gen > max_generations {
+        let chain = format_chain(parent_of, parent_id);
+        anyhow::bail!(
+            "discovery chain exceeded {max_generations} generations: {chain} keeps emitting new \
+             includes. Last attempted descendants: {:?}",
+            new_includes,
+        );
+    }
+    for nid in new_includes {
+        if seen.insert(nid.clone()) {
+            chain_depth.insert(nid.clone(), child_gen);
+            parent_of.insert(nid.clone(), parent_id.clone());
+            next_pending.push(nid);
+        }
+    }
+    Ok(())
+}
+
+fn format_chain(
+    parent_of: &std::collections::HashMap<TargetId, TargetId>,
+    leaf: &TargetId,
+) -> String {
+    let mut chain = vec![leaf.clone()];
+    let mut cur = leaf;
+    while let Some(p) = parent_of.get(cur) {
+        chain.push(p.clone());
+        cur = p;
+    }
+    chain.reverse();
+    chain
+        .iter()
+        .map(|id| id.as_str())
+        .collect::<Vec<_>>()
+        .join(" → ")
 }
 
 /// An event sink that silently drops everything. Use for subcommands
@@ -382,4 +444,112 @@ pub fn open_remote(config: &Config) -> anyhow::Result<(Option<()>, Option<()>, O
     // proceed with local-only behaviour (TDD-0006).
     let _ = config;
     Ok((None, None, None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    fn t(s: &str) -> TargetId {
+        TargetId::new(s)
+    }
+
+    #[test]
+    fn worklist_enqueue_dedups_already_seen() {
+        let mut seen: HashSet<TargetId> = [t("a"), t("b")].into();
+        let mut chain_depth: HashMap<TargetId, u32> = [(t("a"), 0), (t("b"), 0)].into();
+        let mut parent_of: HashMap<TargetId, TargetId> = HashMap::new();
+        let mut next: Vec<TargetId> = Vec::new();
+        enqueue_descendants(
+            &t("a"),
+            vec![t("b"), t("c")], // b already seen, c is fresh
+            &mut seen,
+            &mut chain_depth,
+            &mut parent_of,
+            &mut next,
+            8,
+        )
+        .unwrap();
+        assert_eq!(next, vec![t("c")]);
+        assert_eq!(chain_depth[&t("c")], 1);
+        assert_eq!(parent_of[&t("c")], t("a"));
+    }
+
+    #[test]
+    fn worklist_chain_overflow_reports_full_chain() {
+        // Build a chain root → g1 → g2 → ... → g7 (7 generations
+        // already). g7 emits g8 - that fits (depth = 8 = max). Then
+        // g8 trying to emit g9 trips the limit.
+        let mut seen: HashSet<TargetId> = HashSet::new();
+        seen.insert(t("root"));
+        let mut chain_depth: HashMap<TargetId, u32> = HashMap::new();
+        chain_depth.insert(t("root"), 0);
+        let mut parent_of: HashMap<TargetId, TargetId> = HashMap::new();
+        let mut next: Vec<TargetId> = Vec::new();
+
+        // root → g1 ... → g8 (all within budget).
+        let mut prev = t("root");
+        for i in 1..=8 {
+            let child = t(&format!("g{i}"));
+            enqueue_descendants(
+                &prev,
+                vec![child.clone()],
+                &mut seen,
+                &mut chain_depth,
+                &mut parent_of,
+                &mut next,
+                8,
+            )
+            .unwrap();
+            prev = child;
+        }
+        // g8 → g9 would be generation 9, over the cap.
+        let err = enqueue_descendants(
+            &t("g8"),
+            vec![t("g9")],
+            &mut seen,
+            &mut chain_depth,
+            &mut parent_of,
+            &mut next,
+            8,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("exceeded 8 generations"), "got: {err}");
+        assert!(
+            err.contains("root → g1 → g2 → g3 → g4 → g5 → g6 → g7 → g8"),
+            "expected chain in error: {err}",
+        );
+    }
+
+    #[test]
+    fn worklist_chain_depth_propagates_through_parents() {
+        let mut seen: HashSet<TargetId> = [t("root")].into();
+        let mut chain_depth: HashMap<TargetId, u32> = [(t("root"), 0)].into();
+        let mut parent_of: HashMap<TargetId, TargetId> = HashMap::new();
+        let mut next: Vec<TargetId> = Vec::new();
+        enqueue_descendants(
+            &t("root"),
+            vec![t("child")],
+            &mut seen,
+            &mut chain_depth,
+            &mut parent_of,
+            &mut next,
+            8,
+        )
+        .unwrap();
+        enqueue_descendants(
+            &t("child"),
+            vec![t("grandchild")],
+            &mut seen,
+            &mut chain_depth,
+            &mut parent_of,
+            &mut next,
+            8,
+        )
+        .unwrap();
+        assert_eq!(chain_depth[&t("child")], 1);
+        assert_eq!(chain_depth[&t("grandchild")], 2);
+    }
 }
