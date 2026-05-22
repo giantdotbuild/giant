@@ -239,6 +239,15 @@ pub async fn prepare(
                         discovery::write_sidecar(workspace_abs.as_path(), &sidecar)?;
                     }
                     None => {
+                        if config.discovery.strict {
+                            anyhow::bail!(
+                                "discovery '{id}' emitted no `reads` manifest. Strict mode \
+                                 (discovery.strict: true) requires every discovery to declare \
+                                 what it read so the engine can verify the cached output on \
+                                 later runs. Add a `reads` block to the script's output, or \
+                                 set discovery.strict: false to fall back to lenient mode."
+                            );
+                        }
                         tracing::warn!(
                             target = %id,
                             "discovery emitted no `reads` manifest; output cannot be cached \

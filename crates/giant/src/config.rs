@@ -45,9 +45,24 @@ pub struct Config {
     #[serde(default)]
     pub cache: CacheConfig,
 
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
+
     #[cfg(feature = "remote")]
     #[serde(default)]
     pub remote: RemoteConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryConfig {
+    /// When `true`, a discovery whose output lacks a `reads` manifest
+    /// is a hard error (the cooperative protocol is enforced -
+    /// ADR-0013). Default `false`: missing `reads` only produces a
+    /// warning, and the discovery's output is used once but not
+    /// cached.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 fn default_schema_version() -> u32 {

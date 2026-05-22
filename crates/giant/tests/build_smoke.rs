@@ -708,6 +708,63 @@ include:
 }
 
 #[test]
+fn strict_mode_errors_on_discovery_without_reads_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir(ws.join("tools")).unwrap();
+    std::fs::write(
+        ws.join("tools/discover.sh"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p .giant/d
+echo '{"targets": []}' > .giant/d/d.json
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::fs::metadata(ws.join("tools/discover.sh"))
+            .unwrap()
+            .permissions();
+        let mut p = p;
+        p.set_mode(0o755);
+        std::fs::set_permissions(ws.join("tools/discover.sh"), p).unwrap();
+    }
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: strict
+cache:
+  dir: ./cache
+discovery:
+  strict: true
+include:
+  - id: "discover:noreads"
+    outputs: [".giant/d/d.json"]
+    command: "./tools/discover.sh"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "strict mode should fail when discovery has no `reads`"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("discover:noreads") && stderr.contains("`reads`"),
+        "expected strict-mode error naming the entry and `reads`: {stderr}"
+    );
+}
+
+#[test]
 fn non_cooperative_discovery_skips_sidecar_in_lenient_mode() {
     // A discovery without a `reads` manifest still works (lenient
     // default) but doesn't produce a sidecar.
