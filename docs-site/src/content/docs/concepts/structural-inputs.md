@@ -1,41 +1,75 @@
 ---
 title: Structural inputs
-description: Only the lines you care about contribute to the cache key.
+description: Hash only the lines you care about.
 ---
 
-A structural input is an input declaration that only hashes lines
-matching one of a list of prefixes. Function-body edits don't shift
-the cache key; only structural changes do.
+A structural input hashes only the lines of a file matching one of a
+list of prefixes. Function-body edits don't shift the cache key; only
+the matched lines do. The same idea appears in two places now: as the
+**excerpt** entry kind in a discovery's `reads` manifest (the
+recommended use), and as a legacy `kind: structural` input on a
+regular target.
 
 ## The motivating problem
 
-Go's `go list -json` is slow on large repos. Most projects discover
-packages by running it inside a discovery target. But its output
-depends only on:
+Go's `go list -json` is slow on large repos. Most projects enumerate
+packages by running it inside a discovery target. The result depends
+only on:
 
 - The `package` declarations
 - The `import` statements
 - A few directives like `//go:embed`
 
-It does NOT depend on function bodies. If you declare `**/*.go` as a
-plain input to your discovery target, every edit anywhere in any Go
-file invalidates the cache, even cosmetic edits to function bodies.
+It does NOT depend on function bodies. Hashing every Go file in full
+would invalidate the discovery's cache on every cosmetic edit. The
+fix is to hash only the lines that actually affect discovery output.
 
-Structural inputs fix this:
+## In discoveries (the recommended use)
 
-```yaml
-include:
-  - id: "discover:go"
-    inputs:
-      - "go.mod"
-      - kind: structural
-        files: "**/*.go"
-        lines: ["package ", "import ", "//go:embed "]
-    outputs: [".giant/d/go.json"]
-    command: "tools/discover-go.sh > .giant/d/go.json"
+A discovery emits an excerpt entry in its `reads.files` manifest:
+
+```jsonc
+{
+  "targets": [ /* ... */ ],
+  "reads": {
+    "files": [
+      { "path": "go.mod" },
+      { "path": "pkg/foo/foo.go", "lines": ["package ", "import ", "//go:embed "] }
+    ]
+  }
+}
 ```
 
-Now:
+For each file path, the verifier hashes only the lines whose prefix
+matches any pattern in `lines:`. Editing a function body inside
+`foo.go` doesn't change the matched-line hash → the discovery's
+sidecar still verifies → the cached output is reused without
+re-executing the script. See
+[Discovery](/concepts/discovery/) for the full cooperative protocol.
+
+## In regular targets (legacy form)
+
+The same algorithm is also available as an input kind on regular
+targets:
+
+```yaml
+targets:
+  - id: "doc:public-api"
+    inputs:
+      - kind: structural
+        files: "**/*.rs"
+        lines: ["pub fn ", "pub struct ", "pub enum "]
+    outputs: ["docs/api.md"]
+    command: "tools/extract-api > docs/api.md"
+```
+
+The `files:` can be a string or list. This form is useful for the
+small set of non-discovery targets that read source as data
+(documentation generators, API surface extractors). For
+**discovery targets** the loader rejects `inputs:` outright - use a
+`reads.files` excerpt entry in the discovery output instead.
+
+Now, in either form:
 
 - Edit a function body → no rebuild.
 - Add `import "log"` → rebuild.
@@ -87,16 +121,20 @@ few milliseconds.
 
 ## When to use structural inputs
 
-Use them whenever your command only cares about a subset of file
+Use the **excerpt** entry in a discovery's `reads.files` manifest
+whenever the discovery script only consults a subset of file
 structure. Examples:
 
 - Go discovery: `package`, `import`, `//go:embed`
 - TypeScript module resolution: `import`, `export`
 - Rust crate discovery: `mod`, `use`, `extern crate`, `pub`
-- Linting that only cares about declarations, not bodies
 
-Don't use them for actual compilation - the compiler reads everything,
-so the cache key has to reflect everything.
+Use the **`kind: structural`** input form on a regular target when
+the target reads source as data - documentation generators, API
+surface extractors, dependency-graph dumpers. Niche but real.
+
+Don't use either form for actual compilation - the compiler reads
+everything, so the cache key has to reflect everything.
 
 ## Tradeoffs
 
@@ -111,10 +149,16 @@ so the cache key has to reflect everything.
 
 ## Inspecting a structural input
 
+For a regular target using `kind: structural`:
+
 ```console
-$ giant explain discover:go | grep -A4 structural
+$ giant explain doc:public-api | grep -A4 structural
 structural_inputs (1):
-  **/*.go (lines: ["package ", "import ", "//go:embed "])
+  **/*.rs (lines: ["pub fn ", "pub struct ", "pub enum "])
     fingerprint: sha256:5c8a3f...
-    files scanned: 8423
+    files scanned: 1284
 ```
+
+For a discovery target, the per-entry recorded hashes live in the
+discovery sidecar under `.giant/discovery/<key>.json`. Open it with
+`jq` to see exactly which paths the verifier compares against.
