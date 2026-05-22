@@ -108,15 +108,22 @@ pub async fn prepare(
                 );
             }
 
-            // Collect outputs first so we release the immutable borrow
-            // before mutating the graph.
-            let outputs_to_read: Vec<PathBuf> = current_wave
+            // Collect (id, spec, output_path) triples; cloning the spec
+            // releases the immutable borrow on the graph before merge.
+            // Specs are tiny in practice so the clone is fine.
+            let wave_outputs: Vec<(TargetId, crate::model::TargetSpec, PathBuf)> = current_wave
                 .iter()
                 .flat_map(|id| {
-                    let spec = graph.get(id).expect("present in current wave");
+                    let spec = graph.get(id).expect("present in current wave").clone();
                     spec.outputs
                         .iter()
-                        .map(|p| workspace_abs.as_path().join(p.as_path()))
+                        .map(|p| {
+                            (
+                                id.clone(),
+                                spec.clone(),
+                                workspace_abs.as_path().join(p.as_path()),
+                            )
+                        })
                         .collect::<Vec<_>>()
                 })
                 .collect();
@@ -124,8 +131,37 @@ pub async fn prepare(
             // Merge each wave's outputs. Nested includes returned by
             // merge_into feed the next wave (de-duplicated via `seen`).
             let mut next_wave: Vec<TargetId> = Vec::new();
-            for abs in outputs_to_read {
+            for (id, spec, abs) in wave_outputs {
                 let fragment = discovery::parse_fragment(&abs)?;
+
+                // Cooperative protocol (ADR-0013): if the discovery
+                // emitted a `reads` manifest, materialize it and write
+                // the sidecar so the next run can short-circuit. If
+                // absent, this run is uncacheable - warn in lenient
+                // mode, error in strict mode (strict not yet wired).
+                match &fragment.reads {
+                    Some(reads) => {
+                        let key = discovery::discovery_cache_key(&spec);
+                        let recorded =
+                            discovery::materialize_reads(reads, workspace_abs.as_path())?;
+                        let sidecar = discovery::DiscoverySidecar::new(
+                            key,
+                            fragment.targets.clone(),
+                            fragment.include.clone(),
+                            recorded,
+                        );
+                        discovery::write_sidecar(workspace_abs.as_path(), &sidecar)?;
+                    }
+                    None => {
+                        tracing::warn!(
+                            target = %id,
+                            "discovery emitted no `reads` manifest; output cannot be cached \
+                             across runs. Have the discovery emit `reads.files` / \
+                             `reads.dirs` to enable warm-skip (TDD-0015)."
+                        );
+                    }
+                }
+
                 let new_includes = discovery::merge_into(&mut graph, fragment)?;
                 for nid in new_includes {
                     if seen.insert(nid.clone()) {

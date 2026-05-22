@@ -508,6 +508,153 @@ targets:
 }
 
 #[test]
+fn cooperative_discovery_writes_sidecar_on_cold_run() {
+    // A discovery that emits a `reads` manifest in its output should
+    // produce a sidecar file under .giant/discovery/ after the cold
+    // run. The sidecar carries the targets, includes, and recorded
+    // hashes used to verify the cached output on later runs.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir(ws.join("tools")).unwrap();
+    std::fs::write(ws.join("go.mod"), "module example\n").unwrap();
+    std::fs::write(
+        ws.join("tools/discover.sh"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p .giant/d
+cat > .giant/d/d.json <<'JSON'
+{
+  "targets": [],
+  "reads": {
+    "files": [
+      { "path": "go.mod" }
+    ]
+  }
+}
+JSON
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::fs::metadata(ws.join("tools/discover.sh"))
+            .unwrap()
+            .permissions();
+        let mut p = p;
+        p.set_mode(0o755);
+        std::fs::set_permissions(ws.join("tools/discover.sh"), p).unwrap();
+    }
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: cooperative
+cache:
+  dir: ./cache
+include:
+  - id: "discover:coop"
+    outputs: [".giant/d/d.json"]
+    command: "./tools/discover.sh"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let sidecar_dir = ws.join(".giant/discovery");
+    let entries: Vec<_> = std::fs::read_dir(&sidecar_dir)
+        .unwrap_or_else(|e| panic!("sidecar dir missing at {}: {e}", sidecar_dir.display()))
+        .filter_map(|r| r.ok())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected one sidecar in {}, found {}",
+        sidecar_dir.display(),
+        entries.len()
+    );
+
+    let contents = std::fs::read_to_string(entries[0].path()).unwrap();
+    assert!(
+        contents.contains("\"path\":\"go.mod\""),
+        "sidecar should record go.mod: {contents}"
+    );
+    assert!(
+        contents.contains("\"content_hash\":"),
+        "sidecar should carry a recorded hash: {contents}"
+    );
+}
+
+#[test]
+fn non_cooperative_discovery_skips_sidecar_in_lenient_mode() {
+    // A discovery without a `reads` manifest still works (lenient
+    // default) but doesn't produce a sidecar.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::create_dir(ws.join("tools")).unwrap();
+    std::fs::write(
+        ws.join("tools/discover.sh"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p .giant/d
+echo '{"targets": []}' > .giant/d/d.json
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::fs::metadata(ws.join("tools/discover.sh"))
+            .unwrap()
+            .permissions();
+        let mut p = p;
+        p.set_mode(0o755);
+        std::fs::set_permissions(ws.join("tools/discover.sh"), p).unwrap();
+    }
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: noncoop
+cache:
+  dir: ./cache
+include:
+  - id: "discover:silent"
+    outputs: [".giant/d/d.json"]
+    command: "./tools/discover.sh"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let sidecar_dir = ws.join(".giant/discovery");
+    let count = std::fs::read_dir(&sidecar_dir)
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(
+        count, 0,
+        "no sidecar should be written without a `reads` manifest"
+    );
+}
+
+#[test]
 fn discovery_can_emit_nested_includes() {
     // Wave-based recursive discovery (TDD-0003): a discovery target
     // emits another include target, which runs in the next wave and
