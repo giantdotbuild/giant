@@ -1,13 +1,12 @@
 //! Small focused git interface - just what the structural-input fast-path
-//! needs (TDD-0002 §Warm validation).
+//! needs (TDD-0002 §Enumeration).
 //!
-//! Two operations:
 //! - `get_index_files_and_status`: enumerate tracked files from the
 //!   index (single file read, no recursive walk) plus untracked files
-//!   from `git status`. Used for cold structural-input compute.
-//! - `get_full_status_fast_scoped`: `git status` scoped via pathspecs.
-//!   Used for warm validation - only files git reports as modified /
-//!   added / deleted get re-hashed.
+//!   from `git status`. The structural fast-path fingerprints each, using
+//!   the per-target sidecar's recorded (mtime, size) to skip re-reads.
+//! - `affected_files_since`: files changed since a git ref, for
+//!   `giant affected`.
 
 use gix::bstr::ByteSlice;
 use std::path::{Path, PathBuf};
@@ -25,14 +24,6 @@ pub enum GitError {
 /// `git status`. Paths are workspace-relative.
 pub struct IndexAndStatus {
     pub tracked: Vec<PathBuf>,
-    pub untracked: Vec<PathBuf>,
-}
-
-/// Result of a fast `git status` query. Paths are workspace-relative.
-#[derive(Debug, Default)]
-pub struct StatusFast {
-    pub modified: Vec<PathBuf>,
-    pub deleted: Vec<PathBuf>,
     pub untracked: Vec<PathBuf>,
 }
 
@@ -103,54 +94,6 @@ pub fn get_index_files_and_status(
     }
 
     Some(IndexAndStatus { tracked, untracked })
-}
-
-/// `git status` scoped via pathspecs. Returns the three lists of paths
-/// (modified, deleted, untracked) - workspace-relative.
-///
-/// Returns `None` if not in a git repository. Used for warm structural-
-/// input validation: only files git reports as changed need re-reading.
-pub fn get_full_status_fast_scoped(
-    workspace_root: &Path,
-    pathspecs: &[gix::bstr::BString],
-) -> Option<StatusFast> {
-    let repo = open(workspace_root).ok()?;
-
-    let mut out = StatusFast::default();
-
-    let status = repo.status(gix::progress::Discard).ok()?;
-    let iter = status
-        .untracked_files(gix::status::UntrackedFiles::Files)
-        .into_index_worktree_iter(pathspecs.to_vec())
-        .ok()?;
-
-    for item in iter.flatten() {
-        if let Some(summary) = item.summary() {
-            use gix::status::index_worktree::iter::Summary;
-            let p = item.rela_path().to_str_lossy().into_owned();
-            let path = PathBuf::from(p);
-            match summary {
-                Summary::Removed => out.deleted.push(path),
-                Summary::Modified | Summary::TypeChange | Summary::Conflict => {
-                    out.modified.push(path)
-                }
-                Summary::Added | Summary::IntentToAdd | Summary::Renamed | Summary::Copied => {
-                    out.untracked.push(path)
-                }
-            }
-        }
-    }
-    out.modified.sort();
-    out.deleted.sort();
-    out.untracked.sort();
-    Some(out)
-}
-
-/// HEAD commit hash, hex-encoded. `None` if not in a git repo or no HEAD.
-pub fn head_commit(workspace_root: &Path) -> Option<String> {
-    let repo = open(workspace_root).ok()?;
-    let head = repo.head_id().ok()?;
-    Some(head.to_string())
 }
 
 /// Files changed in the working tree (committed + uncommitted) since

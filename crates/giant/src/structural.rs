@@ -1,17 +1,17 @@
 //! Structural inputs: line-pattern-filtered file fingerprinting.
 //!
-//! Stages, per TDD-0002:
+//! Two ways to reach the same fingerprint, per TDD-0002:
 //!
-//! - **Stage 1 (shipped):** cold compute via filesystem walk; correctness.
-//! - **Stage 2 (this file):** per-target sidecar holds (path → lines_hash,
-//!   mtime, size). Warm runs walk the workspace but skip re-reading files
-//!   whose mtime+size match the sidecar.
-//! - **Stage 3 (next slice):** git fast-path - enumerate via gix index for
-//!   cold compute; `git status` delta to skip the walk entirely for warm.
+//! - **Walk:** an `ignore::Walk` over the workspace (or scoped subtrees),
+//!   matching files against the globs. Used when not in a git repo.
+//! - **Git fast-path:** enumerate candidates from the gix index plus
+//!   untracked files, no directory walk. Used inside a git repo.
 //!
-//! The cache-key contribution is unchanged across stages: same
-//! per-file fingerprint, same global combine, same hash. Stage 2/3 only
-//! speed up *how* we get to that hash.
+//! Both reuse a per-target sidecar holding (path → lines_hash, mtime,
+//! size) so unchanged files are stat'd, not re-read. The cache-key
+//! contribution is identical either way: same per-file fingerprint, same
+//! global combine, same hash. The two paths only differ in *how* they
+//! enumerate candidate files.
 
 use crate::cache::LocalCache;
 use crate::model::{ContentHash, TargetId};
@@ -210,15 +210,23 @@ fn save_sidecar(
     Ok(())
 }
 
-/// Git fast-path. Returns `None` when not in a git repo or git ops fail
-/// - the caller falls back to a filesystem walk.
+/// Git fast-path. Returns `None` when not in a git repo - the caller
+/// falls back to a filesystem walk.
 ///
-/// Two modes:
-/// - **Cold** (no prior sidecar entry): enumerate via the git index +
-///   untracked files. No directory walk; single index read.
-/// - **Warm** (prior sidecar present): use `git status` scoped to the
-///   input's globs to find what changed. Only re-read modified / new
-///   files; drop deleted; reuse everything else from the prior entry.
+/// Enumerates candidate files from the git index plus untracked files
+/// (no directory walk), then fingerprints each, reusing `prior_per_file`
+/// to skip re-reading files whose (mtime, size) are unchanged. Cold and
+/// warm are the same path: cold simply has an empty `prior_per_file`, so
+/// nothing is skipped.
+///
+/// The mtime/size skip compares against *Giant's own* recorded stat for
+/// each file, not against the git index. That is what makes it sound: a
+/// `git status` delta answers "changed vs the index", which diverges
+/// from "changed since Giant last hashed" after a `git checkout`, branch
+/// switch, `git restore`, or `reset` - all of which leave the worktree
+/// matching the index (clean status) while the content differs from what
+/// we recorded. Stat-against-our-record catches every such case, since
+/// any of those operations rewrites the file and moves its mtime.
 fn try_git_fast_path(
     workspace_root: &AbsPath,
     files_globs: &[String],
@@ -244,76 +252,24 @@ fn try_git_fast_path(
         .collect();
     let exts_ref: Vec<&str> = exts.iter().map(|s| s.as_str()).collect();
 
-    if prior_per_file.is_empty() {
-        // Cold path: enumerate via git index, fingerprint each match.
-        let listing = crate::git::get_index_files_and_status(workspace_root.as_path(), &exts_ref)?;
-        let mut current = BTreeMap::new();
-        let candidates = listing.tracked.iter().chain(listing.untracked.iter());
-        for rel in candidates {
-            let rel_str = rel.to_string_lossy().into_owned();
-            if !matches_path(&patterns, &rel_str, scope) {
-                continue;
-            }
-            let abs = workspace_root.as_path().join(rel);
-            if let Some(entry) = fingerprint_file_with_skip(&abs, lines_patterns, None)
+    let listing = crate::git::get_index_files_and_status(workspace_root.as_path(), &exts_ref)?;
+    let mut current = BTreeMap::new();
+    for rel in listing.tracked.iter().chain(listing.untracked.iter()) {
+        let rel_str = rel.to_string_lossy().into_owned();
+        if !matches_path(&patterns, &rel_str, scope) {
+            continue;
+        }
+        let abs = workspace_root.as_path().join(rel);
+        // Deleted files simply aren't enumerated, so they drop out of the
+        // map without special handling.
+        if let Some(entry) =
+            fingerprint_file_with_skip(&abs, lines_patterns, prior_per_file.get(&rel_str))
                 .ok()
                 .flatten()
-            {
-                current.insert(rel_str, entry);
-            }
-        }
-        return Some(current);
-    }
-
-    // Warm path: derive scoped pathspecs (auto-pick from scope when
-    // present; otherwise the glob's longest non-wildcard prefix).
-    let pathspecs = build_pathspecs(scope, files_globs);
-    let status = crate::git::get_full_status_fast_scoped(workspace_root.as_path(), &pathspecs)?;
-
-    let mut current = prior_per_file.clone();
-
-    // Drop deleted files.
-    for path in &status.deleted {
-        let rel = path.to_string_lossy().into_owned();
-        current.remove(&rel);
-    }
-
-    // Re-fingerprint modified files.
-    for path in &status.modified {
-        let rel = path.to_string_lossy().into_owned();
-        if !matches_path(&patterns, &rel, scope) {
-            continue;
-        }
-        let abs = workspace_root.as_path().join(path);
-        match fingerprint_file_with_skip(&abs, lines_patterns, None)
-            .ok()
-            .flatten()
         {
-            Some(entry) => {
-                current.insert(rel, entry);
-            }
-            None => {
-                // No matching lines (or unreadable) - drop from per_file.
-                current.remove(&rel);
-            }
+            current.insert(rel_str, entry);
         }
     }
-
-    // Newly untracked files that match: add them.
-    for path in &status.untracked {
-        let rel = path.to_string_lossy().into_owned();
-        if !matches_path(&patterns, &rel, scope) {
-            continue;
-        }
-        let abs = workspace_root.as_path().join(path);
-        if let Some(entry) = fingerprint_file_with_skip(&abs, lines_patterns, None)
-            .ok()
-            .flatten()
-        {
-            current.insert(rel, entry);
-        }
-    }
-
     Some(current)
 }
 
@@ -323,36 +279,6 @@ fn matches_path(patterns: &[glob::Pattern], rel: &str, scope: &[String]) -> bool
         return false;
     }
     patterns.iter().any(|p| p.matches(rel))
-}
-
-/// Build pathspecs for `git status` scoping. Prefers user-declared scope,
-/// otherwise derives from each glob's longest non-wildcard prefix. Empty
-/// pathspec list = workspace-wide status.
-fn build_pathspecs(scope: &[String], files_globs: &[String]) -> Vec<gix::bstr::BString> {
-    if !scope.is_empty() {
-        return scope
-            .iter()
-            .map(|s| gix::bstr::BString::from(s.as_str()))
-            .collect();
-    }
-    let mut out: Vec<gix::bstr::BString> = files_globs
-        .iter()
-        .filter_map(|g| {
-            let prefix: String = g
-                .chars()
-                .take_while(|&c| c != '*' && c != '?' && c != '[')
-                .collect();
-            let prefix = prefix.trim_end_matches('/');
-            if prefix.is_empty() {
-                None
-            } else {
-                Some(gix::bstr::BString::from(prefix))
-            }
-        })
-        .collect();
-    out.sort();
-    out.dedup();
-    out
 }
 
 /// Walk the workspace (or the scoped subtrees), fingerprint each
@@ -769,6 +695,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(h, h_ref, "gitignored files must not contribute");
+    }
+
+    /// Run a git subcommand in `dir`. Returns false if git isn't
+    /// available or the command failed, so tests can skip gracefully.
+    fn git(args: &[&str], dir: &Path) -> bool {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn git_fast_path_recomputes_after_commit_with_clean_status() {
+        // Regression: the warm git fast-path used to trust a clean
+        // `git status` (worktree == index) and reuse the prior hash. But
+        // after a commit that rewrites a matching file, the worktree
+        // matches the index yet the content differs from what we last
+        // recorded. The fingerprint must still change.
+        let (cache, _cache_dir) = temp_cache_dir().await;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !git(&["init", "-q"], root) {
+            return; // git unavailable - skip.
+        }
+
+        let id = TargetId::new("svc");
+        let files = ["*.go".to_string()];
+        let lines = ["package ".to_string(), "import ".to_string()];
+
+        write(&root.join("a.go"), "package a\nimport \"x\"\n");
+        assert!(git(&["add", "."], root));
+        assert!(git(&["commit", "-q", "-m", "v1"], root));
+        let h1 = compute_fingerprint(&ws(&dir), &cache, &id, &files, &lines, &[]).unwrap();
+
+        // Change the import line (different length, so the result holds
+        // even on filesystems with coarse mtime) and commit. Status is
+        // clean afterwards; only our recorded (mtime, size) reveals it.
+        write(&root.join("a.go"), "package a\nimport \"yy\"\n");
+        assert!(git(&["add", "."], root));
+        assert!(git(&["commit", "-q", "-m", "v2"], root));
+        let h2 = compute_fingerprint(&ws(&dir), &cache, &id, &files, &lines, &[]).unwrap();
+
+        assert_ne!(
+            h1, h2,
+            "import change across a commit must invalidate the fingerprint"
+        );
     }
 
     #[tokio::test]
