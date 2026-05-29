@@ -122,12 +122,8 @@ async fn write_blob(
     merged: bool,
     is_stderr: bool,
 ) -> anyhow::Result<()> {
-    let bytes = const_hex::decode(hex)?;
-    let arr: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("malformed cache-key hex in AC entry: {hex}"))?;
-    let hash = ContentHash::from_raw(arr);
+    let hash = ContentHash::from_hex(hex)
+        .ok_or_else(|| anyhow::anyhow!("malformed cache-key hex in AC entry: {hex}"))?;
     let blob = cache
         .get_cas(&hash)
         .await?
@@ -142,12 +138,9 @@ async fn write_blob(
 }
 
 fn parse_cache_key(hex: &str) -> anyhow::Result<crate::model::CacheKey> {
-    let bytes =
-        const_hex::decode(hex).map_err(|e| anyhow::anyhow!("--key isn't valid hex: {e}"))?;
-    let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-        anyhow::anyhow!("--key must be 64 hex chars (32 bytes), got {}", bytes.len())
-    })?;
-    Ok(crate::model::CacheKey::new(ContentHash::from_raw(arr)))
+    let hash = ContentHash::from_hex(hex)
+        .ok_or_else(|| anyhow::anyhow!("--key must be 64 hex chars (32 bytes), got {hex:?}"))?;
+    Ok(crate::model::CacheKey::new(hash))
 }
 
 /// Compute `dep_outputs` for `target_id` by reading each direct dep's
@@ -178,12 +171,9 @@ async fn collect_dep_output_hashes(
         )
         .await?;
         if let Some(entry) = cache.get_ac(&dep_key).await? {
-            let bytes = const_hex::decode(&entry.outputs_content_hash)?;
-            let arr: [u8; 32] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("bad outputs_content_hash in AC"))?;
-            out.insert(dep_id.clone(), ContentHash::from_raw(arr));
+            let hash = ContentHash::from_hex(&entry.outputs_content_hash)
+                .ok_or_else(|| anyhow::anyhow!("bad outputs_content_hash in AC"))?;
+            out.insert(dep_id.clone(), hash);
         }
     }
     Ok(out)

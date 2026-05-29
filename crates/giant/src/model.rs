@@ -44,6 +44,14 @@ impl ContentHash {
         Self(bytes)
     }
 
+    /// Parse a 64-char hex string. `None` if it isn't valid 32-byte hex -
+    /// used when reading hashes back out of cache sidecars / AC entries.
+    pub fn from_hex(s: &str) -> Option<Self> {
+        let bytes = const_hex::decode(s).ok()?;
+        let arr: [u8; 32] = bytes.as_slice().try_into().ok()?;
+        Some(Self(arr))
+    }
+
     /// Build a streaming hasher when you want to feed bytes incrementally.
     pub fn hasher() -> Hasher {
         use sha2::Digest;

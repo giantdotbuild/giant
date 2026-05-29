@@ -62,9 +62,8 @@ pub struct Config {
 /// them: discovery sidecars, the fsmonitor token, build logs.
 ///
 /// Defaults to `.giant/` at the workspace root. Override when sharing
-/// a workspace with another tool that already owns `.giant/` (e.g.
-/// giant 1 coexistence) or when state files want a non-gitignored
-/// location.
+/// a workspace with another tool that already owns `.giant/`, or when
+/// state files want a non-gitignored location.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateConfig {

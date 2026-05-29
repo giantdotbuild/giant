@@ -159,10 +159,7 @@ async fn walk_target(
 
     // Look up the AC entry to get the real output hash if cached.
     let output_hash = match cache.get_ac(&key).await? {
-        Some(ac) => const_hex::decode(&ac.outputs_content_hash)
-            .ok()
-            .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
-            .map(ContentHash::from_raw),
+        Some(ac) => ContentHash::from_hex(&ac.outputs_content_hash),
         None => None,
     };
 
