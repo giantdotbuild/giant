@@ -28,6 +28,7 @@ const TARGET_TRIPLE: &str = env!("GIANT_TARGET_TRIPLE");
 ///   - `bash scripts/discover.sh`  → hashes `scripts/discover.sh`
 ///   - `./bin/discover foo`         → hashes `bin/discover`
 ///   - `tools/discover foo`         → hashes `tools/discover`
+///
 /// System interpreters (`bash`, `python3`) live outside the workspace
 /// and are intentionally not hashed - they'd make the key host-specific.
 /// Binaries on PATH aren't resolved either; users wiring an external
@@ -489,10 +490,8 @@ pub fn verify_reads_with_fsmonitor(
 ) -> std::io::Result<VerifyOutcome> {
     use rayon::prelude::*;
 
-    let files_result: Option<std::io::Result<VerifyOutcome>> = recorded
-        .files
-        .par_iter()
-        .find_map_any(|f| {
+    let files_result: Option<std::io::Result<VerifyOutcome>> =
+        recorded.files.par_iter().find_map_any(|f| {
             if changeset.is_some_and(|cs| !cs.file_might_have_changed(f.path.as_path())) {
                 return None;
             }
@@ -511,10 +510,8 @@ pub fn verify_reads_with_fsmonitor(
         return r;
     }
 
-    let dirs_result: Option<std::io::Result<VerifyOutcome>> = recorded
-        .dirs
-        .par_iter()
-        .find_map_any(|d| {
+    let dirs_result: Option<std::io::Result<VerifyOutcome>> =
+        recorded.dirs.par_iter().find_map_any(|d| {
             if changeset.is_some_and(|cs| !cs.dir_might_have_changed(d.path.as_path())) {
                 return None;
             }
@@ -662,10 +659,7 @@ impl DiscoverySidecar {
     }
 }
 
-fn sidecar_path(
-    state_dir: &std::path::Path,
-    key: CacheKey,
-) -> std::path::PathBuf {
+fn sidecar_path(state_dir: &std::path::Path, key: CacheKey) -> std::path::PathBuf {
     state_dir
         .join("discovery")
         .join(format!("{}.json", key.to_hex()))
@@ -1103,7 +1097,9 @@ mod tests {
         // so a plain set/restore is enough.
         let new_path = ws.as_path().join("bin").into_os_string();
         // SAFETY: tests in this module are not multithreaded over PATH.
-        unsafe { std::env::set_var("PATH", &new_path); }
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
 
         let spec = include_spec("d", "discover-go pkg/...");
         let key_v1 = discovery_cache_key(&spec, &ws);
@@ -1114,8 +1110,12 @@ mod tests {
         // Restore PATH before any assertion that might panic.
         match prev_path {
             // SAFETY: see above
-            Some(p) => unsafe { std::env::set_var("PATH", p); },
-            None => unsafe { std::env::remove_var("PATH"); },
+            Some(p) => unsafe {
+                std::env::set_var("PATH", p);
+            },
+            None => unsafe {
+                std::env::remove_var("PATH");
+            },
         }
 
         assert_ne!(
@@ -1162,7 +1162,7 @@ mod tests {
         std::fs::create_dir_all(ws.as_path().join("tools")).unwrap();
         std::fs::write(ws.as_path().join("tools/d.sh"), b"v1").unwrap();
 
-        let mut argv_only = include_spec("d", "tools/d.sh");
+        let argv_only = include_spec("d", "tools/d.sh");
         let mut both = include_spec("d", "tools/d.sh");
         both.inputs = vec![Input::File {
             glob: GlobPattern::new("tools/d.sh").unwrap(),

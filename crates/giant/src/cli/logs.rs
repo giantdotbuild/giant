@@ -71,7 +71,8 @@ pub async fn execute(args: LogsArgs, global: &super::GlobalFlags) -> anyhow::Res
     let key = match args.key {
         Some(hex) => parse_cache_key(&hex)?,
         None => {
-            let dep_outputs = collect_dep_output_hashes(&prepared.graph, &target_id, &prepared.cache).await?;
+            let dep_outputs =
+                collect_dep_output_hashes(&prepared.graph, &target_id, &prepared.cache).await?;
             let (key, _) = crate::executor::compute_cache_key_with_breakdown(
                 &spec,
                 &prepared.workspace_root,
@@ -83,18 +84,14 @@ pub async fn execute(args: LogsArgs, global: &super::GlobalFlags) -> anyhow::Res
         }
     };
 
-    let entry = prepared
-        .cache
-        .get_ac(&key)
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no cached AC entry for {} at key {}\n\
+    let entry = prepared.cache.get_ac(&key).await?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no cached AC entry for {} at key {}\n\
                  (run the target first, or check capture_logs is on)",
-                target_id.as_str(),
-                key.to_hex(),
-            )
-        })?;
+            target_id.as_str(),
+            key.to_hex(),
+        )
+    })?;
 
     let want_stdout = !args.stderr_only;
     let want_stderr = !args.stdout_only;
@@ -145,12 +142,11 @@ async fn write_blob(
 }
 
 fn parse_cache_key(hex: &str) -> anyhow::Result<crate::model::CacheKey> {
-    let bytes = const_hex::decode(hex)
-        .map_err(|e| anyhow::anyhow!("--key isn't valid hex: {e}"))?;
-    let arr: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("--key must be 64 hex chars (32 bytes), got {}", bytes.len()))?;
+    let bytes =
+        const_hex::decode(hex).map_err(|e| anyhow::anyhow!("--key isn't valid hex: {e}"))?;
+    let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!("--key must be 64 hex chars (32 bytes), got {}", bytes.len())
+    })?;
     Ok(crate::model::CacheKey::new(ContentHash::from_raw(arr)))
 }
 

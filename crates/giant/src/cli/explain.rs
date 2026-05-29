@@ -63,14 +63,16 @@ pub async fn execute(args: ExplainArgs, global: &super::GlobalFlags) -> anyhow::
     }
 
     let mut memo: BTreeMap<TargetId, (CacheKey, Option<ContentHash>)> = BTreeMap::new();
-    let (key, breakdown, output_hash) = breakdown_for_target(&prepared, &target_id, &mut memo).await?;
+    let (key, breakdown, output_hash) =
+        breakdown_for_target(&prepared, &target_id, &mut memo).await?;
 
     if let Some(other) = &args.diff {
         let other_id = TargetId::new(other);
         if prepared.graph.get(&other_id).is_none() {
             anyhow::bail!("target {:?} not found in graph", other);
         }
-        let (other_key, other_bd, _) = breakdown_for_target(&prepared, &other_id, &mut memo).await?;
+        let (other_key, other_bd, _) =
+            breakdown_for_target(&prepared, &other_id, &mut memo).await?;
         print_diff(
             (&target_id, key, &breakdown),
             (&other_id, other_key, &other_bd),
@@ -305,7 +307,12 @@ fn print_diff(
     diff_scalar(&mut w, "cwd", &lbd.cwd, &rbd.cwd);
 
     diff_env_map(&mut w, "env (user)", &lbd.user_env, &rbd.user_env);
-    diff_env_map(&mut w, "env (built-in)", &lbd.built_in_env, &rbd.built_in_env);
+    diff_env_map(
+        &mut w,
+        "env (built-in)",
+        &lbd.built_in_env,
+        &rbd.built_in_env,
+    );
 
     diff_file_inputs(&mut w, &lbd.file_inputs, &rbd.file_inputs);
 
@@ -347,16 +354,8 @@ fn diff_env_map<W: Write>(
                     let _ = writeln!(w, "── {label} ──");
                     wrote_header = true;
                 }
-                let _ = writeln!(
-                    w,
-                    "  - {k}={}",
-                    l.map(String::as_str).unwrap_or("<unset>")
-                );
-                let _ = writeln!(
-                    w,
-                    "  + {k}={}",
-                    r.map(String::as_str).unwrap_or("<unset>")
-                );
+                let _ = writeln!(w, "  - {k}={}", l.map(String::as_str).unwrap_or("<unset>"));
+                let _ = writeln!(w, "  + {k}={}", r.map(String::as_str).unwrap_or("<unset>"));
             }
         }
     }

@@ -1239,10 +1239,10 @@ async fn try_remote_hit(
         if ctx.cache.has_cas(&hash).await {
             continue;
         }
-        if let Ok(Some(blob)) = remote.get_cas(&hash).await {
-            if ContentHash::of_bytes(&blob) == hash {
-                ctx.cache.put_cas(blob).await?;
-            }
+        if let Ok(Some(blob)) = remote.get_cas(&hash).await
+            && ContentHash::of_bytes(&blob) == hash
+        {
+            ctx.cache.put_cas(blob).await?;
         }
     }
 
@@ -1557,12 +1557,12 @@ async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> Target
             .chain(ac.stderr_blob.iter())
             .map(|s| s.as_str())
         {
-            if let Ok(bytes) = const_hex::decode(hex) {
-                if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
-                    let h = ContentHash::from_raw(arr);
-                    if let Ok(Some(b)) = ctx.cache.get_cas(&h).await {
-                        blobs.push((h, b));
-                    }
+            if let Ok(bytes) = const_hex::decode(hex)
+                && let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice())
+            {
+                let h = ContentHash::from_raw(arr);
+                if let Ok(Some(b)) = ctx.cache.get_cas(&h).await {
+                    blobs.push((h, b));
                 }
             }
         }

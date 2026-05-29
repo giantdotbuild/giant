@@ -325,11 +325,8 @@ impl SessionState {
                 // primitive - the new task computes immediately.
                 if let Some(prev) = self.affected.take() {
                     prev.cancel.cancel();
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(1),
-                        prev.handle,
-                    )
-                    .await;
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(1), prev.handle).await;
                 }
                 self.start_affected(base);
                 self.ack(command_id, None).await;
@@ -337,11 +334,7 @@ impl SessionState {
             Command::AffectedUnsubscribe { command_id } => {
                 if let Some(a) = self.affected.take() {
                     a.cancel.cancel();
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(1),
-                        a.handle,
-                    )
-                    .await;
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), a.handle).await;
                 }
                 self.ack(command_id, None).await;
             }

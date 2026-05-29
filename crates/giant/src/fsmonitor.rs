@@ -92,7 +92,7 @@ impl FsmonitorClient {
         };
         let cfg = repo.config_snapshot();
         let raw = cfg.string("core.fsmonitor").map(|v| v.to_string());
-        drop(cfg);
+        let _ = cfg;
         let Some(raw) = raw else {
             return Ok(None);
         };

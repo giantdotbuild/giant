@@ -164,9 +164,7 @@ async fn execute_selective(cache_root: &Path, args: &CleanArgs) -> anyhow::Resul
     if matches.len() > 20 {
         println!("  … and {} more", matches.len() - 20);
     }
-    println!(
-        "\nReferenced CAS blobs become eligible for eviction; run a build to GC them."
-    );
+    println!("\nReferenced CAS blobs become eligible for eviction; run a build to GC them.");
 
     if args.dry_run {
         println!("\nDry run - nothing deleted.");
