@@ -301,7 +301,7 @@ impl Config {
                 )));
             }
             // Cacheable target with no outputs and no exists check is meaningless.
-            if t.cache.unwrap_or(!t.test) && t.outputs.is_empty() && t.exists.is_none() {
+            if t.is_cacheable() && t.outputs.is_empty() && t.exists.is_none() {
                 return Err(ConfigError::Validation(format!(
                     "target '{}' is cacheable but has no outputs and no `exists:` check",
                     t.id

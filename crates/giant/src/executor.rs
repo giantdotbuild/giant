@@ -493,30 +493,39 @@ async fn dispatch_target(
         })
         .await;
 
-    // Lookup chain when not --fresh:
-    //   1. local AC cache
-    //   2. remote AC cache (feature-gated; populates local on hit)
+    // Lookup chain when not bypassed by `--fresh` / a forced-fresh set:
+    //   1. local AC cache       - only when the target is cacheable
+    //   2. remote AC cache      - only when cacheable and `remote_cache`
+    //      (feature-gated; populates local on hit)
     //   3. `exists:` check - for artifacts that live elsewhere (Docker
-    //      registry, S3, etc.). The command runs with $GIANT_CACHE_KEY in
-    //      env. Exit 0 → ExternalCacheHit, skip the build.
+    //      registry, S3, etc.). Runs regardless of `cache:` - it's the
+    //      target's own external-existence test, not Giant's cache. The
+    //      command runs with $GIANT_CACHE_KEY in env; exit 0 →
+    //      ExternalCacheHit, skip the build.
     //   4. run the target's command.
-    let bypass_cache = ctx.fresh
+    //
+    // `cache: false` (or a `test:` target without an explicit `cache:`)
+    // skips steps 1-2 and, on the store side (`run_target`), the AC write
+    // and upload - so the command runs and nothing is cached.
+    let bypass_lookup = ctx.fresh
         || ctx
             .force_fresh
             .as_ref()
             .is_some_and(|s| s.contains(&spec.id));
-    let (result, output_hash) = if !bypass_cache {
-        if let Some((r, oh)) = try_cache_hit(&ctx, &spec.id, &key).await? {
-            (r, Some(oh))
-        } else if let Some((r, oh)) = try_remote_hit(&ctx, &spec.id, &key).await? {
-            (r, Some(oh))
-        } else if let Some((r, oh)) = try_exists_check(&ctx, &spec, key).await {
-            (r, Some(oh))
-        } else {
-            let r = run_target(&ctx, &spec, key).await;
-            let oh = result_output_hash(&r);
-            (r, oh)
-        }
+    let cacheable = spec.is_cacheable();
+    let (result, output_hash) = if bypass_lookup {
+        let r = run_target(&ctx, &spec, key).await;
+        let oh = result_output_hash(&r);
+        (r, oh)
+    } else if cacheable && let Some((r, oh)) = try_cache_hit(&ctx, &spec.id, &key).await? {
+        (r, Some(oh))
+    } else if cacheable
+        && spec.remote_cache
+        && let Some((r, oh)) = try_remote_hit(&ctx, &spec.id, &key).await?
+    {
+        (r, Some(oh))
+    } else if let Some((r, oh)) = try_exists_check(&ctx, &spec, key).await {
+        (r, Some(oh))
     } else {
         let r = run_target(&ctx, &spec, key).await;
         let oh = result_output_hash(&r);
@@ -1446,11 +1455,25 @@ async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> Target
         ctx.log_capture.capture,
     );
 
+    // A `timeout_secs` of `None` parks forever, so the timeout arm never
+    // fires; otherwise it races the child and kills it on expiry. Both the
+    // cancel and timeout arms reap the child via `kill().await`.
+    let timeout = async {
+        match spec.timeout_secs {
+            Some(secs) => tokio::time::sleep(Duration::from_secs(secs)).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
     let status = tokio::select! {
         s = child.wait() => s,
         _ = ctx.cancel.cancelled() => {
             let _ = child.kill().await;
             return TargetResult::Failed { key: Some(key), error: "cancelled".into() };
+        }
+        _ = timeout => {
+            let _ = child.kill().await;
+            let secs = spec.timeout_secs.unwrap_or_default();
+            return TargetResult::Failed { key: Some(key), error: format!("timed out after {secs}s") };
         }
     };
     let (stdout_bytes, stderr_bytes) = tokio::join!(pump_stdout, pump_stderr);
@@ -1481,6 +1504,18 @@ async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> Target
             };
         }
     };
+
+    // `cache: false` targets run for their side effects only - never
+    // store an AC entry, log blobs, or queue an upload. Outputs were
+    // still captured above so downstream dep keys see this target's
+    // output hash (early cutoff).
+    if !spec.is_cacheable() {
+        return TargetResult::Built {
+            key,
+            duration: started.elapsed(),
+            outputs,
+        };
+    }
 
     // Persist captured stdout/stderr to CAS so a future cache hit can
     // replay them. Empty streams (or capture disabled) → None.
@@ -1539,7 +1574,9 @@ async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) -> Target
     // CAS - they're hot in the OS page cache from being written moments
     // ago, so the read is cheap. The build never waits on this.
     #[cfg(feature = "remote")]
-    if let Some(tx) = ctx.upload_tx.as_ref() {
+    if spec.remote_cache
+        && let Some(tx) = ctx.upload_tx.as_ref()
+    {
         let mut blobs = Vec::with_capacity(outputs.len() + 2);
         for o in &outputs {
             match ctx.cache.get_cas(&o.content_hash).await {

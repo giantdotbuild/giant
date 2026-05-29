@@ -2680,3 +2680,105 @@ targets:
         "second"
     );
 }
+
+#[test]
+fn cache_false_target_reruns_every_build() {
+    // `cache: false` opts the target out of the cache entirely: it runs
+    // for its side effects on every build, never a cache hit.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: nocache
+cache:
+  dir: ./cache
+targets:
+  - id: "lint"
+    inputs: []
+    outputs: []
+    cache: false
+    command: "echo ran >> runs.log"
+"#,
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        let out = Command::new(giant_bin())
+            .arg("build")
+            .current_dir(ws)
+            .output()
+            .expect("spawn giant");
+        assert!(
+            out.status.success(),
+            "build failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // Both builds ran the command → two lines. A cached second run would
+    // leave only one.
+    let log = std::fs::read_to_string(ws.join("runs.log")).unwrap();
+    assert_eq!(
+        log.lines().count(),
+        2,
+        "cache:false target should run on every build; runs.log={log:?}"
+    );
+}
+
+#[test]
+fn timeout_secs_kills_long_running_target() {
+    // A target that exceeds `timeout_secs` is killed and fails, rather
+    // than hanging for the full command duration.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: timeout
+cache:
+  dir: ./cache
+targets:
+  - id: "slow"
+    inputs: []
+    outputs: ["out.txt"]
+    timeout_secs: 1
+    command: "sleep 30 && echo done > out.txt"
+"#,
+    )
+    .unwrap();
+
+    let start = std::time::Instant::now();
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .expect("spawn giant");
+    let elapsed = start.elapsed();
+
+    assert!(
+        !out.status.success(),
+        "timed-out target should fail the build"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "build should abort near the 1s timeout, not wait for sleep 30 (took {elapsed:?})"
+    );
+    assert!(
+        !ws.join("out.txt").exists(),
+        "command was killed before producing its output"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("timed out"),
+        "expected a timeout message; got: {combined}"
+    );
+}

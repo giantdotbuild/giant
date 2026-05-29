@@ -182,6 +182,15 @@ fn default_true() -> bool {
     true
 }
 
+impl TargetSpec {
+    /// Whether this target participates in the content-addressed cache.
+    /// Build targets default to cached, `test:` targets to uncached; an
+    /// explicit `cache:` overrides either way. See TDD-0009.
+    pub fn is_cacheable(&self) -> bool {
+        self.cache.unwrap_or(!self.test)
+    }
+}
+
 /// One input declaration. Three forms per TDD-0001.
 ///
 /// In YAML/JSON config, a bare string is sugar for `{kind: file, glob: "..."}`.
