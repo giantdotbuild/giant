@@ -5,10 +5,10 @@ description: Hash only the lines you care about.
 
 A structural input hashes only the lines of a file matching one of a
 list of prefixes. Function-body edits don't shift the cache key; only
-the matched lines do. The same idea appears in two places now: as the
+the matched lines do. The same idea appears in two places: as the
 **excerpt** entry kind in a discovery's `reads` manifest (the
-recommended use), and as a legacy `kind: structural` input on a
-regular target.
+recommended use), and as a `kind: structural` input on a regular
+target.
 
 ## The motivating problem
 
@@ -47,10 +47,10 @@ sidecar still verifies → the cached output is reused without
 re-executing the script. See
 [Discovery](/concepts/discovery/) for the full cooperative protocol.
 
-## In regular targets (legacy form)
+## In regular targets
 
-The same algorithm is also available as an input kind on regular
-targets:
+The same algorithm is also available as a first-class input kind on
+regular targets:
 
 ```yaml
 targets:
@@ -65,9 +65,11 @@ targets:
 
 The `files:` can be a string or list. This form is useful for the
 small set of non-discovery targets that read source as data
-(documentation generators, API surface extractors). For
-**discovery targets** the loader rejects `inputs:` outright - use a
-`reads.files` excerpt entry in the discovery output instead.
+(documentation generators, API surface extractors). **Discovery
+targets** may also declare `inputs:` - those file inputs are hashed
+into the discovery's cache key, in addition to the recorded-reads
+manifest. For most discoveries a `reads.files` excerpt entry is the
+better fit, but `inputs:` is accepted, not rejected.
 
 Now, in either form:
 
@@ -111,10 +113,12 @@ files.
 
 ### Stage 3: git fast-path
 
-When the workspace is a git repo, we skip the filesystem walk
-entirely for tracked-unmodified files. `git status --porcelain` tells
-us which files are modified; those are the only ones we need to
-revalidate.
+When the workspace is a git repo, we skip the directory walk entirely.
+Giant enumerates candidate files straight from the git index plus any
+untracked files, using the `gix` library - no recursive filesystem
+walk. It then stat-skips each file against the stored per-file sidecar:
+if `(mtime, size)` is unchanged, the file isn't re-read and its
+recorded structural hash is reused.
 
 For a 10k-file Go repo with one edited file, this stage answers in a
 few milliseconds.
@@ -129,7 +133,7 @@ structure. Examples:
 - TypeScript module resolution: `import`, `export`
 - Rust crate discovery: `mod`, `use`, `extern crate`, `pub`
 
-Use the **`kind: structural`** input form on a regular target when
+Use the **`kind: structural`** input kind on a regular target when
 the target reads source as data - documentation generators, API
 surface extractors, dependency-graph dumpers. Niche but real.
 

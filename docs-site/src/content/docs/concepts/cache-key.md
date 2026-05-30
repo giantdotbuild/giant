@@ -13,25 +13,31 @@ the key shifts, and Giant rebuilds.
 Composed in this order (the exact byte stream matters for
 reproducibility):
 
-1. **Workspace name** - keeps cache entries from one workspace out of
-   another's lookups.
-2. **Target ID** - same recipe under a different ID is a different
-   entry.
-3. **The command** - verbatim. Changing `go build` to `go build -trimpath`
+1. **Schema version marker** - a leading version tag, so a change to
+   the key layout invalidates old entries deterministically.
+2. **The command** - verbatim. Changing `go build` to `go build -trimpath`
    changes the key.
-4. **The cwd** - workspace-relative path.
-5. **Env vars** - sorted by name. Both `env:` from the target and any
-   built-in env Giant sets.
-6. **File inputs** - for every file matched by an input glob, its
+3. **The cwd** - workspace-relative path.
+4. **Env vars** - the target's `env:`, sorted by name, plus two
+   built-ins Giant always sets: `GIANT_TARGET_TRIPLE` and
+   `GIANT_VERSION`.
+5. **File inputs** - for every file matched by an input glob, its
    workspace-relative path and content hash. Sorted by path.
-7. **Structural inputs** - fingerprint hash for each structural input
+6. **Structural inputs** - fingerprint hash for each structural input
    (see [Structural inputs](/concepts/structural-inputs/)).
-8. **Dep output hashes** - for each dependency target, its
-   `outputs_content_hash` (the hash-of-hashes of its outputs). Sorted
-   by dep ID.
+7. **Dep outputs** - for each dependency target, its
+   `outputs_content_hash` (the hash-of-hashes of its outputs), NOT its
+   cache key. Sorted by dep ID. This is the early-cutoff property (see
+   below).
 
 `outputs:` are NOT in the cache key. The recipe determines what
 gets built; the recipe's hash determines if we've seen it before.
+
+Neither the workspace name nor the target ID is hashed. Two targets
+with an identical command, inputs, env, and deps produce the same
+cache key - the ID does not disambiguate them. If you want two
+recipes to cache separately, something in the recipe itself has to
+differ.
 
 ### Discovery targets
 
@@ -72,8 +78,8 @@ cwd:         <workspace root>
 
 env (3):
   CGO_ENABLED=0
-  PATH=/usr/bin:/bin
-  GIANT_WORKSPACE=hello-giant
+  GIANT_TARGET_TRIPLE=x86_64-unknown-linux-gnu
+  GIANT_VERSION=0.1.0
 
 file_inputs (12):
   cmd/server/main.go        sha256:9f3c8d...

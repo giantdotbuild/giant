@@ -224,8 +224,6 @@ A short list, deliberately:
   [giant-task](/extending/giant-task/)).
 - **No remote / daemon mode.** One TUI, one session, one
   workspace.
-- **No log search.** Scroll, but no `/` inside log panes yet.
-  The catalog search (`/` in the browser) is the only search.
 - **No multi-pane layout customization.** The browser → result
   split is fixed.
 - **No reading config independently.** The catalog comes from

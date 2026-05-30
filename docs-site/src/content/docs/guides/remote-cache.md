@@ -21,7 +21,7 @@ The remote cache lives behind a feature flag so the default binary
 stays small and dependency-light:
 
 ```bash
-cargo install --path . --features remote
+cargo install --path crates/giant --features remote
 ```
 
 Pre-built binaries from giant.build/install.sh include the remote
@@ -32,6 +32,7 @@ feature.
 ```yaml
 # giant.yaml
 remote:
+  enabled: true
   url: "https://cache.example.com"
   auth:
     kind: bearer
@@ -43,10 +44,12 @@ Auth shapes:
 ```yaml
 # No auth (open cache, e.g. a private network bazel-remote)
 remote:
+  enabled: true
   url: "http://cache.internal:8080"
 
 # Bearer token from env var
 remote:
+  enabled: true
   url: "https://cache.example.com"
   auth:
     kind: bearer
@@ -54,6 +57,7 @@ remote:
 
 # HTTP Basic auth
 remote:
+  enabled: true
   url: "https://cache.example.com"
   auth:
     kind: basic
@@ -94,6 +98,7 @@ That's an open, unauthenticated cache. Point Giant at it:
 
 ```yaml
 remote:
+  enabled: true
   url: "http://localhost:8080"
 ```
 

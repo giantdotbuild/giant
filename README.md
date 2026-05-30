@@ -25,14 +25,14 @@ From source:
 ```bash
 git clone https://github.com/johnae/giant
 cd giant
-cargo install --path .
+cargo install --path crates/giant
 ```
 
 The binary is called `giant`. With the `remote` feature flag it also speaks the
 Bazel HTTP cache protocol; without it the executable stays smaller and offline-only.
 
 ```bash
-cargo install --path . --features remote
+cargo install --path crates/giant --features remote
 ```
 
 ## A first config
@@ -136,8 +136,9 @@ lines change - function-body edits keep the cache warm.
 Unknown subcommands dispatch to `giant-<name>` on PATH, the git/cargo/kubectl
 model. Run `giant task deploy` and it execs `giant-task deploy` if present.
 The wire format between core and porcelains is the NDJSON event/command
-protocol (see `docs/tdd/0004-event-protocol.md`). No porcelains ship yet -
-the dispatch shim is there for community-built ones.
+protocol (see `docs/tdd/0004-event-protocol.md`). Two porcelains ship today,
+`giant-task` and `giant-tui`, dispatched git-style; the same shim picks up
+any community-built ones on PATH.
 
 ## Remote cache
 
@@ -145,6 +146,7 @@ With `--features remote`:
 
 ```yaml
 remote:
+  enabled: true
   url: "https://cache.example.com"
   auth: { kind: bearer, token_env: CACHE_TOKEN }
 ```
@@ -167,6 +169,7 @@ cache:
   evict_target_pct: 80        # evict down to this
 
 remote:                       # feature-gated
+  enabled: true               # default off; without this the remote cache is a no-op
   url: "https://..."
   auth: { kind: bearer, token_env: TOKEN }
 
@@ -189,7 +192,7 @@ targets:
     cache: true               # set false to never cache
     remote_cache: true
     exists: "..."             # external check; if it succeeds, command is skipped
-    timeout: 300              # seconds
+    timeout_secs: 300         # seconds
 ```
 
 ## How it works
@@ -220,7 +223,7 @@ the cargo build of the engine itself.
 **Bootstrap once:**
 
 ```bash
-cargo install --path .        # gives you a `giant` on PATH
+cargo install --path crates/giant   # gives you a `giant` on PATH
 giant task bin                # builds bin/giant + bin/giant-task
 ```
 
@@ -253,13 +256,15 @@ contents.
 
 Working: build, test, watch, affected, graph, explain, clean, porcelain dispatch,
 local + remote cache, discovery, structural inputs with git fast-path, NDJSON event
-stream, LRU cache eviction. `giant-task` ships in `crates/giant-task/` and handles
-tasks, services with readiness probes, needs/finally, args, shell completions
-across six shells.
+stream, LRU cache eviction. `giant session` runs a persistent engine, and the
+command channel lets porcelains send commands back over the protocol. `giant-task`
+ships in `crates/giant-task/` and handles tasks, services with readiness probes,
+needs/finally, args, shell completions across six shells. `giant-tui` ships in
+`crates/giant-tui/` - a full TUI with a tag/status-toggle surface for filtering
+the build.
 
-Not yet built: command channel for porcelains to send commands back to the engine
-(`giant serve`), tags-as-toggleable surface in a TUI, the `giant-tui` porcelain
-itself.
+Not yet built: the `giant-web` browser bridge, sandboxing and `giant verify`,
+and remote execution.
 
 ## License
 

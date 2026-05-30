@@ -16,10 +16,10 @@ no daemon, no dependencies at runtime.
 curl -fsSL https://giant.build/install.sh | sh
 
 # From source
-cargo install --path . --git https://github.com/johnae/giant
+cargo install --git https://github.com/johnae/giant giant
 
 # With the remote cache feature
-cargo install --path . --features remote --git https://github.com/johnae/giant
+cargo install --git https://github.com/johnae/giant --features remote giant
 ```
 
 Verify:

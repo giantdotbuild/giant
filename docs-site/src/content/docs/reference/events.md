@@ -48,8 +48,7 @@ The `t` field discriminates. All other fields are type-specific.
 ```jsonc
 { "t": "config.loaded",
   "workspace_name": "myproj",
-  "target_count": 42,
-  "task_count": 0 }
+  "target_count": 42 }
 
 { "t": "config.error",
   "file": "giant.yaml",
@@ -124,8 +123,7 @@ The `t` field discriminates. All other fields are type-specific.
 { "t": "discovery.merged",
   "build": "b_bootstrap_4f9c",
   "id": "discover:go",
-  "added_targets": ["go:pkg:internal/auth", "go:pkg:internal/store"],
-  "added_tasks": [] }
+  "added_targets": ["go:pkg:internal/auth", "go:pkg:internal/store"] }
 ```
 
 ### Affected subscription

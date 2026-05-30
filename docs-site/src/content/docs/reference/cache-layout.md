@@ -10,7 +10,7 @@ is `~/.cache/giant`; you can override per-workspace via `cache.dir`.
 
 ```
 ~/.cache/giant/
-├── version              # plain text, contains "1"
+├── version              # plain text, the integer line `1\n`
 ├── ac/                  # action cache - cache key → outputs
 │   └── 3a/
 │       └── 3a7f9c4e8b2d1f5e6a8c9d7e4f3b2a1c5d6e9f8a7b4c3d2e1f5a6b7c8d9e.json
@@ -20,6 +20,7 @@ is `~/.cache/giant`; you can override per-workspace via `cache.dir`.
 ├── structural/          # per-target sidecars for structural inputs
 │   └── 8e/
 │       └── 8e1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e.json
+├── log/                 # per-target captured log blobs
 └── tmp/                 # transient write-then-rename staging
 ```
 
@@ -33,9 +34,9 @@ are `0o600`. Single-user assumption.
 
 ## `version`
 
-Just `"1"`. The cache layout schema version. If a binary expects a
-different version, it errors instead of silently using the wrong
-shape.
+A single integer line - the bytes `1\n`, not a quoted JSON string.
+The cache layout schema version. If a binary expects a different
+version, it errors instead of silently using the wrong shape.
 
 ## `ac/`
 

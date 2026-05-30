@@ -20,12 +20,15 @@ cache:
   log_capture_cap_bytes: 5242880
 
 remote:                       # feature-gated; only with --features remote
+  enabled: true               # must be true; remote is a no-op otherwise
   url: "https://cache.example.com"
   auth:
     kind: bearer
     token_env: GIANT_REMOTE_TOKEN
   tls:
     skip_verify: false
+  skip_head: false
+  max_blob_size_mb: 500
 
 discovery:
   strict: false               # true = no `reads` manifest is an error
@@ -49,7 +52,7 @@ targets:
     cache: true
     remote_cache: true
     exists: "..."
-    timeout: 300
+    timeout_secs: 300
 ```
 
 ## `workspace`
@@ -64,6 +67,7 @@ targets:
 |---|---|---|
 | `dir` | `~/.cache/giant` | Local cache directory. Tildes expand. |
 | `max_size_gb` | `20` | Max cache size in GB. `null` or `0` disables auto-eviction. |
+| `max_age_days` | - | Optional. Evict cache entries older than N days. |
 | `evict_when_above_pct` | `100` | Trigger eviction at this percentage of max. |
 | `evict_target_pct` | `80` | Evict down to this percentage when eviction runs. |
 | `capture_logs` | `true` | Write each successful target's stdout + stderr to CAS so they can replay on a future cache hit. |
@@ -94,14 +98,17 @@ for storage details.
 
 ## `remote` (feature-gated)
 
-| Field | Description |
-|---|---|
-| `url` | Cache endpoint (Bazel HTTP cache protocol). |
-| `auth.kind` | `none`, `bearer`, or `basic`. |
-| `auth.token_env` | (bearer) env var name to read the token from. |
-| `auth.username_env` | (basic) env var name for the username. |
-| `auth.password_env` | (basic) env var name for the password. |
-| `tls.skip_verify` | If true, skip TLS cert verification. Don't use in production. |
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Must be `true` to use the remote cache. Remote is a no-op when false. |
+| `url` | - | Cache endpoint (Bazel HTTP cache protocol). |
+| `auth.kind` | - | `none`, `bearer`, or `basic`. |
+| `auth.token_env` | - | (bearer) env var name to read the token from. |
+| `auth.username_env` | - | (basic) env var name for the username. |
+| `auth.password_env` | - | (basic) env var name for the password. |
+| `tls.skip_verify` | `false` | If true, skip TLS cert verification. Don't use in production. |
+| `skip_head` | `false` | Skip the HEAD existence check before upload. |
+| `max_blob_size_mb` | `500` | Blobs larger than this (in MB) are not uploaded. |
 
 ## `discovery`
 
@@ -128,10 +135,10 @@ Regular build targets. Schema below.
 | `env` | no | map | Env vars. Hashed into the cache key. |
 | `test` | no | bool | `true` = test target. Default `false`. |
 | `tags` | no | list of strings | Free-form labels for filtering. |
-| `cache` | no | bool | `false` disables caching entirely. Default `true`. |
+| `cache` | no | bool | `false` disables caching entirely. Default: `true` for normal targets, `false` for `test: true` targets (the engine computes `cache.unwrap_or(!test)`). |
 | `remote_cache` | no | bool | `false` disables remote uploads for this target. Default `true`. |
 | `exists` | no | string | Shell command. Exit 0 → skip the build command. |
-| `timeout` | no | int | Seconds before the command is killed. Default: no timeout. |
+| `timeout_secs` | no | int | Seconds before the command is killed. Default: no timeout. |
 
 ### Input shapes
 
@@ -172,7 +179,7 @@ field set differs from `targets:` in a few ways:
 | `env` | no | map | Env vars. Hashed into the discovery cache key. |
 | `scope` | no | list of strings | Directory prefixes the discovery may read from. Used as the sandbox fence (if sandboxing is on) and the fsmonitor narrowing hint. Contributes to the cache key. |
 | `exists` | no | string | Same as on regular targets. |
-| `timeout` | no | int | Same as on regular targets. |
+| `timeout_secs` | no | int | Same as on regular targets. |
 
 The discovery cache key is
 `cmd + cwd + env + scope + content`, where `content` is the deduped

@@ -47,6 +47,7 @@ it:
 ```yaml
 # giant.yaml
 remote:
+  enabled: true
   url: "https://cache.example.com"
   auth:
     kind: bearer

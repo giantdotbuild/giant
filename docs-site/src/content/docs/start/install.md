@@ -43,10 +43,10 @@ curl -fsSL https://giant.build/releases/0.1.0/SHA256SUMS | sha256sum -c -
 ```bash
 git clone https://github.com/johnae/giant
 cd giant
-cargo install --path .
+cargo install --path crates/giant
 
 # With the remote-cache feature (Bazel HTTP cache protocol)
-cargo install --path . --features remote
+cargo install --path crates/giant --features remote
 ```
 
 Requires Rust 1.95 or newer.
@@ -116,8 +116,3 @@ giant completions zsh > "${fpath[1]}/_giant"
 # fish
 giant completions fish > ~/.config/fish/completions/giant.fish
 ```
-
-:::note
-Shell completions land in a future release. Track
-[#42](https://github.com/johnae/giant/issues/42).
-:::

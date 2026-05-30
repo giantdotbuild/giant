@@ -34,7 +34,7 @@ targets:
     cache: true
     remote_cache: true
     exists: "test -f bin/server"
-    timeout: 300
+    timeout_secs: 300
 ```
 
 | Field | Meaning |
@@ -51,7 +51,7 @@ targets:
 | `cache` | Set to `false` to never cache this target's outputs. |
 | `remote_cache` | Set to `false` to exclude from remote cache uploads. |
 | `exists` | External check; if it succeeds, the command is skipped. |
-| `timeout` | Seconds before the command is killed. Default: unlimited. |
+| `timeout_secs` | Seconds before the command is killed. Default: unlimited. |
 
 ## Inputs
 
@@ -93,7 +93,10 @@ with discovery-generated targets.
 
 ## Outputs
 
-Outputs are files (not directories). Relative to the target's `cwd`.
+Outputs are files, not directories. Declaring a directory as an output
+is an error today - the engine captures single files only and fails the
+build if an output path resolves to a directory. Outputs are relative to
+the target's `cwd`.
 
 ```yaml
 outputs:
@@ -172,8 +175,8 @@ canonical example is Docker:
   inputs: ["Dockerfile", "src/**/*"]
   outputs: []
   cache: false
-  exists: "docker image inspect example/api:$INPUTS_HASH >/dev/null 2>&1"
-  command: "docker build -t example/api:$INPUTS_HASH ."
+  exists: "docker image inspect example/api:$GIANT_CACHE_KEY >/dev/null 2>&1"
+  command: "docker build -t example/api:$GIANT_CACHE_KEY ."
 ```
 
 Before running `command`, Giant runs `exists`. If `exists` exits 0,
@@ -181,7 +184,8 @@ the command is skipped - Giant treats the target as already produced.
 This lets you cache against an external system (Docker daemon, a remote
 registry) without storing the image bytes in Giant's local cache.
 
-`INPUTS_HASH` is provided in the environment when `exists` runs.
+`GIANT_CACHE_KEY` (the hex cache key) is provided in the environment
+when `exists` runs.
 
 ## Test targets
 

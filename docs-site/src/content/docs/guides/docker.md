@@ -18,20 +18,22 @@ targets:
       - "src/**/*"
     outputs: []
     cache: false
-    exists: "docker image inspect example/api:$INPUTS_HASH >/dev/null 2>&1"
+    exists: "docker image inspect example/api:$GIANT_CACHE_KEY >/dev/null 2>&1"
     command: |
       docker build \
-        -t example/api:$INPUTS_HASH \
+        -t example/api:$GIANT_CACHE_KEY \
         -t example/api:latest \
-        --build-arg VERSION=$INPUTS_HASH \
+        --build-arg VERSION=$GIANT_CACHE_KEY \
         .
 ```
 
 The `exists` command runs first. If the image already exists locally
 (or in the registry, if you swap the check to use `docker manifest`),
-Giant skips the `command` and treats the target as built.
+Giant skips the `command` and treats the target as built. The renderer
+shows it as `≡ EXTERNAL` (an external cache hit), not a normal build
+line.
 
-`INPUTS_HASH` is the cache key, available as an environment variable
+`GIANT_CACHE_KEY` is the cache key, available as an environment variable
 in both `exists` and `command`. Tagging the image with it gives you a
 trivial "is this image up to date?" lookup.
 
@@ -46,8 +48,8 @@ targets:
     inputs: ["Dockerfile", "src/**/*"]
     outputs: []
     cache: false
-    exists: "docker image inspect example/api:$INPUTS_HASH >/dev/null 2>&1"
-    command: "docker build -t example/api:$INPUTS_HASH ."
+    exists: "docker image inspect example/api:$GIANT_CACHE_KEY >/dev/null 2>&1"
+    command: "docker build -t example/api:$GIANT_CACHE_KEY ."
 
   - id: "docker:api:push"
     inputs: []
@@ -55,8 +57,8 @@ targets:
     outputs: []
     cache: false
     tags: ["push"]
-    exists: "docker manifest inspect example/api:$INPUTS_HASH >/dev/null 2>&1"
-    command: "docker push example/api:$INPUTS_HASH"
+    exists: "docker manifest inspect example/api:$GIANT_CACHE_KEY >/dev/null 2>&1"
+    command: "docker push example/api:$GIANT_CACHE_KEY"
 ```
 
 Run the build alone:
@@ -99,13 +101,13 @@ for df in "${dockerfiles[@]}"; do
     --argjson acc "$targets" \
     --arg id "docker:$svc" \
     --arg dir "$(dirname "$df")" \
-    --arg cmd "docker build -t example/$svc:\$INPUTS_HASH -f $df $dir" \
+    --arg cmd "docker build -t example/$svc:\$GIANT_CACHE_KEY -f $df $dir" \
     '$acc + [{
       id: $id,
       inputs: ["\($dir)/Dockerfile", "\($dir)/**/*"],
       outputs: [],
       cache: false,
-      exists: ("docker image inspect example/" + ($id | sub("docker:"; "")) + ":$INPUTS_HASH >/dev/null 2>&1"),
+      exists: ("docker image inspect example/" + ($id | sub("docker:"; "")) + ":$GIANT_CACHE_KEY >/dev/null 2>&1"),
       command: $cmd
     }]')
 done
@@ -138,7 +140,7 @@ BuildKit cache mounts and target a remote builder:
     docker buildx build \
       --cache-from type=registry,ref=example/api:cache \
       --cache-to type=registry,ref=example/api:cache,mode=max \
-      -t example/api:$INPUTS_HASH \
+      -t example/api:$GIANT_CACHE_KEY \
       .
 ```
 

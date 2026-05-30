@@ -9,9 +9,13 @@ giant [GLOBAL FLAGS] <subcommand> [ARGS]
 
 ## Global flags
 
+`--fresh` and `--log` are the true global flags - they work before or
+after the subcommand. `--config` is not global: it must appear *before*
+the subcommand (e.g. `giant --config path/giant.yaml build`).
+
 | Flag | Description |
 |---|---|
-| `--config <path>` | Path to `giant.yaml` / `giant.json`. Defaults to walking up from cwd. |
+| `--config <path>` | Path to `giant.yaml` / `giant.json`. Defaults to walking up from cwd. Must precede the subcommand. |
 | `--fresh` | Force a fresh build - bypass cache. |
 | `--log <filter>` | Log filter (RUST_LOG syntax). Default: `error`. |
 
@@ -104,6 +108,10 @@ giant graph [TARGET]
 With no argument, lists every target. With a target, shows its
 transitive dep tree.
 
+| Flag | Description |
+|---|---|
+| `-r, --reverse` | Show downstream consumers instead of upstream dependencies. |
+
 ## `giant explain`
 
 Show what feeds a target's cache key. The first thing to reach for
@@ -135,7 +143,7 @@ giant logs <TARGET> [--key <hex>] [--stdout-only | --stderr-only | --merged]
 | `--key <hex>` | Look up by an explicit cache key. Defaults to the current key (what a fresh build would compute). |
 | `--stdout-only` | Print stdout only. |
 | `--stderr-only` | Print stderr only. |
-| `--merged` | Interleave stdout and stderr (default behavior). |
+| `--merged` | Route stderr into stdout too. By default the streams are split: stdout goes to stdout, stderr to stderr. |
 
 Errors out if the action-cache entry has no captured logs (a target
 that ran with log capture disabled, or a cold target that's never
