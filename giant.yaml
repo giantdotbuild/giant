@@ -19,8 +19,25 @@ cache:
 # inode.)
 #
 # Bootstrap: `cargo install --path .` once, then giant builds giant.
+#
+# Toolchain pinning: `//toolchain/devenv` emits the realized devenv
+# profile store path as its identity. Every build target depends on it,
+# so a toolchain change re-keys them and stale artifacts are never reused
+# across machines or upgrades. The profile is the whole dev environment
+# (coarse: bumping any tool, even one unrelated to a given target,
+# rebuilds it) but it never misses an input - the right default for a
+# correctness check. Cargo.lock stays in each target's inputs: it pins
+# dependencies, a separate axis from the toolchain.
 # -----------------------------------------------------------------------------
 targets:
+  - id: "//toolchain/devenv"
+    inputs:
+      - "devenv.lock"
+      - "devenv.nix"
+    outputs: [".giant/toolchains/devenv.id"]
+    command: "readlink -f .devenv/profile > .giant/toolchains/devenv.id"
+    tags: ["toolchain"]
+
   - id: "bin:giant"
     inputs:
       - "crates/giant/src/**/*.rs"
@@ -28,11 +45,10 @@ targets:
       - "crates/giant/Cargo.toml"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "devenv.nix"
-      - "devenv.lock"
     outputs: ["bin/giant"]
     command: "cargo build --release -p giant --bin giant && install -m 0755 target/release/giant bin/giant"
     timeout: 600
+    deps: ["//toolchain/devenv"]
     tags: ["bin", "rust"]
 
   - id: "bin:giant-task"
@@ -41,12 +57,11 @@ targets:
       - "crates/giant-task/Cargo.toml"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "devenv.nix"
-      - "devenv.lock"
     outputs: ["bin/giant-task"]
     # -p selects the workspace member; --bin disambiguates within it.
     command: "cargo build --release -p giant-task --bin giant-task && install -m 0755 target/release/giant-task bin/giant-task"
     timeout: 600
+    deps: ["//toolchain/devenv"]
     tags: ["bin", "rust", "porcelain"]
 
   - id: "bin:giant-tui"
@@ -55,24 +70,22 @@ targets:
       - "crates/giant-tui/Cargo.toml"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "devenv.nix"
-      - "devenv.lock"
     outputs: ["bin/giant-tui"]
     command: "cargo build --release -p giant-tui --bin giant-tui && install -m 0755 target/release/giant-tui bin/giant-tui"
     timeout: 600
+    deps: ["//toolchain/devenv"]
     tags: ["bin", "rust", "porcelain"]
 
   - id: "docs:install"
     inputs:
       - "docs-site/package.json"
       - "docs-site/package-lock.json"
-      - "devenv.nix"
-      - "devenv.lock"
     outputs:
       - "docs-site/node_modules/.package-lock.json"
     cwd: "docs-site"
     command: "npm ci"
     timeout: 180
+    deps: ["//toolchain/devenv"]
     tags: ["docs"]
 
   - id: "docs:build"
@@ -86,15 +99,16 @@ targets:
       - "docs-site/tsconfig.json"
       - "docs-site/package.json"
       - "docs-site/package-lock.json"
-      - "devenv.nix"
-      - "devenv.lock"
     outputs:
       - "docs-site/dist/index.html"
       - "docs-site/dist/sitemap-index.xml"
     cwd: "docs-site"
     command: "npx astro build"
     timeout: 120
-    deps: ["docs:install"]
+    # Depends on the toolchain directly, not just via docs:install - astro
+    # runs node here, and output-cutoff on docs:install could otherwise
+    # hide a toolchain change from this target.
+    deps: ["docs:install", "//toolchain/devenv"]
     tags: ["docs"]
 
 # -----------------------------------------------------------------------------
