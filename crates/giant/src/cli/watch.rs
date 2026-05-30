@@ -30,7 +30,7 @@ use crate::watcher;
 use clap::Args;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -83,6 +83,11 @@ pub struct WatchArgs {
     /// rule as `giant build`).
     #[arg(long)]
     pub all: bool,
+
+    /// Show `toolchain`-tagged targets in the output. Folded out by
+    /// default; they still build and failures still surface (TDD-0017).
+    #[arg(long)]
+    pub show_toolchains: bool,
 }
 
 pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Result<()> {
@@ -90,6 +95,11 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
     let cancel = CancellationToken::new();
     let mode = renderer::detect_mode(args.color, /* ndjson */ false);
     let quiet = args.quiet;
+    let render = RenderOpts {
+        mode,
+        quiet,
+        show_toolchains: args.show_toolchains,
+    };
     let test_mode = if args.test {
         selection::TestMode::Only
     } else if args.all {
@@ -129,8 +139,7 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
         parallelism,
         global.fresh,
         cancel.clone(),
-        mode,
-        quiet,
+        render,
     )
     .await?;
 
@@ -221,8 +230,7 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
             parallelism,
             global.fresh,
             cancel.clone(),
-            mode,
-            quiet,
+            render,
         )
         .await
         {
@@ -280,6 +288,15 @@ fn collect_output_paths(prepared: &Prepared, workspace_root: &AbsPath) -> HashSe
     out
 }
 
+/// How a watch rebuild renders. Bundled to keep `run_build` under the
+/// positional-arg lint and to pass display flags as one unit.
+#[derive(Clone, Copy)]
+struct RenderOpts {
+    mode: Mode,
+    quiet: bool,
+    show_toolchains: bool,
+}
+
 /// Run one build, blocking until it finishes (or cancellation). Same
 /// renderer wiring as `giant build` so users see consistent output.
 async fn run_build(
@@ -288,14 +305,26 @@ async fn run_build(
     parallelism: usize,
     fresh: bool,
     cancel: CancellationToken,
-    mode: Mode,
-    quiet: bool,
+    render: RenderOpts,
 ) -> anyhow::Result<()> {
+    let RenderOpts {
+        mode,
+        quiet,
+        show_toolchains,
+    } = render;
     let (tx, mut rx) = mpsc::channel::<Event>(1024);
+    // Fold `toolchain`-tagged targets out of the human view (TDD-0017).
+    // The graph is already merged here, so we can compute the set up front.
+    let hidden: Arc<Mutex<HashSet<TargetId>>> = Arc::new(Mutex::new(if show_toolchains {
+        HashSet::new()
+    } else {
+        prepared.graph.ids_with_tag("toolchain")
+    }));
     let renderer_task = tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         let mut out = tokio::io::stdout();
         let mut r = Renderer::new(mode, 0, quiet);
+        r.set_hidden(hidden);
         while let Some(ev) = rx.recv().await {
             if let Some(line) = r.render(&ev) {
                 let _ = out.write_all(line.as_bytes()).await;

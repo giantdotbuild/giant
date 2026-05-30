@@ -19,8 +19,9 @@
 use crate::events::{Event, TargetCounts, TargetResultKind};
 use crate::model::TargetId;
 use anstyle::{AnsiColor, Color, Style};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +168,11 @@ pub struct Renderer {
     /// by `heartbeat()` to print "still running" lines for quiet
     /// long-runners so the user gets feedback during slow builds.
     running: HashMap<TargetId, RunningInfo>,
+    /// Target ids folded out of the human view (e.g. `toolchain`-tagged
+    /// targets - TDD-0017). Shared so the caller can populate it once the
+    /// merged graph is known, after the renderer task has already started.
+    /// Hidden targets still surface on failure.
+    hidden: Arc<Mutex<HashSet<TargetId>>>,
 }
 
 /// Don't emit a heartbeat for a target until it's been quiet for at
@@ -192,11 +198,24 @@ impl Renderer {
             quiet,
             failed: Vec::new(),
             running: HashMap::new(),
+            hidden: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// Share the set of target ids to fold out of the human view (e.g.
+    /// `toolchain`-tagged targets). The caller fills the set in after the
+    /// graph is known; the renderer reads it as events arrive. Hidden
+    /// targets are swallowed unless they fail.
+    pub fn set_hidden(&mut self, hidden: Arc<Mutex<HashSet<TargetId>>>) {
+        self.hidden = hidden;
+    }
+
+    fn is_hidden(&self, id: &TargetId) -> bool {
+        self.hidden.lock().expect("hidden set mutex").contains(id)
     }
 
     /// Render one event. `None` means "swallow this event" - log lines
@@ -233,6 +252,11 @@ impl Renderer {
                 None
             }
             Event::TargetStarted { id, .. } => {
+                // Hidden targets (toolchains) aren't tracked, so heartbeat
+                // never announces them either.
+                if self.is_hidden(id) {
+                    return None;
+                }
                 let now = Instant::now();
                 self.running.insert(
                     id.clone(),
@@ -245,6 +269,9 @@ impl Renderer {
                 None
             }
             Event::TargetLog { id, line, .. } => {
+                if self.is_hidden(id) {
+                    return None;
+                }
                 if let Some(info) = self.running.get_mut(id) {
                     info.last_activity = Instant::now();
                 }
@@ -261,10 +288,16 @@ impl Renderer {
                 ..
             } => {
                 self.running.remove(id);
-                if matches!(result, TargetResultKind::Failed) {
+                let failed = matches!(result, TargetResultKind::Failed);
+                if failed {
                     self.failed.push(id.clone());
                 }
-                if self.quiet && !matches!(result, TargetResultKind::Failed) {
+                // Toolchain/hidden targets are folded out - but a failing
+                // one still surfaces, like the bootstrap-swallow rule.
+                if self.is_hidden(id) && !failed {
+                    return None;
+                }
+                if self.quiet && !failed {
                     return None;
                 }
                 Some(self.finished_line(id, *result, *duration_ms, error.as_deref()))
@@ -611,6 +644,40 @@ mod tests {
             .render(&ev_finished("b", TargetResultKind::Failed, 50))
             .unwrap();
         assert!(fail.contains("FAIL"));
+    }
+
+    #[test]
+    fn hidden_targets_are_folded_but_failures_surface() {
+        let mut r = Renderer::new(Mode::Human { color: false }, 16, false);
+        let hidden: Arc<Mutex<HashSet<TargetId>>> = Arc::new(Mutex::new(
+            [TargetId::new("//toolchain/go")].into_iter().collect(),
+        ));
+        r.set_hidden(hidden);
+
+        // A hidden target's log and successful finish are swallowed.
+        assert!(
+            r.render(&ev_log("//toolchain/go", "go version go1"))
+                .is_none()
+        );
+        assert!(
+            r.render(&ev_finished(
+                "//toolchain/go",
+                TargetResultKind::CacheHit,
+                2
+            ))
+            .is_none()
+        );
+        // A non-hidden target still renders normally.
+        assert!(
+            r.render(&ev_finished("go:bin:server", TargetResultKind::Built, 10))
+                .is_some()
+        );
+        // A hidden target that *fails* must surface.
+        let fail = r
+            .render(&ev_finished("//toolchain/go", TargetResultKind::Failed, 5))
+            .unwrap();
+        assert!(fail.contains("FAIL"));
+        assert!(fail.contains("//toolchain/go"));
     }
 
     #[test]

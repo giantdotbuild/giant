@@ -69,6 +69,15 @@ impl BuildGraph {
         self.targets.iter()
     }
 
+    /// Ids of every target carrying `tag`. The renderer uses this to fold
+    /// `toolchain`-tagged targets out of the default view (TDD-0017).
+    pub fn ids_with_tag(&self, tag: &str) -> HashSet<TargetId> {
+        self.iter()
+            .filter(|(_, spec)| spec.tags.contains(tag))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// Re-derive all dep edges from current targets. Safe to call multiple
     /// times (clears existing edges first). Does three things:
     ///

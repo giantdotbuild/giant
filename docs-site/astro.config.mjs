@@ -54,6 +54,7 @@ export default defineConfig({
             { label: 'Go monorepo', slug: 'guides/go-monorepo' },
             { label: 'Docker images', slug: 'guides/docker' },
             { label: 'Tests with giant test', slug: 'guides/tests' },
+            { label: 'Pinning toolchains', slug: 'guides/toolchains' },
             { label: 'Watch mode', slug: 'guides/watch' },
             { label: 'CI integration', slug: 'guides/ci' },
             { label: 'Remote cache', slug: 'guides/remote-cache' },

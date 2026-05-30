@@ -34,6 +34,7 @@ giant build [PATTERNS...]
 | `--color <when>` | `auto` | `auto`, `always`, `never`. Honors `NO_COLOR`. |
 | `--tag <tag>` | - | Include only targets carrying this tag. Repeatable (union). |
 | `--no-tag <tag>` | - | Exclude targets carrying this tag. Repeatable. |
+| `--show-toolchains` | off | Show `toolchain`-tagged targets, folded out by default. |
 
 Exit code: `0` on success, non-zero if any target failed. (No banner
 on failure - the summary block already names what failed.)
@@ -70,6 +71,7 @@ giant watch [PATTERNS...]
 | `--no-tag <tag>` | - | See `build`. |
 | `--test` | off | Watch test targets only (TDD loop). Mutually exclusive with `--all`. |
 | `--all` | off | Watch every target - tests and non-tests. |
+| `--show-toolchains` | off | Show `toolchain`-tagged targets, folded out by default. |
 
 ## `giant affected`
 

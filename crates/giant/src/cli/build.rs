@@ -7,8 +7,9 @@ use crate::model::TargetId;
 use crate::renderer::{self, ColorChoice, Renderer};
 use crate::selection;
 use clap::Args;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use super::prep;
@@ -65,6 +66,12 @@ pub struct BuildArgs {
     /// NOT flaky".
     #[arg(long = "no-tag", value_name = "TAG")]
     pub no_tags: Vec<String>,
+
+    /// Show `toolchain`-tagged targets in the output. They are folded
+    /// out by default so the view stays focused on build targets; they
+    /// still build, and failures always surface. (TDD-0017.)
+    #[arg(long)]
+    pub show_toolchains: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -91,12 +98,18 @@ pub(super) async fn execute_with_mode(
     let ndjson = matches!(args.events, Some(EventsFormat::Ndjson));
     let mode = renderer::detect_mode(args.color, ndjson);
     let quiet = args.quiet;
+    // Toolchain targets are folded out of the human view. The set is
+    // shared with the renderer task and filled in once discovery has
+    // merged the graph (below) - it can't be known at construction.
+    let hidden: Arc<Mutex<HashSet<TargetId>>> = Arc::new(Mutex::new(HashSet::new()));
+    let hidden_for_render = hidden.clone();
     let renderer_task = tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         let mut out = tokio::io::stdout();
         // id_width starts at 0; it gets recomputed inside the renderer
         // once `BuildStarted` arrives with the full target list.
         let mut r = Renderer::new(mode, 0, quiet);
+        r.set_hidden(hidden_for_render);
         // Heartbeat: every second we ask the renderer if any
         // currently-running targets have been quiet long enough to
         // warrant a "still running" line. The renderer itself decides
@@ -146,6 +159,13 @@ pub(super) async fn execute_with_mode(
             return Err(e);
         }
     };
+
+    // Fold `toolchain`-tagged targets out of the human view now that the
+    // graph (including discovery-emitted toolchains) is known. They still
+    // build; failures still surface (TDD-0017).
+    if !args.show_toolchains {
+        *hidden.lock().expect("hidden set mutex") = prepared.graph.ids_with_tag("toolchain");
+    }
 
     // Resolve selection over the merged graph: positional patterns →
     // optional --affected filter → final list. The pattern language
