@@ -240,7 +240,7 @@ pub async fn prepare(
             for (parent_id, spec, abs) in dispatched_outputs {
                 let fragment = discovery::parse_fragment(&abs)?;
 
-                // Cooperative protocol (ADR-0013): if the discovery
+                // Cooperative protocol (ADR-0017): if the discovery
                 // emitted a `reads` manifest, materialize it and write
                 // the sidecar so the next run can short-circuit. If
                 // absent, this run is uncacheable - warn in lenient

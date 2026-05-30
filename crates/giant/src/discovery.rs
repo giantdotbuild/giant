@@ -15,12 +15,13 @@ const DISCOVERY_KEY_SCHEMA: &str = "disc-v2";
 const GIANT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TARGET_TRIPLE: &str = env!("GIANT_TARGET_TRIPLE");
 
-/// Compute the cache key for a discovery target per ADR-0013:
-/// `cmd + env + cwd + scope + executable-content` (no file inputs from
-/// the `inputs:` schema, no dep cache keys). The returned key is the
-/// lookup key for the discovery sidecar; whether the cached output is
-/// *valid* still depends on verifying the `reads` manifest against the
-/// live filesystem.
+/// Compute the cache key for a discovery target per ADR-0017:
+/// `cmd + env + cwd + scope + content`, where `content` is the merged
+/// set of argv-resolved in-tree files and the target's declared
+/// `inputs:` globs (no dep cache keys). The returned key is the lookup
+/// key for the discovery sidecar; whether the cached output is *valid*
+/// still depends on verifying the `reads` manifest against the live
+/// filesystem.
 ///
 /// "executable content" is any argv token that resolves to an existing
 /// file under `workspace_root` (after joining with the target's cwd).

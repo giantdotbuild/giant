@@ -88,7 +88,7 @@ fn default_state_dir() -> String {
 pub struct DiscoveryConfig {
     /// When `true`, a discovery whose output lacks a `reads` manifest
     /// is a hard error (the cooperative protocol is enforced -
-    /// ADR-0013). Default `false`: missing `reads` only produces a
+    /// ADR-0017). Default `false`: missing `reads` only produces a
     /// warning, and the discovery's output is used once but not
     /// cached.
     #[serde(default)]
@@ -266,7 +266,7 @@ impl Config {
         }
 
         // Discovery entries traditionally relied on the cooperative
-        // `reads` manifest. As of ADR-0013-v2 they may *also* declare
+        // `reads` manifest. Per ADR-0017 they may *also* declare
         // `inputs:` - explicit content-hashed files that feed the
         // cache key and are policed by the warm-path verifier even
         // when the discovery script doesn't report them. The two
@@ -520,8 +520,9 @@ workspace: { name: p }
 
     /// Discovery entries may declare `inputs:` - these flow into the
     /// discovery cache key (content-hashed) alongside the argv-walk
-    /// detection. The opposite of the v1 behavior, which rejected
-    /// the field outright (see ADR-0013-v2).
+    /// detection. The opposite of the originally-proposed behavior,
+    /// which rejected the field outright (ADR-0013, superseded by
+    /// ADR-0017).
     #[test]
     fn accept_inputs_on_include_entry() {
         let f = write_yaml(

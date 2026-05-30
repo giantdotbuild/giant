@@ -176,7 +176,7 @@ pub struct TargetSpec {
     pub label: Option<String>,
 
     /// Discovery-only: directory prefixes the entry is permitted to
-    /// read from. Empty on regular targets. See ADR-0013.
+    /// read from. Empty on regular targets. See ADR-0017.
     #[serde(default)]
     pub scope: Vec<WsRelPath>,
 
