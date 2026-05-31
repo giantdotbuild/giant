@@ -1,5 +1,9 @@
 //! Porcelain dispatch - when `giant <name>` isn't a built-in
 //! subcommand, look for `giant-<name>` on PATH and exec it (ADR-0010).
+//! If there's no such binary, consult the configurable dispatch routing
+//! table and exec whatever binary it names (ADR-0021); the default route
+//! is `* -> giant-task`, so bare-name tasks work out of the box. Core
+//! never learns what a task is - it just routes.
 //!
 //! On unix we use `exec()` so the porcelain replaces our process -
 //! signals (Ctrl-C, SIGTERM) go directly to the porcelain, no parent
@@ -17,18 +21,41 @@ pub fn dispatch(args: Vec<OsString>) -> anyhow::Result<()> {
         anyhow::bail!("internal: external subcommand with empty args");
     };
     let name = name_os.to_string_lossy();
-    let prog = format!("giant-{name}");
 
-    let Some(path) = find_on_path(&prog) else {
+    // 1. An explicit `giant-<name>` binary wins (ADR-0010).
+    let prog = format!("giant-{name}");
+    if let Some(path) = find_on_path(&prog) {
+        return exec_or_spawn(&path, rest);
+    }
+
+    // 2. Otherwise consult the dispatch routing table (ADR-0021). The
+    //    routed binary is invoked as `<to> <name> <rest>` - the target
+    //    (giant-task by default) decides what `<name>` means and owns the
+    //    "no such task" error. Routing degrades to the default table when
+    //    there's no config, so it always resolves unless a user's rule
+    //    list deliberately excludes the name.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let table = crate::config::load_dispatch(&cwd);
+    let Some(to) = table.route(&name) else {
         anyhow::bail!(
-            "no such subcommand '{name}', and no '{prog}' found on PATH\n\
-             hint: porcelains follow the git/cargo pattern - install a binary\n\
-                   named '{prog}' on your PATH and `giant {name}` will dispatch to it.\n\
-                   See ADR-0010 in the giant docs."
+            "no such subcommand '{name}': no built-in, no '{prog}' on PATH, \
+             and no dispatch rule matches it (see the `dispatch:` section of \
+             giant.yaml, ADR-0021)."
+        );
+    };
+    let Some(to_path) = find_on_path(to) else {
+        anyhow::bail!(
+            "subcommand '{name}' routes to '{to}' per the dispatch table, but \
+             '{to}' was not found on PATH.\n\
+             hint: install '{to}' (the default route is `giant-task`)."
         );
     };
 
-    exec_or_spawn(&path, rest)
+    // Hand the routed binary `<name> <rest...>`.
+    let mut routed: Vec<OsString> = Vec::with_capacity(rest.len() + 1);
+    routed.push(name_os.clone());
+    routed.extend_from_slice(rest);
+    exec_or_spawn(&to_path, &routed)
 }
 
 /// Look up `name` in each `PATH` entry. Returns the first executable

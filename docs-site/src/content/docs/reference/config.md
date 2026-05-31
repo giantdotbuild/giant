@@ -118,6 +118,33 @@ Workspace-level settings for discovery (`include:` entries).
 |---|---|---|
 | `strict` | `false` | When `true`, a discovery whose output omits a `reads` manifest is a hard error instead of a warning. Useful in CI to enforce the cooperative protocol. |
 
+## `dispatch`
+
+How `giant <name>` routes when `<name>` is neither a built-in subcommand
+nor a `giant-<name>` binary on PATH. Core reads this table and execs the
+binary it names - it never learns what a task is. The default routes
+everything to `giant-task`, so `giant <task>` works out of the box.
+
+```yaml
+# Shorthand: a single catch-all binary (the default).
+dispatch:
+  unknown: "giant-task"
+```
+
+```yaml
+# Full form: ordered match → binary rules, first match wins.
+dispatch:
+  unknown:
+    - { match: "db:*", to: "giant-dbtool" }   # giant db:migrate → giant-dbtool db:migrate …
+    - { match: "*",    to: "giant-task" }      # everything else → giant-task
+```
+
+`match` is a glob over the subcommand name; the routed binary is exec'd
+as `<to> <name> <args…>` with everything passed through. An explicit
+`giant-<name>` binary on PATH still wins over the table. With no
+`dispatch:` (or a missing/invalid config), routing falls back to the
+default `* → giant-task`. See ADR-0021.
+
 ## `targets`
 
 Regular build targets. Schema below.
