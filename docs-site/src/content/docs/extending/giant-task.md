@@ -223,6 +223,18 @@ If a step fails:
 | `command` non-zero exit | still run `finally`, still stop services. The exit code is what the task returns. |
 | `finally` task | logged, doesn't change the task's exit code. |
 
+### Signals
+
+`finally` and service teardown run on **SIGINT or SIGTERM**, not just a
+terminal Ctrl-C. When a task has services or a `finally`, giant-task
+installs a handler: a signal - whether from Ctrl-C, `pkill`, `systemctl
+stop`, or a parent supervisor - interrupts the running command (forwarded
+to its process group), then the lifecycle falls through to `finally` and
+stops services as usual. The task exits `130` (SIGINT) or `143` (SIGTERM).
+Once teardown starts it runs to completion; a second signal won't cut it
+short. A bare command with nothing to clean up keeps the default
+behavior - the signal just kills it.
+
 A worked example with all four hooks:
 
 ```yaml

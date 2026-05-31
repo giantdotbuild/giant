@@ -50,6 +50,9 @@ anstyle = "1"
 # Shebang task bodies are written to a temp file and exec'd directly.
 tempfile = "3"
 
+# Forwarding SIGINT/SIGTERM to a command's process group on shutdown.
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 libc = "0.2"

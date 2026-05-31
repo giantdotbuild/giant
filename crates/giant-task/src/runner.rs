@@ -15,9 +15,11 @@ use crate::deps;
 use crate::render;
 use crate::schema::TaskSpec;
 use crate::services::{self, RunningService};
+use crate::signals::{self, Shutdown};
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::process::Command;
 
 #[derive(Debug, thiserror::Error)]
@@ -79,15 +81,30 @@ pub async fn run(
         }
     }
 
+    // Install signal handling only when there's something to tear down
+    // (see `needs_shutdown`). A bare command keeps the default disposition
+    // - Ctrl-C kills it (and the child, sharing our process group) with
+    // nothing left to clean up.
+    let shutdown = if needs_shutdown(spec) {
+        Some(Shutdown::install()?)
+    } else {
+        None
+    };
+
     // 3. Body: run the command (services scaffold around it), or - for a
     //    command-less task - supervise the services in the foreground
-    //    until Ctrl-C or a service exits (the `giant dev` shape).
+    //    until a signal or a service exits (the `giant dev` shape). The
+    //    `finally` step is deliberately *not* signal-aware: once we're in
+    //    cleanup, it runs to completion.
     let result = if spec.command.is_some() {
-        let r = run_body(cfg, spec, &bound, workspace_root).await;
+        let r = run_body(cfg, spec, &bound, workspace_root, shutdown.as_ref()).await;
         run_finallies(cfg, spec, workspace_root).await;
         r
     } else {
-        supervise(&mut running).await
+        // Supervise mode is `command.is_none()`, a `needs_shutdown` case,
+        // so the handler is always installed here.
+        let sd = shutdown.as_ref().expect("needs_shutdown ⇒ installed");
+        supervise(&mut running, sd).await
     };
 
     // 4. Stop services (the whole group).
@@ -99,6 +116,14 @@ pub async fn run(
     result.map_err(Into::into)
 }
 
+/// Whether the task has anything to tear down on a signal: services to
+/// stop, `finally` to run, or it's a supervise-mode task (no command).
+/// When true we install signal handling and give the command its own
+/// process group; otherwise a signal takes the default disposition.
+fn needs_shutdown(spec: &TaskSpec) -> bool {
+    !spec.services.is_empty() || !spec.finally.is_empty() || spec.command.is_none()
+}
+
 /// `finally` tasks run after the command, on success or failure. Their
 /// own failures are logged but don't change the task's exit code.
 async fn run_finallies(cfg: &TaskConfig, spec: &TaskSpec, workspace_root: &Path) {
@@ -107,19 +132,19 @@ async fn run_finallies(cfg: &TaskConfig, spec: &TaskSpec, workspace_root: &Path)
     }
     render::note(&format!("finally: {}", spec.finally.join(", ")));
     for fin in &spec.finally {
-        if let Err(e) = run_named_task(cfg, fin, workspace_root).await {
+        if let Err(e) = run_named_task(cfg, fin, workspace_root, None).await {
             render::note(&format!("finally '{fin}' failed: {e}"));
         }
     }
 }
 
-/// Foreground supervise mode: the services are up; hold until Ctrl-C or
-/// any service exits, then return so the caller stops the whole group.
-async fn supervise(running: &mut [RunningService]) -> Result<u8, RunError> {
+/// Foreground supervise mode: the services are up; hold until a shutdown
+/// signal (SIGINT/SIGTERM) or any service exits, then return so the
+/// caller stops the whole group.
+async fn supervise(running: &mut [RunningService], shutdown: &Shutdown) -> Result<u8, RunError> {
     render::note("services up - Ctrl-C to stop");
     tokio::select! {
-        r = tokio::signal::ctrl_c() => {
-            let _ = r;
+        _ = shutdown.recv() => {
             render::note("interrupted");
         }
         name = services::wait_any_exit(running) => {
@@ -130,34 +155,39 @@ async fn supervise(running: &mut [RunningService]) -> Result<u8, RunError> {
 }
 
 /// Inner body: run `needs`, then run the task's `command`. Wrapped so
-/// the outer driver can always reach the finally/cleanup steps.
+/// the outer driver can always reach the finally/cleanup steps. A
+/// shutdown signal during a need or the command aborts it (non-zero exit)
+/// and falls through to cleanup.
 async fn run_body(
     cfg: &TaskConfig,
     spec: &TaskSpec,
     bound: &BoundArgs,
     workspace_root: &Path,
+    shutdown: Option<&Shutdown>,
 ) -> Result<u8, RunError> {
     // 3. needs (sequential).
     for need in &spec.needs {
         render::note(&format!("need: {need}"));
-        run_named_task(cfg, need, workspace_root).await?;
+        run_named_task(cfg, need, workspace_root, shutdown).await?;
     }
 
     // 4. The main command.
-    run_command(spec, bound, workspace_root).await
+    run_command(spec, bound, workspace_root, shutdown).await
 }
 
 /// Run another task by name to completion with no arguments. A non-zero
-/// exit becomes `NeedFailed`. Shared by `needs:` and `finally:`.
+/// exit becomes `NeedFailed`. Shared by `needs:` (signal-aware) and
+/// `finally:` (not - cleanup runs to completion).
 async fn run_named_task(
     cfg: &TaskConfig,
     name: &str,
     workspace_root: &Path,
+    shutdown: Option<&Shutdown>,
 ) -> Result<(), RunError> {
     let spec = cfg.tasks.get(name).ok_or_else(|| RunError::UnknownTask {
         name: name.to_string(),
     })?;
-    let code = run_command(spec, &BoundArgs::default(), workspace_root).await?;
+    let code = run_command(spec, &BoundArgs::default(), workspace_root, shutdown).await?;
     if code != 0 {
         return Err(RunError::NeedFailed(name.to_string()));
     }
@@ -281,6 +311,7 @@ async fn run_command(
     spec: &TaskSpec,
     bound: &BoundArgs,
     workspace_root: &Path,
+    shutdown: Option<&Shutdown>,
 ) -> Result<u8, RunError> {
     let cwd = match &spec.cwd {
         Some(rel) => workspace_root.join(rel),
@@ -318,25 +349,65 @@ async fn run_command(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
+    // When we're handling shutdown, give the command its own process
+    // group so a forwarded signal reaches its whole subtree and the
+    // terminal's group-SIGINT doesn't race us. Without shutdown handling
+    // the child stays in our group (terminal Ctrl-C kills both, as before).
+    let as_group = shutdown.is_some();
+    if as_group {
+        cmd.process_group(0);
+    }
+
     render::running(&spec_label(spec));
 
-    let status = if let Some(secs) = spec.timeout_secs {
-        let mut child = cmd.spawn()?;
-        let dur = std::time::Duration::from_secs(secs);
-        match tokio::time::timeout(dur, child.wait()).await {
-            Ok(s) => s?,
-            Err(_) => {
-                // timed out - best-effort kill, propagate non-zero.
-                let _ = child.start_kill();
-                render::note(&format!("task timed out after {secs}s"));
-                return Ok(124);
-            }
-        }
-    } else {
-        cmd.status().await?
-    };
+    let mut child = cmd.spawn()?;
 
-    Ok(status.code().map(|c| c.clamp(0, 255) as u8).unwrap_or(1))
+    // Race the command against a shutdown signal. `on_shutdown` pends
+    // forever when there's no `Shutdown`, so that arm only fires in the
+    // cleanup-bearing case. Killing happens *after* the select so the wait
+    // future releases its borrow on `child` first.
+    tokio::select! {
+        waited = wait_with_timeout(&mut child, spec.timeout_secs) => match waited {
+            Ok(Some(status)) => Ok(status.code().map(|c| c.clamp(0, 255) as u8).unwrap_or(1)),
+            Ok(None) => {
+                signals::terminate(&mut child, libc::SIGTERM, as_group).await;
+                let secs = spec.timeout_secs.unwrap_or(0);
+                render::note(&format!("task timed out after {secs}s"));
+                Ok(124)
+            }
+            Err(e) => Err(e.into()),
+        },
+        sig = on_shutdown(shutdown) => {
+            signals::terminate(&mut child, sig, as_group).await;
+            render::note("interrupted - running cleanup");
+            // Conventional 128 + signal number (SIGINT → 130, SIGTERM → 143).
+            Ok(128u8.saturating_add(sig as u8))
+        }
+    }
+}
+
+/// Wait for the child, optionally bounded by a timeout. `Ok(None)` means
+/// the timeout elapsed (the child is still running and unreaped).
+async fn wait_with_timeout(
+    child: &mut tokio::process::Child,
+    timeout_secs: Option<u64>,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    match timeout_secs {
+        Some(secs) => match tokio::time::timeout(Duration::from_secs(secs), child.wait()).await {
+            Ok(status) => status.map(Some),
+            Err(_) => Ok(None),
+        },
+        None => child.wait().await.map(Some),
+    }
+}
+
+/// Await a shutdown signal's number, or pend forever when there's no
+/// handler installed (so the caller's `select!` arm never fires).
+async fn on_shutdown(shutdown: Option<&Shutdown>) -> i32 {
+    match shutdown {
+        Some(s) => s.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Build the command for a task body. A body that begins with `#!` is a

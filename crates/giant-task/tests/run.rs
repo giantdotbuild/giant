@@ -781,3 +781,77 @@ tasks:
         "api must have started after db became ready (saw the db marker)"
     );
 }
+
+/// A signal sent straight to giant-task (the `pkill -INT` / `systemctl
+/// stop` case, not a terminal Ctrl-C) must still run `finally`. This is
+/// the bug: with no handler the process died before cleanup.
+#[test]
+fn sigterm_runs_finally() {
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let started = dir.path().join("started");
+    let cleaned = dir.path().join("cleaned");
+    write_config(
+        dir.path(),
+        &format!(
+            r#"
+workspace: {{ name: sig }}
+tasks:
+  long:
+    command: 'touch {started}; exec sleep 30'
+    finally: ["cleanup"]
+  cleanup:
+    command: 'touch {cleaned}'
+"#,
+            started = started.display(),
+            cleaned = cleaned.display(),
+        ),
+    );
+
+    // Spawn it running (don't `.output()` - we need to signal it mid-run).
+    let mut child = Command::new(giant_task_bin())
+        .arg("long")
+        .current_dir(dir.path())
+        .spawn()
+        .unwrap();
+
+    // Wait until the command body is actually executing.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !started.exists() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("task command never started");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // SIGTERM the giant-task process directly - no foreground process
+    // group delivering it to the child for us.
+    let pid = child.id() as i32;
+    assert_eq!(
+        unsafe { libc::kill(pid, libc::SIGTERM) },
+        0,
+        "failed to signal giant-task"
+    );
+
+    // It must exit, and `finally` must have run.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("giant-task did not exit after SIGTERM");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    assert!(
+        cleaned.exists(),
+        "finally cleanup must run when giant-task is signalled directly"
+    );
+    // Conventional 128 + SIGTERM(15).
+    assert_eq!(status.code(), Some(143), "expected 128 + SIGTERM exit code");
+}

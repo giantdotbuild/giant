@@ -16,6 +16,7 @@ mod render;
 mod runner;
 mod schema;
 mod services;
+mod signals;
 mod watch;
 mod workspace;
 
