@@ -47,6 +47,9 @@ tracing = "0.1"
 # the giant build renderer. anstyle is in the workspace tree via clap.
 anstyle = "1"
 
+# Shebang task bodies are written to a temp file and exec'd directly.
+tempfile = "3"
+
 [dev-dependencies]
 tempfile = "3"
 libc = "0.2"

@@ -82,17 +82,20 @@ runs the task's `command` via `sh -c` in the workspace root.
 ```yaml
 tasks:
   <name>:
-    command: "..."              # required; shell command
+    command: "..."              # shell command or #! script body; optional
+                                #   if `services:` is set (foreground supervise)
     description: "..."          # optional; shown in `giant task list`
     deps: ["..."]               # target IDs to build before running
     needs: ["..."]              # other task names to run before command
     services: ["..."]           # service names to start before, stop after
     finally: ["..."]            # task names to run after command (always)
-    args:                       # optional named arguments
-      <key>:
-        default: "..."          # value when --arg isn't passed
+    args:                       # optional; ordered list, bound positionally
+      - name: env
+        default: "..."          # present => optional; absent => required
         choices: ["a", "b"]     # constrained set; default must be in choices
         description: "..."      # shown in completion + help
+      - name: rest
+        variadic: true          # trailing only; collects the rest into $@
     env:                        # extra env vars
       KEY: "value"
     cwd: "..."                  # workspace-relative; default = root
@@ -140,6 +143,7 @@ services:
     command: "..."              # required; shell command (the daemon)
     description: "..."          # optional
     deps: ["..."]               # target IDs to build before starting
+    needs: ["..."]              # other services to bring up (ready) first
     ready:                      # optional readiness probe
       command: "..."            # shell snippet; exit 0 = ready
       period_secs: 1            # poll interval (default 1)
@@ -149,21 +153,64 @@ services:
     cwd: "..."                  # workspace-relative; default = root
 ```
 
-A service is a long-lived process started for the duration of a task
-that lists it under `services:`. Cleanup is automatic: when the task
-exits (any reason - success, failure, signal), services are sent
-SIGINT, then SIGTERM if they don't exit in 2s, then SIGKILL after
-another 3s.
+A service is a long-lived process. When a task brings up services, the
+supervisor starts them in **dependency order**: a service with `needs:`
+waits for each dependency's `ready` probe to pass before it starts
+(services with satisfied needs start concurrently). The transitive
+`needs` closure is pulled in automatically, so listing `api` brings up
+the `db` it needs. Cleanup is automatic: when the task exits (any reason
+- success, failure, signal), services are sent SIGINT, then SIGTERM if
+they don't exit in 2s, then SIGKILL after another 3s.
+
+## Dev environments: a task that *is* its services
+
+A task with `services:` and **no `command:`** supervises those services
+in the foreground - the `giant dev` shape. It brings the stack up
+dependency-ordered, streams their prefixed logs, and holds until Ctrl-C
+(or until a service exits), then shuts everything down.
+
+```yaml
+services:
+  db:
+    command: "postgres -D ./data"
+    ready: { command: "pg_isready" }
+  api:
+    command: "./bin/api"
+    needs: ["db"]               # api starts once db is ready
+  worker:
+    command: "./bin/worker"
+    needs: ["db"]
+
+tasks:
+  dev:
+    services: ["api", "worker"]  # no command → foreground supervise
+```
+
+```console
+$ giant dev
+· starting services: db, api, worker
+[db]     listening on 5432
+[api]    serving on :8080
+[worker] ready
+^C
+· interrupted
+· stopping services: db, api, worker
+```
+
+This is the dev-loop slice of process-compose. It deliberately stops
+there: no daemon/background mode, no process scaling, no restart
+policies, no REST control. For those, use
+[process-compose](https://github.com/F1bonacc1/process-compose).
 
 ## Lifecycle of one task
 
 ```
 1. build deps          → giant build <ids>
-2. start services      → spawn each (parallel), wait for each `ready`
+2. start services      → dependency-ordered, each gated on its `ready` probe
 3. run needs           → sequential, declared order
-4. run command         → the task's own command
+4. run command         → the task's own command (or supervise, if absent)
 5. run finally         → sequential, declared order; ALWAYS runs
-6. stop services       → parallel; SIGINT → SIGTERM → SIGKILL
+6. stop services       → SIGINT → SIGTERM → SIGKILL
 ```
 
 If a step fails:
@@ -217,54 +264,89 @@ $ giant task run-test
 
 ## Arguments
 
-Named args are bound at the command line via `--arg key=value`
-(repeatable). Each declared arg is exported as a `GIANT_ARG_<NAME>`
-environment variable before `sh -c` runs:
+`args:` is an ordered list. Values are bound **positionally** in
+declaration order - `giant deploy prod` binds `prod` to the first arg.
+An arg with no `default` is **required**; one with a `default` is
+optional. A trailing arg may be `variadic: true` to collect the rest.
+
+Each scalar arg is exported two ways before the command runs:
+`GIANT_ARG_<NAME>` (uppercased, unambiguous) and a plain `$name`. A
+variadic arg becomes the command's positional parameters (`$@`).
 
 ```yaml
 tasks:
   deploy:
-    command: "kubectl apply -f k8s/$GIANT_ARG_ENV/"
+    command: "kubectl apply -f k8s/$env/ $@"
     args:
-      env:
-        default: "staging"
-        choices: ["staging", "prod"]
+      - name: env
+        choices: ["staging", "prod"]   # required (no default)
         description: "Target environment"
+      - name: flags
+        variadic: true                 # the rest → $@
 ```
 
 ```console
-$ giant task deploy
+$ giant deploy prod --server-side
 ▶ deploy
-deployed to staging
+deployed to prod with: --server-side
 
-$ giant task deploy --arg env=prod
-▶ deploy
-deployed to prod
+$ giant deploy            # missing required arg
+giant-task: argument 'env': required (no value supplied and no default)
 
-$ giant task deploy --arg env=anywhere
-giant-task: argument 'env': value "anywhere" is not one of ["staging", "prod"]
+$ giant deploy nowhere
+giant-task: argument 'env': value "nowhere" is not one of ["staging", "prod"]
 ```
 
-If a declared arg has no `default` and the user doesn't supply one,
-`giant-task` errors before doing any work.
+You can also set an arg by name with `--arg name=value` (the scriptable
+form); it conflicts with a positional for the same arg.
 
-## Pass-through args
+**Everything after the task name belongs to the task** - including
+flag-like values, which bind to the variadic arg and reach the command
+as `$@`, no `--` needed:
 
-Everything after `--` is appended to the task command's positional
-arguments inside `sh -c`:
+```console
+$ giant test --release --nocapture     # forwarded to the test task's $@
+```
+
+Giant-task's own flags (`--watch`, `--config`, …) therefore come
+*before* the task name (`giant task --watch deploy`), the same rule git
+and cargo use.
+
+## Per-task help
+
+`giant <task> --help` prints that task's signature - its arguments,
+which are required, their defaults and choices:
+
+```console
+$ giant deploy --help
+deploy - deploy the app
+  usage: giant deploy <env> [tag=latest]
+
+    env  staging|prod  target environment
+    tag  =latest
+```
+
+(`giant task --help`, with no task name, prints giant-task's own help.)
+
+## Tasks in any language
+
+If a task's `command` begins with a `#!` shebang line, the whole body is
+written to a temp file and exec'd directly, so you can write a task in
+any language. Declared args are in the environment; variadic/passthrough
+values are the script's arguments.
 
 ```yaml
 tasks:
-  test:
-    command: 'cargo test "$@"'
+  report:
+    args: [{ name: since, default: "HEAD~20" }]
+    command: |
+      #!/usr/bin/env python3
+      import os, subprocess
+      since = os.environ["GIANT_ARG_SINCE"]
+      print(subprocess.check_output(["git", "log", "--oneline", since]).decode())
 ```
 
-```console
-$ giant task test -- --release --nocapture
-```
-
-`"$@"` inside the shell command expands to `--release --nocapture`.
-Useful for forwarding raw flags to whatever the task wraps.
+A body without a shebang runs under `sh -c` as usual.
 
 ## Listing tasks
 
@@ -361,7 +443,8 @@ protocol](/reference/events/) for the wire format.
 
 | Variable | Meaning |
 |---|---|
-| `GIANT_ARG_<NAME>` | Set per declared task arg before `sh -c`. |
+| `GIANT_ARG_<NAME>` | Set per declared scalar arg (uppercased name). |
+| `$<name>` | Plain-name binding for the same arg (lowercase as declared). |
 | `GIANT_TASK_BUILD_BIN` | Override the `giant` binary used for `giant build` subprocess calls. Useful in tests; rarely needed otherwise. |
 | `NO_COLOR` | Disable ANSI colors in `giant-task`'s own output (`giant build`'s output is also subject to this). |
 

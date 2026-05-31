@@ -11,7 +11,6 @@
 //! become the next cycle's batch.
 
 use std::collections::HashSet;
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -21,11 +20,12 @@ use tokio::sync::mpsc;
 use crate::config::TaskConfig;
 use crate::runner;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn loop_forever(
     cfg: &TaskConfig,
     name: &str,
+    positionals: &[String],
     args: &[String],
-    passthrough: &[OsString],
     workspace_root: &Path,
     verbose: bool,
     quiet_window: Duration,
@@ -44,7 +44,7 @@ pub async fn loop_forever(
     ];
 
     println!("· initial run");
-    let _ = runner::run(cfg, name, args, passthrough, workspace_root, verbose).await;
+    let _ = runner::run(cfg, name, positionals, args, workspace_root, verbose).await;
 
     let (_handle, mut rx) = watcher::spawn(workspace_root, excludes.clone())
         .map_err(|e| anyhow::anyhow!("file watcher failed to start: {e}"))?;
@@ -87,7 +87,7 @@ pub async fn loop_forever(
 
         println!();
         println!("· {} file(s) changed, re-running", relevant.len());
-        let _ = runner::run(cfg, name, args, passthrough, workspace_root, verbose).await;
+        let _ = runner::run(cfg, name, positionals, args, workspace_root, verbose).await;
     }
 
     Ok(0)

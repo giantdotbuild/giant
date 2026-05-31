@@ -4,8 +4,10 @@
 //! colored verbs reserved for the running phase. Auto-detects tty.
 
 use crate::config::TaskConfig;
+use crate::schema::TaskSpec;
 use anstyle::{AnsiColor, Color, Style};
 use giant::events::TargetCounts;
+use giant::renderer::format_duration;
 use std::io::IsTerminal;
 
 fn enabled() -> bool {
@@ -34,16 +36,6 @@ fn fail() -> Style {
     Style::new()
         .fg_color(Some(Color::Ansi(AnsiColor::Red)))
         .bold()
-}
-
-fn format_duration(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{ms}ms")
-    } else if ms < 60_000 {
-        format!("{:.2}s", ms as f64 / 1000.0)
-    } else {
-        format!("{:.1}m", ms as f64 / 60_000.0)
-    }
 }
 
 /// One-off informational line (mirrors `renderer::note` in core).
@@ -113,6 +105,53 @@ pub fn list(cfg: &TaskConfig) {
         println!(
             "  {name_s:<padded$}  {desc}",
             padded = width + accent_padding()
+        );
+    }
+}
+
+/// Print one task's signature, the `giant <task> --help` view: a usage
+/// line built from the declared args, then a line per arg.
+pub fn task_help(name: &str, spec: &TaskSpec) {
+    let header = paint(accent(), name);
+    match &spec.description {
+        Some(d) => println!("{header} - {d}"),
+        None => println!("{header}"),
+    }
+
+    let mut usage = format!("  usage: giant {name}");
+    for a in &spec.args {
+        if a.variadic {
+            usage.push_str(&format!(" [{}...]", a.name));
+        } else if let Some(d) = &a.default {
+            usage.push_str(&format!(" [{}={}]", a.name, d));
+        } else {
+            usage.push_str(&format!(" <{}>", a.name));
+        }
+    }
+    println!("{}", paint(dim(), &usage));
+
+    if spec.args.is_empty() {
+        return;
+    }
+    let width = spec.args.iter().map(|a| a.name.len()).max().unwrap_or(0);
+    println!();
+    for a in &spec.args {
+        let constraint = if a.variadic {
+            "...".to_string()
+        } else if let Some(c) = &a.choices {
+            c.join("|")
+        } else if let Some(d) = &a.default {
+            format!("={d}")
+        } else {
+            "(required)".to_string()
+        };
+        let desc = a.description.as_deref().unwrap_or("");
+        println!(
+            "    {:<nw$}  {:<16}  {}",
+            a.name,
+            constraint,
+            desc,
+            nw = width
         );
     }
 }

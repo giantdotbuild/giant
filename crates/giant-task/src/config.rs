@@ -4,7 +4,7 @@
 //! in choices, etc. Target validation is core's job; we don't touch
 //! targets at all.
 
-use crate::schema::{ServiceSpec, TaskArg, TaskSpec, TopLevel};
+use crate::schema::{ArgSpec, ServiceSpec, TaskSpec, TopLevel};
 use indexmap::IndexMap;
 use std::path::Path;
 
@@ -115,7 +115,20 @@ fn validate(
                 )));
             }
         }
+        for needed in &spec.needs {
+            if !services.contains_key(needed) {
+                return Err(ConfigError::Validation(format!(
+                    "service '{name}' needs '{needed}' but no such service is defined"
+                )));
+            }
+            if needed == name {
+                return Err(ConfigError::Validation(format!(
+                    "service '{name}' lists itself in `needs:`"
+                )));
+            }
+        }
     }
+    validate_service_acyclic(services)?;
 
     for (name, spec) in tasks {
         if !is_valid_name(name) {
@@ -128,14 +141,22 @@ fn validate(
                 "task name '{name}' shadows a built-in `giant` subcommand"
             )));
         }
-        if spec.command.is_empty() {
-            return Err(ConfigError::Validation(format!(
-                "task '{name}' has an empty command"
-            )));
+        match &spec.command {
+            Some(c) if c.is_empty() => {
+                return Err(ConfigError::Validation(format!(
+                    "task '{name}' has an empty command"
+                )));
+            }
+            // A task with no command must supervise services (the
+            // `giant dev` shape); one with neither does nothing.
+            None if spec.services.is_empty() => {
+                return Err(ConfigError::Validation(format!(
+                    "task '{name}' has no command and no services - it does nothing"
+                )));
+            }
+            _ => {}
         }
-        for (arg_name, arg) in &spec.args {
-            validate_arg(name, arg_name, arg)?;
-        }
+        validate_args(name, &spec.args)?;
         for needed in &spec.needs {
             if !tasks.contains_key(needed) {
                 return Err(ConfigError::Validation(format!(
@@ -166,7 +187,73 @@ fn validate(
     Ok(())
 }
 
-fn validate_arg(task: &str, arg: &str, spec: &TaskArg) -> Result<(), ConfigError> {
+/// Detect cycles in the service `needs:` graph (DFS with a recursion
+/// stack). A cycle would deadlock the topological foreground start.
+fn validate_service_acyclic(services: &IndexMap<String, ServiceSpec>) -> Result<(), ConfigError> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        Visiting,
+        Done,
+    }
+    fn dfs<'a>(
+        node: &'a str,
+        services: &'a IndexMap<String, ServiceSpec>,
+        marks: &mut std::collections::HashMap<&'a str, Mark>,
+    ) -> Result<(), ConfigError> {
+        match marks.get(node) {
+            Some(Mark::Done) => return Ok(()),
+            Some(Mark::Visiting) => {
+                return Err(ConfigError::Validation(format!(
+                    "service `needs:` graph has a cycle through '{node}'"
+                )));
+            }
+            None => {}
+        }
+        marks.insert(node, Mark::Visiting);
+        if let Some(spec) = services.get(node) {
+            for n in &spec.needs {
+                dfs(n, services, marks)?;
+            }
+        }
+        marks.insert(node, Mark::Done);
+        Ok(())
+    }
+    let mut marks = std::collections::HashMap::new();
+    for name in services.keys() {
+        dfs(name, services, &mut marks)?;
+    }
+    Ok(())
+}
+
+fn validate_args(task: &str, args: &[ArgSpec]) -> Result<(), ConfigError> {
+    let mut seen = std::collections::HashSet::new();
+    for (i, arg) in args.iter().enumerate() {
+        if arg.name.is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "task '{task}' has an arg with an empty name"
+            )));
+        }
+        if !seen.insert(&arg.name) {
+            return Err(ConfigError::Validation(format!(
+                "task '{task}' declares arg '{}' more than once",
+                arg.name
+            )));
+        }
+        // A variadic arg must be the last one.
+        if arg.variadic && i != args.len() - 1 {
+            return Err(ConfigError::Validation(format!(
+                "task '{task}' arg '{}' is variadic but not last; only the \
+                 final arg may be variadic",
+                arg.name
+            )));
+        }
+        validate_arg(task, arg)?;
+    }
+    Ok(())
+}
+
+fn validate_arg(task: &str, spec: &ArgSpec) -> Result<(), ConfigError> {
+    let arg = &spec.name;
     if let Some(choices) = &spec.choices {
         if choices.is_empty() {
             return Err(ConfigError::Validation(format!(
@@ -221,7 +308,7 @@ tasks:
         assert_eq!(cfg.workspace_name, "p");
         assert_eq!(cfg.tasks.len(), 1);
         let t = cfg.tasks.get("deploy").unwrap();
-        assert_eq!(t.command, "kubectl apply -f k8s/");
+        assert_eq!(t.command.as_deref(), Some("kubectl apply -f k8s/"));
     }
 
     #[test]
@@ -234,7 +321,7 @@ tasks:
     command: "kubectl apply -f k8s/$GIANT_ARG_ENV/"
     deps: ["docker:api"]
     args:
-      env:
+      - name: env
         default: "staging"
         choices: ["staging", "prod"]
         description: "Target environment"
@@ -244,8 +331,8 @@ tasks:
         let t = cfg.tasks.get("deploy").unwrap();
         assert_eq!(t.deps, vec!["docker:api"]);
         assert_eq!(t.args.len(), 1);
-        let env_arg = t.args.get("env").unwrap();
-        assert_eq!(env_arg.default.as_deref(), Some("staging"));
+        assert_eq!(t.args[0].name, "env");
+        assert_eq!(t.args[0].default.as_deref(), Some("staging"));
     }
 
     #[test]
@@ -308,7 +395,7 @@ tasks:
   deploy:
     command: "true"
     args:
-      env:
+      - name: env
         default: "prod"
         choices: ["staging"]
 "#,
@@ -329,5 +416,62 @@ tasks:
         );
         let err = TaskConfig::load(f.path()).unwrap_err();
         assert!(format!("{err}").contains("invalid"));
+    }
+
+    #[test]
+    fn rejects_task_with_no_command_and_no_services() {
+        let f = write_yaml(
+            r#"
+workspace: { name: p }
+tasks:
+  empty: {}
+"#,
+        );
+        let err = TaskConfig::load(f.path()).unwrap_err();
+        assert!(format!("{err}").contains("no command and no services"));
+    }
+
+    #[test]
+    fn accepts_command_less_task_that_supervises_services() {
+        let f = write_yaml(
+            r#"
+workspace: { name: p }
+services:
+  db: { command: "postgres" }
+tasks:
+  dev:
+    services: ["db"]
+"#,
+        );
+        let cfg = TaskConfig::load(f.path()).unwrap();
+        assert!(cfg.tasks["dev"].command.is_none());
+        assert_eq!(cfg.tasks["dev"].services, vec!["db"]);
+    }
+
+    #[test]
+    fn rejects_undefined_service_need() {
+        let f = write_yaml(
+            r#"
+workspace: { name: p }
+services:
+  api: { command: "serve", needs: ["db"] }
+"#,
+        );
+        let err = TaskConfig::load(f.path()).unwrap_err();
+        assert!(format!("{err}").contains("no such service"));
+    }
+
+    #[test]
+    fn rejects_service_needs_cycle() {
+        let f = write_yaml(
+            r#"
+workspace: { name: p }
+services:
+  a: { command: "x", needs: ["b"] }
+  b: { command: "y", needs: ["a"] }
+"#,
+        );
+        let err = TaskConfig::load(f.path()).unwrap_err();
+        assert!(format!("{err}").contains("cycle"));
     }
 }

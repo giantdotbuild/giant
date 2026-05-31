@@ -15,7 +15,6 @@ use crate::deps;
 use crate::render;
 use crate::schema::TaskSpec;
 use crate::services::{self, RunningService};
-use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
@@ -43,11 +42,13 @@ pub enum RunError {
 }
 
 /// Resolve + run. Returns the task command's exit code (0 on success).
+/// `positionals` are the bare args after the task name; `arg_kvs` are
+/// explicit `--arg name=value` overrides.
 pub async fn run(
     cfg: &TaskConfig,
     name: &str,
+    positionals: &[String],
     arg_kvs: &[String],
-    passthrough: &[OsString],
     workspace_root: &Path,
     verbose: bool,
 ) -> anyhow::Result<u8> {
@@ -55,7 +56,7 @@ pub async fn run(
         name: name.to_string(),
     })?;
 
-    let resolved_args = resolve_args(spec, arg_kvs)?;
+    let bound = bind_args(spec, positionals, arg_kvs)?;
 
     // 1. Build deps.
     if !spec.deps.is_empty() {
@@ -65,11 +66,11 @@ pub async fn run(
         }
     }
 
-    // 2. Start services (parallel) and wait for all to be ready.
-    let mut running_services = Vec::new();
+    // 2. Start services, dependency-ordered and ready-gated.
+    let mut running = Vec::new();
     if !spec.services.is_empty() {
-        match start_services(cfg, &spec.services, workspace_root).await {
-            Ok(svcs) => running_services = svcs,
+        match services::start_group(&cfg.services, &spec.services, workspace_root).await {
+            Ok(svcs) => running = svcs,
             Err((started, err)) => {
                 // Roll back what we did start, then bail.
                 services::stop_all(started).await;
@@ -78,28 +79,54 @@ pub async fn run(
         }
     }
 
-    // The rest of the lifecycle wraps in a single helper so we can
-    // ALWAYS run `finally` + stop services on the way out, no matter
-    // how the body exits.
-    let body_result = run_body(cfg, spec, &resolved_args, passthrough, workspace_root).await;
+    // 3. Body: run the command (services scaffold around it), or - for a
+    //    command-less task - supervise the services in the foreground
+    //    until Ctrl-C or a service exits (the `giant dev` shape).
+    let result = if spec.command.is_some() {
+        let r = run_body(cfg, spec, &bound, workspace_root).await;
+        run_finallies(cfg, spec, workspace_root).await;
+        r
+    } else {
+        supervise(&mut running).await
+    };
 
-    // 5. finally tasks (sequential).
-    if !spec.finally.is_empty() {
-        render::note(&format!("finally: {}", spec.finally.join(", ")));
-        for fin in &spec.finally {
-            if let Err(e) = run_finally(cfg, fin, workspace_root).await {
-                render::note(&format!("finally '{fin}' failed: {e}"));
-            }
+    // 4. Stop services (the whole group).
+    if !running.is_empty() {
+        render::note(&format!("stopping services: {}", spec.services.join(", ")));
+        services::stop_all(running).await;
+    }
+
+    result.map_err(Into::into)
+}
+
+/// `finally` tasks run after the command, on success or failure. Their
+/// own failures are logged but don't change the task's exit code.
+async fn run_finallies(cfg: &TaskConfig, spec: &TaskSpec, workspace_root: &Path) {
+    if spec.finally.is_empty() {
+        return;
+    }
+    render::note(&format!("finally: {}", spec.finally.join(", ")));
+    for fin in &spec.finally {
+        if let Err(e) = run_named_task(cfg, fin, workspace_root).await {
+            render::note(&format!("finally '{fin}' failed: {e}"));
         }
     }
+}
 
-    // 6. Stop services.
-    if !running_services.is_empty() {
-        render::note(&format!("stopping services: {}", spec.services.join(", ")));
-        services::stop_all(running_services).await;
+/// Foreground supervise mode: the services are up; hold until Ctrl-C or
+/// any service exits, then return so the caller stops the whole group.
+async fn supervise(running: &mut [RunningService]) -> Result<u8, RunError> {
+    render::note("services up - Ctrl-C to stop");
+    tokio::select! {
+        r = tokio::signal::ctrl_c() => {
+            let _ = r;
+            render::note("interrupted");
+        }
+        name = services::wait_any_exit(running) => {
+            render::note(&format!("service '{name}' exited; shutting down"));
+        }
     }
-
-    body_result.map_err(Into::into)
+    Ok(0)
 }
 
 /// Inner body: run `needs`, then run the task's `command`. Wrapped so
@@ -107,135 +134,152 @@ pub async fn run(
 async fn run_body(
     cfg: &TaskConfig,
     spec: &TaskSpec,
-    resolved_args: &HashMap<String, String>,
-    passthrough: &[OsString],
+    bound: &BoundArgs,
     workspace_root: &Path,
 ) -> Result<u8, RunError> {
     // 3. needs (sequential).
     for need in &spec.needs {
-        let need_spec = cfg
-            .tasks
-            .get(need)
-            .ok_or_else(|| RunError::UnknownTask { name: need.clone() })?;
         render::note(&format!("need: {need}"));
-        let code = run_command(need_spec, &HashMap::new(), &[], workspace_root).await?;
-        if code != 0 {
-            return Err(RunError::NeedFailed(need.clone()));
-        }
+        run_named_task(cfg, need, workspace_root).await?;
     }
 
     // 4. The main command.
-    run_command(spec, resolved_args, passthrough, workspace_root).await
+    run_command(spec, bound, workspace_root).await
 }
 
-/// Spawn each service concurrently. If any fails, returns the
-/// already-started ones so the caller can stop them.
-async fn start_services(
+/// Run another task by name to completion with no arguments. A non-zero
+/// exit becomes `NeedFailed`. Shared by `needs:` and `finally:`.
+async fn run_named_task(
     cfg: &TaskConfig,
-    names: &[String],
+    name: &str,
     workspace_root: &Path,
-) -> Result<Vec<RunningService>, (Vec<RunningService>, crate::services::ServiceError)> {
-    render::note(&format!("starting services: {}", names.join(", ")));
-    let mut futures = Vec::with_capacity(names.len());
-    for name in names {
-        let spec = cfg
-            .services
-            .get(name)
-            .expect("validated at config-load: every name in task.services exists");
-        let name = name.clone();
-        let spec = spec.clone();
-        let root = workspace_root.to_path_buf();
-        futures.push(tokio::spawn(async move {
-            services::start(&name, &spec, &root).await
-        }));
-    }
-
-    let mut started = Vec::new();
-    let mut failed: Option<crate::services::ServiceError> = None;
-    for fut in futures {
-        match fut.await {
-            Ok(Ok(svc)) => started.push(svc),
-            Ok(Err(e)) => {
-                failed.get_or_insert(e);
-            }
-            Err(join_err) => {
-                failed.get_or_insert(crate::services::ServiceError::Spawn {
-                    name: "<panicked>".into(),
-                    source: std::io::Error::other(join_err.to_string()),
-                });
-            }
-        }
-    }
-    match failed {
-        Some(e) => Err((started, e)),
-        None => Ok(started),
-    }
-}
-
-async fn run_finally(cfg: &TaskConfig, name: &str, workspace_root: &Path) -> Result<(), RunError> {
+) -> Result<(), RunError> {
     let spec = cfg.tasks.get(name).ok_or_else(|| RunError::UnknownTask {
         name: name.to_string(),
     })?;
-    let code = run_command(spec, &HashMap::new(), &[], workspace_root).await?;
+    let code = run_command(spec, &BoundArgs::default(), workspace_root).await?;
     if code != 0 {
         return Err(RunError::NeedFailed(name.to_string()));
     }
     Ok(())
 }
 
-/// Bind CLI `--arg key=value` pairs against the declared `args:`
-/// table. Applies defaults, validates against `choices`, and returns a
-/// map suitable for `GIANT_ARG_<NAME>=<VALUE>` env injection.
-fn resolve_args(spec: &TaskSpec, kvs: &[String]) -> Result<HashMap<String, String>, RunError> {
-    let mut user_supplied = HashMap::new();
-    for kv in kvs {
-        let (k, v) = kv.split_once('=').ok_or_else(|| RunError::BadArg {
-            name: kv.clone(),
-            detail: "expected --arg key=value".into(),
-        })?;
-        user_supplied.insert(k.to_string(), v.to_string());
-    }
+/// The result of binding a task's declared args to an invocation.
+#[derive(Debug, Default)]
+struct BoundArgs {
+    /// Scalar `(name, value)` pairs, exported as `GIANT_ARG_<NAME>` and
+    /// plain `$name`.
+    scalars: Vec<(String, String)>,
+    /// Values of the trailing `variadic` arg, if any - they become the
+    /// command's positional parameters (`$@`).
+    variadic: Vec<String>,
+    /// Name of the variadic arg (for its `GIANT_ARG_<NAME>` convenience
+    /// binding), if one was declared.
+    variadic_name: Option<String>,
+}
 
-    let mut out = HashMap::new();
-    for (arg_name, arg_spec) in &spec.args {
-        let val = match user_supplied
-            .remove(arg_name)
-            .or_else(|| arg_spec.default.clone())
-        {
-            Some(v) => v,
-            None => {
-                return Err(RunError::BadArg {
-                    name: arg_name.clone(),
-                    detail: "no value supplied and no default declared".into(),
-                });
-            }
-        };
-        if let Some(choices) = &arg_spec.choices
-            && !choices.contains(&val)
-        {
-            return Err(RunError::BadArg {
-                name: arg_name.clone(),
-                detail: format!("value {val:?} is not one of {choices:?}"),
-            });
+/// Bind `positionals` (bare args after the task name) and `--arg
+/// name=value` overrides against the task's declared `args:`. Positionals
+/// fill the scalar args in order; a trailing `variadic` arg collects the
+/// rest. `--arg` sets a named arg explicitly and conflicts with a
+/// positional for the same arg. Applies defaults, enforces `choices`, and
+/// errors on missing-required / too-many / unknown-name.
+fn bind_args(
+    spec: &TaskSpec,
+    positionals: &[String],
+    kvs: &[String],
+) -> Result<BoundArgs, RunError> {
+    let scalar_count = spec.args.iter().filter(|a| !a.variadic).count();
+
+    // 1. Bind positionals to args in order; a variadic absorbs the tail.
+    let mut values: Vec<Option<String>> = vec![None; spec.args.len()];
+    let mut variadic = Vec::new();
+    let mut pi = 0;
+    for (i, arg) in spec.args.iter().enumerate() {
+        if arg.variadic {
+            variadic.extend(positionals[pi..].iter().cloned());
+            pi = positionals.len();
+            break; // variadic is validated to be last
         }
-        out.insert(arg_name.clone(), val);
+        if pi < positionals.len() {
+            values[i] = Some(positionals[pi].clone());
+            pi += 1;
+        }
     }
-
-    // Anything left over in user_supplied was a key we don't declare.
-    if let Some((unknown, _)) = user_supplied.into_iter().next() {
+    if pi < positionals.len() {
         return Err(RunError::BadArg {
-            name: unknown,
-            detail: "no such declared arg for this task".into(),
+            name: "<positional>".into(),
+            detail: format!(
+                "task takes {scalar_count} argument(s); got {} extra: {:?}",
+                positionals.len() - scalar_count,
+                &positionals[pi..],
+            ),
         });
     }
 
-    Ok(out)
+    // 2. Apply `--arg name=value` overrides by name.
+    for kv in kvs {
+        let (k, v) = kv.split_once('=').ok_or_else(|| RunError::BadArg {
+            name: kv.clone(),
+            detail: "expected --arg name=value".into(),
+        })?;
+        let idx = spec
+            .args
+            .iter()
+            .position(|a| a.name == k && !a.variadic)
+            .ok_or_else(|| RunError::BadArg {
+                name: k.into(),
+                detail: "no such declared arg for this task".into(),
+            })?;
+        if values[idx].is_some() {
+            return Err(RunError::BadArg {
+                name: k.into(),
+                detail: "set both positionally and via --arg".into(),
+            });
+        }
+        values[idx] = Some(v.to_string());
+    }
+
+    // 3. Resolve defaults, required, and choices into the scalar set.
+    let mut scalars = Vec::with_capacity(scalar_count);
+    for (i, arg) in spec.args.iter().enumerate() {
+        if arg.variadic {
+            continue;
+        }
+        let val = match values[i].take().or_else(|| arg.default.clone()) {
+            Some(v) => v,
+            None => {
+                return Err(RunError::BadArg {
+                    name: arg.name.clone(),
+                    detail: "required (no value supplied and no default)".into(),
+                });
+            }
+        };
+        if let Some(choices) = &arg.choices
+            && !choices.contains(&val)
+        {
+            return Err(RunError::BadArg {
+                name: arg.name.clone(),
+                detail: format!("value {val:?} is not one of {choices:?}"),
+            });
+        }
+        scalars.push((arg.name.clone(), val));
+    }
+
+    Ok(BoundArgs {
+        scalars,
+        variadic,
+        variadic_name: spec
+            .args
+            .iter()
+            .find(|a| a.variadic)
+            .map(|a| a.name.clone()),
+    })
 }
 
 async fn run_command(
     spec: &TaskSpec,
-    args: &HashMap<String, String>,
-    passthrough: &[OsString],
+    bound: &BoundArgs,
     workspace_root: &Path,
 ) -> Result<u8, RunError> {
     let cwd = match &spec.cwd {
@@ -243,19 +287,32 @@ async fn run_command(
         None => workspace_root.to_path_buf(),
     };
 
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(&spec.command);
-    // Pass-through args become $1..$N inside sh -c.
-    cmd.arg("--");
-    for p in passthrough {
-        cmd.arg(p);
-    }
+    // Positional parameters ($@): the variadic arg's values.
+    let positional: Vec<OsString> = bound.variadic.iter().map(OsString::from).collect();
+
+    // Shebang body → exec a temp script; plain body → `sh -c`. The temp
+    // file (if any) must outlive the child, so `_script` is held here.
+    // Only reached for tasks that have a command (supervise-mode tasks
+    // never run a command).
+    let body = spec
+        .command
+        .as_deref()
+        .expect("run_command requires a command");
+    let (mut cmd, _script) = build_command(body, &positional)?;
     cmd.current_dir(&cwd);
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
-    for (k, v) in args {
-        cmd.env(format!("GIANT_ARG_{}", k.to_ascii_uppercase()), v);
+    // Scalar args: `GIANT_ARG_<NAME>` (unambiguous) + plain `$name`.
+    for (name, val) in &bound.scalars {
+        cmd.env(format!("GIANT_ARG_{}", name.to_ascii_uppercase()), val);
+        cmd.env(name, val);
+    }
+    // Variadic convenience binding: the values space-joined under its name.
+    if let Some(vname) = &bound.variadic_name {
+        let joined = bound.variadic.join(" ");
+        cmd.env(format!("GIANT_ARG_{}", vname.to_ascii_uppercase()), &joined);
+        cmd.env(vname, &joined);
     }
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -282,33 +339,72 @@ async fn run_command(
     Ok(status.code().map(|c| c.clamp(0, 255) as u8).unwrap_or(1))
 }
 
+/// Build the command for a task body. A body that begins with `#!` is a
+/// script: write it to a temp file, make it executable, and exec it
+/// directly with the positional args (the kernel honors the shebang), so
+/// tasks can be written in any language. Otherwise run it under `sh -c`.
+/// The returned tempfile (if any) must be kept alive until the command
+/// finishes - its drop deletes the script.
+fn build_command(
+    body: &str,
+    positional: &[OsString],
+) -> Result<(Command, Option<tempfile::TempPath>), RunError> {
+    if body.trim_start().starts_with("#!") {
+        use std::io::Write;
+        let mut tmp = tempfile::Builder::new().prefix("giant-task-").tempfile()?;
+        tmp.write_all(body.as_bytes())?;
+        tmp.flush()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755))?;
+        }
+        // Close the write handle (keeping the file on disk) before exec -
+        // a file still open for writing can't be exec'd (ETXTBSY).
+        let path = tmp.into_temp_path();
+        let mut cmd = Command::new(&path);
+        cmd.args(positional);
+        Ok((cmd, Some(path)))
+    } else {
+        // Pass-through/variadic args become $1..$N inside `sh -c`.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(body).arg("--").args(positional);
+        Ok((cmd, None))
+    }
+}
+
 /// Short label for the "▶ <task>" header. Uses the description when
 /// available; falls back to the command's first 60 chars.
 fn spec_label(spec: &TaskSpec) -> String {
-    spec.description.clone().unwrap_or_else(|| {
-        let mut c = spec.command.clone();
-        if c.len() > 60 {
-            c.truncate(57);
-            c.push_str("...");
+    if let Some(d) = &spec.description {
+        return d.clone();
+    }
+    match spec.command.as_deref() {
+        Some(c) if c.len() > 60 => {
+            let mut s: String = c.chars().take(57).collect();
+            s.push_str("...");
+            s
         }
-        c
-    })
+        Some(c) => c.to_string(),
+        None => "(services)".to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use indexmap::IndexMap;
+    use crate::schema::ArgSpec;
+    use std::collections::HashMap;
 
-    fn empty_spec() -> TaskSpec {
+    fn task(args: Vec<ArgSpec>) -> TaskSpec {
         TaskSpec {
-            command: "true".into(),
+            command: Some("true".into()),
             description: None,
             deps: vec![],
             needs: vec![],
             services: vec![],
             finally: vec![],
-            args: IndexMap::new(),
+            args,
             env: HashMap::new(),
             cwd: None,
             timeout_secs: None,
@@ -316,81 +412,94 @@ mod tests {
         }
     }
 
-    #[test]
-    fn arg_default_applied_when_user_omits() {
-        use crate::schema::TaskArg;
-        let mut s = empty_spec();
-        s.args.insert(
-            "env".into(),
-            TaskArg {
-                default: Some("staging".into()),
-                choices: None,
-                description: None,
-            },
-        );
-        let out = resolve_args(&s, &[]).unwrap();
-        assert_eq!(out.get("env").unwrap(), "staging");
+    fn arg(name: &str, default: Option<&str>) -> ArgSpec {
+        ArgSpec {
+            name: name.into(),
+            default: default.map(Into::into),
+            choices: None,
+            variadic: false,
+            description: None,
+        }
+    }
+
+    fn scalar<'a>(b: &'a BoundArgs, name: &str) -> Option<&'a str> {
+        b.scalars
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
     }
 
     #[test]
-    fn arg_user_value_overrides_default() {
-        use crate::schema::TaskArg;
-        let mut s = empty_spec();
-        s.args.insert(
-            "env".into(),
-            TaskArg {
-                default: Some("staging".into()),
-                choices: None,
-                description: None,
-            },
-        );
-        let out = resolve_args(&s, &["env=prod".into()]).unwrap();
-        assert_eq!(out.get("env").unwrap(), "prod");
+    fn positional_binds_by_order() {
+        let s = task(vec![arg("env", None), arg("tag", Some("latest"))]);
+        let b = bind_args(&s, &["prod".into(), "v2".into()], &[]).unwrap();
+        assert_eq!(scalar(&b, "env"), Some("prod"));
+        assert_eq!(scalar(&b, "tag"), Some("v2"));
     }
 
     #[test]
-    fn arg_value_must_be_in_choices() {
-        use crate::schema::TaskArg;
-        let mut s = empty_spec();
-        s.args.insert(
-            "env".into(),
-            TaskArg {
-                default: Some("staging".into()),
-                choices: Some(vec!["staging".into(), "prod".into()]),
-                description: None,
-            },
-        );
-        let err = resolve_args(&s, &["env=staging-2".into()]).unwrap_err();
+    fn default_applied_when_positional_omitted() {
+        let s = task(vec![arg("env", None), arg("tag", Some("latest"))]);
+        let b = bind_args(&s, &["prod".into()], &[]).unwrap();
+        assert_eq!(scalar(&b, "tag"), Some("latest"));
+    }
+
+    #[test]
+    fn required_missing_errors() {
+        let s = task(vec![arg("env", None)]);
+        let err = bind_args(&s, &[], &[]).unwrap_err();
+        assert!(format!("{err}").contains("required"));
+    }
+
+    #[test]
+    fn explicit_arg_sets_and_conflicts() {
+        let s = task(vec![arg("env", Some("staging"))]);
+        // `--arg` sets it when no positional is given.
+        let b = bind_args(&s, &[], &["env=prod".into()]).unwrap();
+        assert_eq!(scalar(&b, "env"), Some("prod"));
+        // positional + `--arg` for the same arg → conflict.
+        let err = bind_args(&s, &["prod".into()], &["env=stg".into()]).unwrap_err();
+        assert!(format!("{err}").contains("both positionally and via --arg"));
+    }
+
+    #[test]
+    fn choices_enforced() {
+        let mut a = arg("env", Some("staging"));
+        a.choices = Some(vec!["staging".into(), "prod".into()]);
+        let s = task(vec![a]);
+        let err = bind_args(&s, &["nope".into()], &[]).unwrap_err();
         assert!(format!("{err}").contains("not one of"));
     }
 
     #[test]
-    fn arg_with_no_default_and_no_value_errors() {
-        use crate::schema::TaskArg;
-        let mut s = empty_spec();
-        s.args.insert(
-            "env".into(),
-            TaskArg {
-                default: None,
-                choices: None,
-                description: None,
-            },
-        );
-        let err = resolve_args(&s, &[]).unwrap_err();
-        assert!(format!("{err}").contains("no value supplied"));
+    fn variadic_collects_the_rest() {
+        let mut v = arg("flags", None);
+        v.variadic = true;
+        let s = task(vec![arg("env", None), v]);
+        let b = bind_args(&s, &["prod".into(), "a".into(), "b".into()], &[]).unwrap();
+        assert_eq!(scalar(&b, "env"), Some("prod"));
+        assert_eq!(b.variadic, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(b.variadic_name.as_deref(), Some("flags"));
     }
 
     #[test]
-    fn unknown_arg_key_errors() {
-        let s = empty_spec();
-        let err = resolve_args(&s, &["nope=1".into()]).unwrap_err();
+    fn too_many_positionals_without_variadic_errors() {
+        let s = task(vec![arg("env", None)]);
+        let err = bind_args(&s, &["a".into(), "b".into()], &[]).unwrap_err();
+        assert!(format!("{err}").contains("extra"));
+    }
+
+    #[test]
+    fn unknown_arg_name_errors() {
+        let s = task(vec![]);
+        let err = bind_args(&s, &[], &["nope=1".into()]).unwrap_err();
         assert!(format!("{err}").contains("no such declared arg"));
     }
 
     #[test]
     fn malformed_kv_errors() {
-        let s = empty_spec();
-        let err = resolve_args(&s, &["nosep".into()]).unwrap_err();
-        assert!(format!("{err}").contains("expected --arg key=value"));
+        let s = task(vec![]);
+        let err = bind_args(&s, &[], &["nosep".into()]).unwrap_err();
+        assert!(format!("{err}").contains("--arg name=value"));
     }
 }

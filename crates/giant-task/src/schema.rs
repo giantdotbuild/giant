@@ -38,8 +38,12 @@ pub struct WorkspaceStub {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskSpec {
-    /// Shell command (`sh -c "<command>"`). Required.
-    pub command: String,
+    /// Shell command, or a `#!` script body. Optional: a task with
+    /// `services:` and **no** command supervises those services in the
+    /// foreground until Ctrl-C (the `giant dev` shape). A task with a
+    /// command runs it (services, if any, scaffold around it).
+    #[serde(default)]
+    pub command: Option<String>,
 
     /// One-line description for `giant-task list`.
     #[serde(default)]
@@ -67,11 +71,11 @@ pub struct TaskSpec {
     #[serde(default)]
     pub finally: Vec<String>,
 
-    /// Named arguments. The CLI binds them via `--arg key=value` and
-    /// they're exported as `GIANT_ARG_<KEY>=<value>` env vars before
-    /// running the command.
+    /// Declared arguments, in positional order. Bound from the command
+    /// line positionally (`giant deploy prod v2`) or via `--arg
+    /// name=value`, then exported to the command (see `ArgSpec`).
     #[serde(default)]
-    pub args: IndexMap<String, TaskArg>,
+    pub args: Vec<ArgSpec>,
 
     /// Extra environment variables. Merged on top of inherited env.
     #[serde(default)]
@@ -95,17 +99,28 @@ pub struct TaskSpec {
     pub inputs: Vec<String>,
 }
 
+/// One declared argument. Bound positionally (by its place in the
+/// task's `args` list) or by name via `--arg`. A scalar arg exports
+/// `GIANT_ARG_<NAME>` (uppercased) and a plain `$name`; a `variadic`
+/// arg collects the remaining positionals and becomes the command's
+/// positional parameters (`$@`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TaskArg {
-    /// Default value when the user doesn't pass `--arg <name>=...`.
+pub struct ArgSpec {
+    /// Binding name.
+    pub name: String,
+    /// Default value. Present => optional; absent => required (unless
+    /// `variadic`, which is always 0-or-more).
     #[serde(default)]
     pub default: Option<String>,
-    /// Constrained value set. If non-empty, `default` must be in the
-    /// list and any user-supplied value must match.
+    /// Constrained value set. If present, `default` must be in the list
+    /// and any supplied value must match.
     #[serde(default)]
     pub choices: Option<Vec<String>>,
-    /// One-line description for `giant-task <name> --help`.
+    /// Trailing-only: collect all remaining positionals into `$@`.
+    #[serde(default)]
+    pub variadic: bool,
+    /// One-line description for the task signature.
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -128,6 +143,12 @@ pub struct ServiceSpec {
     /// task `deps:`. Forwarded to `giant build`.
     #[serde(default)]
     pub deps: Vec<String>,
+
+    /// Other service names this one depends on: the supervisor starts
+    /// each dependency and waits for its `ready` probe before starting
+    /// this service (topological foreground start).
+    #[serde(default)]
+    pub needs: Vec<String>,
 
     /// Optional readiness probe. If absent, the service is considered
     /// ready as soon as it starts (i.e., the task command runs

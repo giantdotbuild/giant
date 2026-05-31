@@ -11,10 +11,13 @@
 //! the inspector handles is tied to the `RunningService` they
 //! belong to.
 
+use crate::render;
 use crate::schema::{ReadyProbe, ServiceSpec};
 use anstyle::{AnsiColor, Color, Style};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
@@ -35,6 +38,9 @@ pub enum ServiceError {
 
     #[error("service '{name}' exited before becoming ready (status: {status})")]
     ExitedEarly { name: String, status: String },
+
+    #[error("supervisor error: {detail}")]
+    Internal { detail: String },
 }
 
 /// One running service. The Inspectors keep the per-line callbacks
@@ -124,6 +130,89 @@ pub async fn start(
     })
 }
 
+/// Start `names` plus everything they transitively `need`, in dependency
+/// order: a service starts only once all its `needs:` have passed their
+/// ready probe. Services with satisfied needs start concurrently. Returns
+/// the started services in start order (so the caller can stop them - and
+/// roll them back on failure - sensibly).
+pub async fn start_group(
+    services: &IndexMap<String, ServiceSpec>,
+    names: &[String],
+    workspace_root: &Path,
+) -> Result<Vec<RunningService>, (Vec<RunningService>, ServiceError)> {
+    // The group is the listed services plus their transitive `needs`.
+    let mut group: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = names.to_vec();
+    while let Some(n) = stack.pop() {
+        if !seen.insert(n.clone()) {
+            continue;
+        }
+        if let Some(spec) = services.get(&n) {
+            stack.extend(spec.needs.iter().cloned());
+        }
+        group.push(n);
+    }
+    render::note(&format!("starting services: {}", group.join(", ")));
+
+    let mut started: Vec<RunningService> = Vec::new();
+    let mut ready: HashSet<String> = HashSet::new();
+
+    while started.len() < group.len() {
+        // Services not yet started whose needs are all ready.
+        let eligible: Vec<String> = group
+            .iter()
+            .filter(|n| !ready.contains(*n))
+            .filter(|n| {
+                services
+                    .get(*n)
+                    .is_some_and(|s| s.needs.iter().all(|d| ready.contains(d)))
+            })
+            .cloned()
+            .collect();
+        if eligible.is_empty() {
+            // Acyclicity is validated at config load, so this is a
+            // belt-and-braces guard, never expected to fire.
+            return Err((
+                started,
+                ServiceError::Internal {
+                    detail: "service `needs:` cannot be satisfied".into(),
+                },
+            ));
+        }
+
+        // Start this level concurrently; each `start` returns once ready.
+        let futures = eligible.into_iter().map(|name| {
+            let spec = services.get(&name).expect("in group → defined").clone();
+            let root = workspace_root.to_path_buf();
+            tokio::spawn(async move { (name.clone(), start(&name, &spec, &root).await) })
+        });
+        let results = futures_util::future::join_all(futures).await;
+
+        let mut failed = None;
+        for r in results {
+            match r {
+                Ok((name, Ok(svc))) => {
+                    ready.insert(name);
+                    started.push(svc);
+                }
+                Ok((_, Err(e))) => {
+                    failed.get_or_insert(e);
+                }
+                Err(join_err) => {
+                    failed.get_or_insert(ServiceError::Internal {
+                        detail: format!("a service start task panicked: {join_err}"),
+                    });
+                }
+            }
+        }
+        if let Some(e) = failed {
+            return Err((started, e));
+        }
+    }
+    Ok(started)
+}
+
 /// Stop all running services in parallel. Each gets a SIGINT, then
 /// SIGTERM after `interrupt_timeout`, then SIGKILL after another
 /// `terminate_timeout` if it still hasn't exited. Best-effort: errors
@@ -138,6 +227,24 @@ pub async fn stop_all(services: Vec<RunningService>) {
             .await;
     });
     futures_util::future::join_all(futures).await;
+}
+
+/// Wait until any running service exits, returning its name. Foreground
+/// supervise mode uses this to fall out of its hold when a service dies.
+/// Event-driven (races each service's completion future), not polled.
+pub async fn wait_any_exit(running: &mut [RunningService]) -> String {
+    if running.is_empty() {
+        // No services to watch - hold forever; the caller's Ctrl-C arm wins.
+        return std::future::pending().await;
+    }
+    let waits = running.iter_mut().map(|svc| {
+        Box::pin(async move {
+            let _ = svc.handle.wait_for_completion(None).await;
+            svc.name.clone()
+        })
+    });
+    let (name, _, _) = futures_util::future::select_all(waits).await;
+    name
 }
 
 /// Poll the ready probe until it returns 0 (success) or the timeout
@@ -230,16 +337,6 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
-/// Resolve the cwd for a service relative to the workspace root.
-/// Kept here so callers don't need to know the rule.
-#[allow(dead_code)]
-pub fn resolve_cwd(spec: &ServiceSpec, workspace_root: &Path) -> PathBuf {
-    match &spec.cwd {
-        Some(rel) => workspace_root.join(rel),
-        None => workspace_root.to_path_buf(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +347,7 @@ mod tests {
             command: command.into(),
             description: None,
             deps: vec![],
+            needs: vec![],
             ready,
             env: HashMap::new(),
             cwd: None,

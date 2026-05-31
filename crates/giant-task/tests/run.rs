@@ -133,15 +133,16 @@ fn task_args_become_env_vars() {
 workspace: { name: args }
 tasks:
   deploy:
-    command: "echo $GIANT_ARG_ENV > out.txt"
+    command: "echo $GIANT_ARG_ENV $env > out.txt"
     args:
-      env:
+      - name: env
         default: "staging"
         choices: ["staging", "prod"]
 "#,
     );
 
-    // Default is applied when --arg is omitted.
+    // Default is applied when no value is given. Both bindings are set:
+    // GIANT_ARG_ENV and the plain $env.
     let out = Command::new(giant_task_bin())
         .arg("deploy")
         .current_dir(dir.path())
@@ -152,7 +153,25 @@ tasks:
         std::fs::read_to_string(dir.path().join("out.txt"))
             .unwrap()
             .trim(),
-        "staging"
+        "staging staging"
+    );
+
+    // A positional value binds to the first declared arg.
+    let out = Command::new(giant_task_bin())
+        .args(["deploy", "prod"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt"))
+            .unwrap()
+            .trim(),
+        "prod prod"
     );
 
     // --arg overrides the default; the choices list permits "prod".
@@ -170,7 +189,7 @@ tasks:
         std::fs::read_to_string(dir.path().join("out.txt"))
             .unwrap()
             .trim(),
-        "prod"
+        "prod prod"
     );
 
     // Value outside choices is rejected.
@@ -184,7 +203,10 @@ tasks:
 }
 
 #[test]
-fn passthrough_args_appear_as_positional_in_sh() {
+fn flaglike_args_pass_through_to_variadic_without_dashdash() {
+    // The user's `giant deploy --force` case: a variadic arg forwards
+    // everything - including flag-like values - to the command as $@,
+    // with no `--` needed.
     let dir = tempfile::tempdir().unwrap();
     write_config(
         dir.path(),
@@ -192,11 +214,14 @@ fn passthrough_args_appear_as_positional_in_sh() {
 workspace: { name: pt }
 tasks:
   echo:
-    command: "echo \"$1 $2\" > out.txt"
+    command: 'echo "$@" > out.txt'
+    args:
+      - name: rest
+        variadic: true
 "#,
     );
     let out = Command::new(giant_task_bin())
-        .args(["echo", "--", "alpha", "beta"])
+        .args(["echo", "--release", "--nocapture", "x"])
         .current_dir(dir.path())
         .output()
         .unwrap();
@@ -209,7 +234,118 @@ tasks:
         std::fs::read_to_string(dir.path().join("out.txt"))
             .unwrap()
             .trim(),
-        "alpha beta"
+        "--release --nocapture x"
+    );
+}
+
+#[test]
+fn per_task_help_prints_the_signature() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(
+        dir.path(),
+        r#"
+workspace: { name: h }
+tasks:
+  deploy:
+    description: "deploy the app"
+    command: "true"
+    args:
+      - name: env
+        choices: ["staging", "prod"]
+        description: "target environment"
+      - name: tag
+        default: "latest"
+"#,
+    );
+    let out = Command::new(giant_task_bin())
+        .args(["deploy", "--help"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("usage: giant deploy <env> [tag=latest]"),
+        "expected the task signature; got: {s}"
+    );
+    assert!(s.contains("staging|prod"), "expected choices; got: {s}");
+}
+
+#[test]
+fn bare_help_shows_giant_task_help() {
+    // `giant task --help` (no task name) → giant-task's own help, via clap.
+    let out = Command::new(giant_task_bin())
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("Task-runner porcelain") || s.contains("Usage:"),
+        "expected giant-task's general help; got: {s}"
+    );
+}
+
+#[test]
+fn variadic_arg_becomes_positional_params() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(
+        dir.path(),
+        r#"
+workspace: { name: var }
+tasks:
+  many:
+    command: "echo \"$# $@\" > out.txt"
+    args:
+      - name: rest
+        variadic: true
+"#,
+    );
+    let out = Command::new(giant_task_bin())
+        .args(["many", "a", "b", "c"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt"))
+            .unwrap()
+            .trim(),
+        "3 a b c"
+    );
+}
+
+#[test]
+fn shebang_body_runs_as_a_script() {
+    let dir = tempfile::tempdir().unwrap();
+    // A `#!` body is written to a temp file and exec'd directly, so `$0`
+    // is that temp script (not `sh`). That proves shebang dispatch.
+    write_config(
+        dir.path(),
+        "workspace: { name: sheb }\ntasks:\n  sheb:\n    command: |\n      #!/bin/sh\n      echo \"$0\" > out.txt\n",
+    );
+    let out = Command::new(giant_task_bin())
+        .arg("sheb")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let arg0 = std::fs::read_to_string(dir.path().join("out.txt")).unwrap();
+    assert!(
+        arg0.contains("giant-task-"),
+        "expected the body to run from a temp script; $0 was: {arg0}"
     );
 }
 
@@ -561,5 +697,87 @@ fn no_config_in_tree_errors() {
         !out.status.success(),
         "expected failure when no giant.yaml exists upward; got stdout={}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn supervise_mode_returns_when_a_service_exits() {
+    // A task with `services:` and no `command:` supervises in the
+    // foreground; it returns when a service exits (here, quickly).
+    let dir = tempfile::tempdir().unwrap();
+    write_config(
+        dir.path(),
+        r#"
+workspace: { name: sup }
+services:
+  quick:
+    command: "sleep 0.3"
+tasks:
+  dev:
+    services: ["quick"]
+"#,
+    );
+    let started = std::time::Instant::now();
+    let out = Command::new(giant_task_bin())
+        .arg("dev")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "supervise should return on the service exit, not hang"
+    );
+}
+
+#[test]
+fn services_start_in_dependency_order() {
+    // `api` needs `db`; the supervisor must bring `db` to ready before
+    // starting `api`. db touches a marker only after a delay + its ready
+    // probe; api (started after db is ready) sees the marker and proves
+    // ordering by touching its own. api then exits, ending the supervise.
+    let dir = tempfile::tempdir().unwrap();
+    let db_ready = dir.path().join("db-ready");
+    let api_ok = dir.path().join("api-ok");
+    write_config(
+        dir.path(),
+        &format!(
+            r#"
+workspace: {{ name: ord }}
+services:
+  db:
+    command: 'sleep 0.2; touch {db}; exec sleep 30'
+    ready:
+      command: 'test -f {db}'
+      period_secs: 1
+      timeout_secs: 5
+  api:
+    needs: ["db"]
+    command: 'test -f {db} && touch {ok}'
+tasks:
+  dev:
+    services: ["api"]
+"#,
+            db = db_ready.display(),
+            ok = api_ok.display(),
+        ),
+    );
+    let out = Command::new(giant_task_bin())
+        .arg("dev")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        api_ok.exists(),
+        "api must have started after db became ready (saw the db marker)"
     );
 }
