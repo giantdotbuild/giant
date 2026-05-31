@@ -126,6 +126,162 @@ targets:
 }
 
 #[test]
+fn glob_output_captures_and_restores_all_matched_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: glob
+cache:
+  dir: ./cache
+targets:
+  - id: "gen:many"
+    inputs: []
+    outputs: ["gen/*.txt"]
+    command: "mkdir -p gen && echo 1 > gen/a.txt && echo 2 > gen/b.txt && echo 3 > gen/c.txt"
+"#,
+    )
+    .unwrap();
+
+    // First build - captures all three matched files, not just an anchor.
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .expect("spawn giant");
+    assert!(
+        out.status.success(),
+        "first build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Delete the whole tree; a cache hit must restore every matched file.
+    std::fs::remove_dir_all(ws.join("gen")).unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .expect("spawn giant");
+    assert!(out.status.success(), "second build failed");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("cache"),
+        "expected cache hit"
+    );
+    for (f, want) in [("a.txt", "1"), ("b.txt", "2"), ("c.txt", "3")] {
+        assert_eq!(
+            std::fs::read_to_string(ws.join("gen").join(f))
+                .unwrap()
+                .trim(),
+            want,
+            "{f} not restored from cache"
+        );
+    }
+}
+
+#[test]
+fn glob_output_matching_zero_files_fails_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: empty
+cache:
+  dir: ./cache
+targets:
+  - id: "gen:none"
+    inputs: []
+    outputs: ["gen/*.txt"]
+    command: "mkdir -p gen"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .expect("spawn giant");
+    assert!(
+        !out.status.success(),
+        "build should fail when a glob output matches no files"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("no files"),
+        "expected a zero-match error, got: {combined}"
+    );
+}
+
+#[test]
+fn named_and_glob_outputs_compose() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: compose
+cache:
+  dir: ./cache
+targets:
+  - id: "gen:mixed"
+    inputs: []
+    outputs:
+      - "gen/anchor.txt"
+      - "gen/*.txt"
+    command: "mkdir -p gen && echo anchor > gen/anchor.txt && echo extra > gen/extra.txt"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .expect("spawn giant");
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    std::fs::remove_dir_all(ws.join("gen")).unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .expect("spawn giant");
+    assert!(out.status.success(), "second build failed");
+    // The named anchor and the glob-captured extra both restore (the
+    // anchor is matched by both entries and deduped).
+    assert_eq!(
+        std::fs::read_to_string(ws.join("gen/anchor.txt"))
+            .unwrap()
+            .trim(),
+        "anchor"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("gen/extra.txt"))
+            .unwrap()
+            .trim(),
+        "extra"
+    );
+}
+
+#[test]
 fn build_with_dep_chain_runs_in_order() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();

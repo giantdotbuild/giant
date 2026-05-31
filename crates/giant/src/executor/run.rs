@@ -330,11 +330,12 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
     // commands use `> outdir/file` redirects; with parent dirs absent
     // the shell fails before the user's command sees the workspace.
     // Cheap, idempotent, and matches the "you declared this output,
-    // the engine handles the boilerplate" philosophy.
+    // the engine handles the boilerplate" philosophy. For glob outputs
+    // we create only the literal prefix before the first glob component,
+    // so a pattern like `gen/**/*.go` makes `gen/`, never a dir named `**`.
     for out_path in &spec.outputs {
-        let abs = ctx.workspace_root.as_path().join(out_path.as_path());
-        if let Some(parent) = abs.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
+        if let Some(dir) = output_parent_to_create(out_path.as_path()) {
+            let _ = tokio::fs::create_dir_all(ctx.workspace_root.as_path().join(dir)).await;
         }
     }
 
@@ -524,44 +525,49 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
     }
 }
 
-/// Read declared output files, hash them, and store them in CAS.
+/// Capture a target's outputs: glob-expand each declared pattern, hash
+/// every matching file, and store it in CAS (ADR-0019).
+///
+/// Each `outputs:` entry is a glob; a literal path is the degenerate
+/// single-match case, so the must-exist contract survives (a named file
+/// that wasn't produced matches zero files → error). Matched directories
+/// are skipped; a pattern that matches no files fails the run. The
+/// captured set is deduped and sorted so a multi-file declaration folds
+/// deterministically into `outputs_content_hash`.
 async fn capture_outputs(
     cache: &LocalCache,
     workspace_root: &AbsPath,
     spec: &TargetSpec,
 ) -> Result<Vec<OutputFile>, std::io::Error> {
-    let mut outputs = Vec::with_capacity(spec.outputs.len());
-    for out_path in &spec.outputs {
-        let abs = workspace_root.as_path().join(out_path.as_path());
+    let ws = workspace_root.as_path().to_path_buf();
+    let patterns: Vec<std::path::PathBuf> = spec
+        .outputs
+        .iter()
+        .map(|o| o.as_path().to_path_buf())
+        .collect();
+
+    // Enumerate matches off the async runtime - `glob` does blocking stats.
+    let mut files = tokio::task::spawn_blocking(move || glob_output_files(&ws, &patterns))
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))??;
+    files.sort();
+    files.dedup();
+
+    let mut outputs = Vec::with_capacity(files.len());
+    for abs in files {
+        let rel = abs.strip_prefix(workspace_root.as_path()).map_err(|_| {
+            std::io::Error::other(format!("captured output {abs:?} escaped the workspace"))
+        })?;
         let metadata = tokio::fs::metadata(&abs).await?;
-        if metadata.is_dir() {
-            return Err(std::io::Error::other(format!(
-                "declared output {:?} is a directory; v1 supports single files",
-                out_path.as_path()
-            )));
-        }
         let bytes = tokio::fs::read(&abs).await?;
         let size = bytes.len() as u64;
-        let executable;
-        let mode;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let m = metadata.permissions().mode();
-            executable = m & 0o111 != 0;
-            mode = format!("{:o}", m & 0o7777);
-        }
-        #[cfg(not(unix))]
-        {
-            executable = false;
-            mode = "0644".into();
-        }
+        let (executable, mode) = file_perms(&metadata);
         let hash = cache
             .put_cas(bytes)
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         outputs.push(OutputFile {
-            rel_path: out_path.as_path().to_string_lossy().into_owned(),
+            rel_path: rel.to_string_lossy().into_owned(),
             content_hash: hash,
             size,
             executable,
@@ -569,6 +575,101 @@ async fn capture_outputs(
         });
     }
     Ok(outputs)
+}
+
+/// Glob-expand each output pattern (relative to `ws`) into the absolute
+/// paths of the regular files it matches. Each pattern must match at
+/// least one file; a pattern matching only directories, or nothing, is a
+/// run error (with a directory-specific hint).
+fn glob_output_files(
+    ws: &std::path::Path,
+    patterns: &[std::path::PathBuf],
+) -> Result<Vec<std::path::PathBuf>, std::io::Error> {
+    let mut files = Vec::new();
+    for pat in patterns {
+        let joined = ws.join(pat);
+        let Some(pat_str) = joined.to_str() else {
+            return Err(std::io::Error::other(format!(
+                "output pattern {:?} is not valid UTF-8",
+                pat
+            )));
+        };
+        let entries = glob::glob(pat_str)
+            .map_err(|e| std::io::Error::other(format!("bad output pattern {pat:?}: {e}")))?;
+        let mut matched_file = false;
+        let mut matched_dir = false;
+        for entry in entries {
+            let path = entry.map_err(|e| std::io::Error::other(e.to_string()))?;
+            match std::fs::metadata(&path) {
+                Ok(m) if m.is_file() => {
+                    files.push(path);
+                    matched_file = true;
+                }
+                Ok(m) if m.is_dir() => matched_dir = true,
+                _ => {}
+            }
+        }
+        if !matched_file {
+            return Err(std::io::Error::other(if matched_dir {
+                format!(
+                    "output {:?} matched only directories; directory outputs are not yet \
+                     supported - declare files or a recursive glob like {:?}",
+                    pat,
+                    pat.join("**").join("*")
+                )
+            } else {
+                format!("output {pat:?} matched no files after the command ran")
+            }));
+        }
+    }
+    Ok(files)
+}
+
+/// The directory to pre-create for an output pattern, if any. For a
+/// literal path it is the file's parent; for a glob it is the literal
+/// prefix before the first component containing a glob metacharacter
+/// (so `gen/**/*.go` yields `gen`, not a literal `gen/**`). Returns
+/// `None` when there's nothing above the workspace root to create.
+fn output_parent_to_create(pattern: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let is_glob = |c: &std::ffi::OsStr| c.to_string_lossy().contains(['*', '?', '[']);
+    let mut prefix = std::path::PathBuf::new();
+    let mut saw_glob = false;
+    for comp in pattern.components() {
+        if let Component::Normal(c) = comp {
+            if is_glob(c) {
+                saw_glob = true;
+                break;
+            }
+            prefix.push(c);
+        }
+    }
+    if saw_glob {
+        // The literal dir before the first glob component (may be empty
+        // for a top-level glob like `*.txt`).
+        (!prefix.as_os_str().is_empty()).then_some(prefix)
+    } else {
+        // Literal path: create its parent directory.
+        pattern
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf)
+    }
+}
+
+/// Executable bit + octal mode string for a captured file.
+fn file_perms(metadata: &std::fs::Metadata) -> (bool, String) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let m = metadata.permissions().mode();
+        (m & 0o111 != 0, format!("{:o}", m & 0o7777))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        (false, "0644".into())
+    }
 }
 
 /// Hash of the sorted outputs vector, for early-cutoff and AC metadata.
@@ -676,4 +777,32 @@ where
             .await;
     }
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_parent_to_create;
+    use std::path::{Path, PathBuf};
+
+    fn parent(p: &str) -> Option<PathBuf> {
+        output_parent_to_create(Path::new(p))
+    }
+
+    #[test]
+    fn literal_output_creates_its_parent() {
+        assert_eq!(parent("bin/app"), Some(PathBuf::from("bin")));
+        assert_eq!(parent("a/b/c.txt"), Some(PathBuf::from("a/b")));
+        // Top-level literal has no parent above the workspace root.
+        assert_eq!(parent("app.txt"), None);
+    }
+
+    #[test]
+    fn glob_output_creates_only_the_literal_prefix() {
+        assert_eq!(parent("gen/*.txt"), Some(PathBuf::from("gen")));
+        // The `**` must never become a literal directory.
+        assert_eq!(parent("gen/**/*.go"), Some(PathBuf::from("gen")));
+        assert_eq!(parent("a/b/**/c.txt"), Some(PathBuf::from("a/b")));
+        // A top-level glob has no literal prefix to create.
+        assert_eq!(parent("*.txt"), None);
+    }
 }
