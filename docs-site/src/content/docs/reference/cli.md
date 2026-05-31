@@ -198,13 +198,21 @@ for the full wire format and ack semantics.
 
 ## Porcelain dispatch
 
-Unknown subcommands fall through to `giant-<name>` on PATH. If the
-binary exists, it's exec'd; otherwise you get a helpful error.
+`giant <name>` resolves in order: a built-in subcommand, then a
+`giant-<name>` binary on PATH, then the configurable dispatch routing
+table. The table's default route sends anything else to `giant-task`, so
+a bare task name just works - and everything after the name is passed
+through untouched (no `--` needed).
 
 ```
-giant task deploy        # → exec's giant-task with args [deploy]
-giant tui                # → exec's giant-tui
-giant nope               # error: no such subcommand, no giant-nope on PATH
+giant tui                # → giant-tui binary on PATH
+giant task deploy        # → giant-task with args [deploy]
+giant deploy prod        # → routes to giant-task: run the `deploy` task with arg `prod`
+giant deploy --help      # → giant-task prints the deploy task's signature
 ```
 
-See [Porcelains](/extending/porcelains/) for how to build one.
+The catch-all is configurable per workspace - route namespaces to your
+own porcelains via the `dispatch:` section (see
+[config reference](/reference/config/#dispatch)). Core itself never
+parses tasks; it only routes. See [Porcelains](/extending/porcelains/)
+for how to build one.

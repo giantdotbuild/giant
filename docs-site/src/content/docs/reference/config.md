@@ -155,7 +155,7 @@ Regular build targets. Schema below.
 |---|---|---|---|
 | `id` | yes | string | Unique target ID. Convention: `lang:kind:name`. |
 | `inputs` | no | list | File globs and/or structural inputs. |
-| `outputs` | no | list | Files the command produces, relative to `cwd`. |
+| `outputs` | no | list | Files the command produces, relative to `cwd`. Each entry is a glob; a literal must exist, a glob captures all matches (≥1), named + glob compose. |
 | `deps` | no | list of strings | Additional explicit dependencies. |
 | `command` | yes* | string | Shell command. Required unless `exists` is set. |
 | `cwd` | no | string | Working dir, workspace-relative. Default: workspace root. |

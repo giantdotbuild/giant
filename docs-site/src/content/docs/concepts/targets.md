@@ -93,26 +93,35 @@ with discovery-generated targets.
 
 ## Outputs
 
-Outputs are files, not directories. Declaring a directory as an output
-is an error today - the engine captures single files only and fails the
-build if an output path resolves to a directory. Outputs are relative to
-the target's `cwd`.
+Each `outputs:` entry is a **glob**, expanded after the command runs;
+every matching file is captured. A literal path is the degenerate case -
+it matches itself or nothing, so a named output still has the must-exist
+contract (if the command didn't produce it, the pattern matches nothing
+and the build fails). A pattern that matches zero files is an error.
+Outputs are relative to the target's `cwd`.
 
 ```yaml
 outputs:
-  - "bin/server"
-  - "dist/manifest.json"
+  - "bin/server"           # must exist (a named output)
+  - "internal/store/*.go"  # capture every generated file
 ```
 
-After the command runs, Giant:
+Named and glob entries **compose**: keep naming the files that must
+exist, and add a glob for codegen output whose names you can't enumerate
+(`sqlc generate`, `buf generate`, …). Use a recursive glob like
+`gen/**/*.go` for a whole tree. Globs are loose - Giant captures and
+restores the matched set but never deletes other files. (A directory you
+*own* and want pruned to match exactly is a separate, deferred feature.)
 
-1. Reads each output file.
-2. Computes its SHA-256.
-3. Stores the bytes in the content-addressed store.
-4. Records the path + hash + mode in an action-cache entry.
+After the command runs, Giant, for every matched file:
 
-On a cache hit, Giant reads the AC entry and writes the bytes back
-from CAS - no command runs.
+1. Reads it and computes its SHA-256.
+2. Stores the bytes in the content-addressed store.
+3. Records the path + hash + mode in an action-cache entry.
+
+The sorted set of (path, hash) folds into the `outputs_content_hash` that
+dependents key on - so a change to any generated file rebuilds them. On a
+cache hit, Giant restores the recorded set from CAS; no command runs.
 
 ### Targets with no outputs
 
