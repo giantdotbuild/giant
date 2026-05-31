@@ -16,6 +16,7 @@ use crate::render;
 use crate::schema::TaskSpec;
 use crate::services::{self, RunningService};
 use crate::signals::{self, Shutdown};
+use crate::tty;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
@@ -361,6 +362,17 @@ async fn run_command(
     render::running(&spec_label(spec));
 
     let mut child = cmd.spawn()?;
+
+    // Hand the terminal to the command's own group so it can read the tty
+    // (sudo, ssh, prompts) without SIGTTIN; reclaimed when `_fg` drops,
+    // however the command ends. Only when we put it in its own group.
+    let _fg = if as_group {
+        child
+            .id()
+            .and_then(|pid| tty::Foreground::grab(pid as libc::pid_t))
+    } else {
+        None
+    };
 
     // Race the command against a shutdown signal. `on_shutdown` pends
     // forever when there's no `Shutdown`, so that arm only fires in the

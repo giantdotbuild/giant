@@ -200,11 +200,9 @@ fn draw_browser_footer(frame: &mut Frame, area: Rect, state: &State) {
         hint,
         Style::default().fg(Color::DarkGray),
     )))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Enter build · / search · t tag · T test · A affected · R refresh · c clear · ? help "),
-    );
+    .block(Block::default().borders(Borders::ALL).title(
+        " Enter build · / search · t tag · T test · A affected · R refresh · c clear · ? help ",
+    ));
     frame.render_widget(para, area);
 }
 

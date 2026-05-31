@@ -599,7 +599,7 @@ mod tests {
 
     #[test]
     fn a_clears_when_affected_active() {
-        use giant_core_aliases::{AffectedState as A};
+        use giant_core_aliases::AffectedState as A;
         let mut s = browser();
         s.affected = Some(A {
             base: "main".into(),
@@ -608,7 +608,10 @@ mod tests {
             last_error: None,
             last_refresh: None,
         });
-        assert_eq!(handle(&mut s, key(KeyCode::Char('A'))), Action::ClearAffected);
+        assert_eq!(
+            handle(&mut s, key(KeyCode::Char('A'))),
+            Action::ClearAffected
+        );
     }
 
     #[test]
@@ -696,7 +699,7 @@ mod tests {
 
     #[test]
     fn r_triggers_refresh_when_affected_active() {
-        use giant_core_aliases::{AffectedState as A};
+        use giant_core_aliases::AffectedState as A;
         let mut s = browser();
         s.affected = Some(A {
             base: "main".into(),

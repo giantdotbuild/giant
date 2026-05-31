@@ -235,6 +235,13 @@ Once teardown starts it runs to completion; a second signal won't cut it
 short. A bare command with nothing to clean up keeps the default
 behavior - the signal just kills it.
 
+To make whole-subtree teardown work, a command with services or a
+`finally` runs in its own process group. Interactive commands still work:
+giant-task hands the terminal to that group while the command runs - the
+way a shell does for a foreground job - so a `sudo` or `ssh` password
+prompt reads the terminal normally, then giant-task takes it back. Off a
+real terminal (CI, pipes) this is a no-op.
+
 A worked example with all four hooks:
 
 ```yaml

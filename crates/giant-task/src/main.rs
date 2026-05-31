@@ -17,6 +17,7 @@ mod runner;
 mod schema;
 mod services;
 mod signals;
+mod tty;
 mod watch;
 mod workspace;
 
