@@ -143,3 +143,4 @@ in `crates/giant-task/`.
 - jj's subcommand dispatch
 - [TDD-0004 - Event protocol](../tdd/0004-event-protocol.md)
 - [ADR-0005 - Tasks stripped to bone (superseded)](0005-tasks-stripped-to-bone.md)
+- [ADR-0020 - giant-task workhorse charter](0020-giant-task-workhorse-charter.md) (defines this porcelain's scope)
