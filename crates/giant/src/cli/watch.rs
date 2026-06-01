@@ -383,6 +383,28 @@ fn relative_to(workspace_root: &AbsPath, p: &Path) -> PathBuf {
         .unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// The standard watcher exclude set: `.git`, `.giant`, the cache dir,
+/// and every declared output path - so the engine's own writes don't
+/// loop the watcher. Shared by the session-mode watch / affected /
+/// change-subscription loops.
+pub(crate) fn standard_excludes(
+    workspace_root: &AbsPath,
+    cache_root: &AbsPath,
+    graph: &crate::graph::BuildGraph,
+) -> Vec<PathBuf> {
+    let mut excludes = vec![
+        workspace_root.as_path().join(".git"),
+        workspace_root.as_path().join(".giant"),
+        cache_root.as_path().to_path_buf(),
+    ];
+    for (_, spec) in graph.iter() {
+        for o in &spec.outputs {
+            excludes.push(workspace_root.as_path().join(o.as_path()));
+        }
+    }
+    excludes
+}
+
 // =============================================================================
 // Debouncer
 // =============================================================================

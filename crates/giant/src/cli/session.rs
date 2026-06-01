@@ -738,16 +738,7 @@ async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: Cancellatio
 
     // Watcher excludes: anything we write (cache, declared outputs)
     // plus .git / .giant to keep noise out.
-    let mut excludes: Vec<std::path::PathBuf> = vec![
-        workspace_root.as_path().join(".git"),
-        workspace_root.as_path().join(".giant"),
-        cache_root.as_path().to_path_buf(),
-    ];
-    for (_, spec) in graph.iter() {
-        for o in &spec.outputs {
-            excludes.push(workspace_root.as_path().join(o.as_path()));
-        }
-    }
+    let excludes = super::watch::standard_excludes(&workspace_root, &cache_root, &graph);
     let (_w_handle, mut rx) = match crate::watcher::spawn(workspace_root.as_path(), excludes) {
         Ok(p) => p,
         Err(e) => {
@@ -874,16 +865,7 @@ async fn affected_loop(ctx: AffectedCtx, base: String, cancel: CancellationToken
 
     // Same exclusions as watch_loop - declared outputs, .git, .giant,
     // cache root - so the engine's own writes don't loop the watcher.
-    let mut excludes: Vec<std::path::PathBuf> = vec![
-        workspace_root.as_path().join(".git"),
-        workspace_root.as_path().join(".giant"),
-        cache_root.as_path().to_path_buf(),
-    ];
-    for (_, spec) in graph.iter() {
-        for o in &spec.outputs {
-            excludes.push(workspace_root.as_path().join(o.as_path()));
-        }
-    }
+    let excludes = super::watch::standard_excludes(&workspace_root, &cache_root, &graph);
     let (_w_handle, mut rx) = match crate::watcher::spawn(workspace_root.as_path(), excludes) {
         Ok(p) => p,
         Err(e) => {
@@ -998,16 +980,7 @@ async fn watch_subscribe_loop(
 
     // Same exclusions as `affected_loop` - declared outputs, .git,
     // .giant, cache root - so the engine's own writes don't loop us.
-    let mut excludes: Vec<std::path::PathBuf> = vec![
-        workspace_root.as_path().join(".git"),
-        workspace_root.as_path().join(".giant"),
-        cache_root.as_path().to_path_buf(),
-    ];
-    for (_, spec) in graph.iter() {
-        for o in &spec.outputs {
-            excludes.push(workspace_root.as_path().join(o.as_path()));
-        }
-    }
+    let excludes = super::watch::standard_excludes(&workspace_root, &cache_root, &graph);
     let (_w_handle, mut rx) = match crate::watcher::spawn(workspace_root.as_path(), excludes) {
         Ok(p) => p,
         Err(_) => {
