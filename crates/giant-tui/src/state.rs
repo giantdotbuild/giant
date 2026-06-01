@@ -286,10 +286,8 @@ impl State {
                     },
                 );
             }
-            Event::EngineHello { workspace, .. } => {
-                if !workspace.is_empty() {
-                    self.workspace_root = Some(std::path::PathBuf::from(workspace));
-                }
+            Event::EngineHello { workspace, .. } if !workspace.is_empty() => {
+                self.workspace_root = Some(std::path::PathBuf::from(workspace));
             }
             Event::EngineReady if self.screen == Screen::Loading => {
                 self.screen = Screen::Browser;
