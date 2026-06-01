@@ -1,33 +1,25 @@
-//! `giant watch [patterns]` - initial build, then rebuild on file changes.
+//! `build --watch` / `test --watch` - initial build, then rebuild the
+//! affected subset of the selection when files change (ADR-0023).
 //!
-//! Loop:
-//!   1. Run `prep::prepare` (discovery + graph merge - incremental;
-//!      bootstrap cache-hits when discovery inputs are unchanged).
-//!   2. Resolve `--patterns` against the merged graph.
-//!   3. Run the initial build.
-//!   4. Start the file watcher (excluding `.git/`, `.giant/`, the
-//!      cache dir, and every target's declared `outputs:` so build-
-//!      written files don't trigger self-rebuilds).
-//!   5. Debounce file events (quiet=100ms, max=500ms). On each batch:
-//!      a. Re-run `prep::prepare` so newly-discovered targets show up.
-//!      b. Compute affected via `selection::affected_targets`.
-//!      c. Intersect with the user's pattern selection.
-//!      d. If non-empty, build.
-//!   6. Loop until Ctrl-C.
+//! This module owns the CLI watch loop plus the shared watch *mechanics*
+//! (`standard_excludes`, `Debouncer`, `next_affected_cycle`) that the
+//! engine session's `watch.start` also uses. The graph is prepared once;
+//! each change batch rebuilds only the affected targets in the selection.
+//! Ctrl-C exits.
 //!
-//! Builds are never interrupted by new events. Events arriving during
-//! a build accumulate; after the build completes, they form the next
-//! batch immediately (no wait for the quiet window).
+//! A `giant.yaml` edit mid-watch is not picked up (the graph is fixed for
+//! the watch's lifetime - restart to re-discover); this mirrors the engine
+//! session, which reloads config through its own `config.reload` path.
 
+use crate::cli::build::BuildArgs;
 use crate::cli::prep::{self, Prepared};
 use crate::events::Event;
 use crate::executor::{BuildJob, build};
 use crate::model::TargetId;
 use crate::paths::AbsPath;
-use crate::renderer::{self, ColorChoice, Mode, Renderer};
+use crate::renderer::{self, Mode, Renderer};
 use crate::selection;
 use crate::watcher;
-use clap::Args;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -35,89 +27,32 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Args, Debug)]
-pub struct WatchArgs {
-    /// Target IDs to watch. Empty = watch all non-test targets.
-    #[arg(add = clap_complete::ArgValueCompleter::new(super::dynamic::complete_target_ids))]
-    pub patterns: Vec<String>,
-
-    /// Number of parallel jobs for each rebuild (default: number of CPUs).
-    #[arg(short = 'j', long)]
-    pub jobs: Option<usize>,
-
-    /// Quiet window in ms - flush a batch this long after the last
-    /// event in it. Default 100.
-    #[arg(long, default_value_t = 100)]
-    pub quiet_ms: u64,
-
-    /// Max delay in ms - flush a batch this long after the FIRST event
-    /// in it, even if events keep streaming. Default 500.
-    #[arg(long, default_value_t = 500)]
-    pub max_delay_ms: u64,
-
-    /// Only print failures and the final summary for each cycle.
-    #[arg(short = 'q', long)]
-    pub quiet: bool,
-
-    /// When to colorize output. `auto` honors stdout-is-tty and the
-    /// `NO_COLOR` env var.
-    #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
-    pub color: ColorChoice,
-
-    /// Include only targets carrying this tag. Repeatable.
-    #[arg(long = "tag", value_name = "TAG")]
-    pub tags: Vec<String>,
-
-    /// Exclude targets carrying this tag. Repeatable.
-    #[arg(long = "no-tag", value_name = "TAG")]
-    pub no_tags: Vec<String>,
-
-    /// Watch test targets only - the TDD feedback loop. Equivalent to
-    /// `giant test` but on a continuous watch. Mutually exclusive
-    /// with `--all`.
-    #[arg(long, conflicts_with = "all")]
-    pub test: bool,
-
-    /// Watch every target, test and non-test alike. Without this and
-    /// without `--test`, watch defaults to non-test targets only (same
-    /// rule as `giant build`).
-    #[arg(long)]
-    pub all: bool,
-
-    /// Show `toolchain`-tagged targets in the output. Folded out by
-    /// default; they still build and failures still surface (TDD-0017).
-    #[arg(long)]
-    pub show_toolchains: bool,
-}
-
-pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Result<()> {
+/// Run `build`/`test` in watch mode: build `selection` once, then rebuild
+/// the affected subset on each debounced change until Ctrl-C. Called from
+/// `build::execute_with_mode` when `--watch` is set; `test_mode` carries
+/// the build-vs-test distinction (and `--with-tests`).
+pub(super) async fn run_watch(
+    args: &BuildArgs,
+    global: &super::GlobalFlags,
+    test_mode: selection::TestMode,
+) -> anyhow::Result<()> {
     let parallelism = args.jobs.unwrap_or_else(prep::num_cpus_estimate);
     let cancel = CancellationToken::new();
     let mode = renderer::detect_mode(args.color, /* ndjson */ false);
-    let quiet = args.quiet;
     let render = RenderOpts {
         mode,
-        quiet,
+        quiet: args.quiet,
         show_toolchains: args.show_toolchains,
     };
-    let test_mode = if args.test {
-        selection::TestMode::Only
-    } else if args.all {
-        selection::TestMode::Include
-    } else {
-        selection::TestMode::Exclude
-    };
 
-    // Ctrl-C → cancel.
+    // Ctrl-C → cancel the loop (and any in-flight rebuild).
     {
         let cancel = cancel.clone();
-        ctrlc::set_handler(move || {
-            cancel.cancel();
-        })
-        .ok();
+        ctrlc::set_handler(move || cancel.cancel()).ok();
     }
 
-    // Initial prepare + build.
+    // Prepare + select once; the loop rebuilds affected targets on this
+    // graph until interrupted.
     print_note(mode, "initial build");
     let prepared = run_prepare(global, parallelism, cancel.clone()).await?;
     let workspace_root = prepared.workspace_root.clone();
@@ -128,14 +63,27 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
     };
     let pattern_selection =
         resolve_pattern_selection(&prepared, &args.patterns, test_mode, &select_opts)?;
-    if pattern_selection.is_empty() {
+
+    // `--affected` scopes the watch to the targets changed since the
+    // baseline; the loop then rebuilds among those on live changes.
+    let selection = if args.affected {
+        let changed = super::build::resolve_changed_files(args, workspace_root.as_path())?;
+        let refs: Vec<&Path> = changed.iter().map(|p| p.as_path()).collect();
+        let affected = selection::affected_targets(&prepared.graph, &refs);
+        pattern_selection
+            .into_iter()
+            .filter(|id| affected.contains(id))
+            .collect()
+    } else {
+        pattern_selection
+    };
+    if selection.is_empty() {
         anyhow::bail!("no targets to watch");
     }
 
-    let initial_outputs = collect_output_paths(&prepared, &workspace_root);
     run_build(
         &prepared,
-        &pattern_selection,
+        &selection,
         parallelism,
         global.fresh,
         cancel.clone(),
@@ -143,90 +91,44 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
     )
     .await?;
 
-    // Now spawn the watcher. Excludes cover .git, .giant, the cache dir,
-    // and every declared output path so self-rebuilds don't loop.
-    let cache_root_abs = prep::resolve_cache_dir(&prepared.config.cache.dir)?;
-    let mut excludes: Vec<PathBuf> = vec![
-        workspace_root.as_path().join(".git"),
-        workspace_root.as_path().join(&prepared.config.state.dir),
-        cache_root_abs.clone(),
-    ];
-    excludes.extend(initial_outputs.iter().cloned());
-
+    // Watcher: exclude .git, the state dir, the cache dir, and declared
+    // outputs so the engine's own writes don't loop.
+    let cache_root = AbsPath::new(prep::resolve_cache_dir(&prepared.config.cache.dir)?);
+    let state_dir = PathBuf::from(&prepared.config.state.dir);
+    let excludes = standard_excludes(&workspace_root, &cache_root, &state_dir, &prepared.graph);
     let (_handle, mut rx) = watcher::spawn(workspace_root.as_path(), excludes)?;
 
     print_note(
         mode,
-        &format!(
-            "watching {} target(s) - Ctrl-C to exit",
-            pattern_selection.len()
-        ),
+        &format!("watching {} target(s) - Ctrl-C to exit", selection.len()),
     );
 
-    let quiet_window = Duration::from_millis(args.quiet_ms);
-    let max = Duration::from_millis(args.max_delay_ms);
-    let mut debouncer = Debouncer::new(quiet_window, max);
-
-    loop {
-        if cancel.is_cancelled() {
-            println!();
-            print_note(mode, "cancelled");
-            return Ok(());
-        }
-
-        let batch = match debouncer.next_batch(&mut rx, &cancel).await {
-            Some(batch) => batch,
-            None => return Ok(()), // channel closed
-        };
-        if batch.is_empty() {
-            // Empty batches happen when the debouncer wakes on
-            // cancellation; loop back and the top-of-loop check exits.
-            continue;
-        }
-
-        let paths: Vec<PathBuf> = batch
-            .into_iter()
-            .map(|p| relative_to(&workspace_root, &p))
-            .collect();
-
-        // Re-prepare. Discovery bootstrap is itself cached - cache-hits
-        // when inputs are unchanged, runs again only when discovery's
-        // own inputs (script, deps) changed. New targets discovered in
-        // this cycle show up here.
+    let mut debouncer = Debouncer::new(
+        Duration::from_millis(args.quiet_ms),
+        Duration::from_millis(args.max_delay_ms),
+    );
+    while let Some(to_build) = next_affected_cycle(
+        &prepared.graph,
+        &mut rx,
+        &mut debouncer,
+        &selection,
+        &workspace_root,
+        &cancel,
+    )
+    .await
+    {
         println!();
-        print_note(mode, &format!("{} file(s) changed", paths.len()));
-        let prepared = match run_prepare(global, parallelism, cancel.clone()).await {
-            Ok(p) => p,
-            Err(e) => {
-                print_note(mode, &format!("prepare failed: {e}"));
-                continue;
-            }
-        };
-
-        let pattern_selection =
-            match resolve_pattern_selection(&prepared, &args.patterns, test_mode, &select_opts) {
-                Ok(s) => s,
-                Err(e) => {
-                    print_note(mode, &format!("selection failed: {e}"));
-                    continue;
-                }
-            };
-
-        let changed_refs: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
-        let affected = selection::affected_targets(&prepared.graph, &changed_refs);
-        let selection: Vec<TargetId> = pattern_selection
-            .into_iter()
-            .filter(|id| affected.contains(id))
-            .collect();
-
-        if selection.is_empty() {
+        if to_build.is_empty() {
             print_note(mode, "no targets affected");
             continue;
         }
-
+        print_note(
+            mode,
+            &format!("{} target(s) affected, rebuilding", to_build.len()),
+        );
         if let Err(e) = run_build(
             &prepared,
-            &selection,
+            &to_build,
             parallelism,
             global.fresh,
             cancel.clone(),
@@ -237,6 +139,12 @@ pub async fn execute(args: WatchArgs, global: &super::GlobalFlags) -> anyhow::Re
             print_note(mode, &format!("build failed: {e}"));
         }
     }
+
+    if cancel.is_cancelled() {
+        println!();
+        print_note(mode, "cancelled");
+    }
+    Ok(())
 }
 
 fn print_note(mode: Mode, msg: &str) {
@@ -265,8 +173,7 @@ async fn run_prepare(
 }
 
 /// Resolve user patterns against the current graph using the shared
-/// selection language (TDD-0011). Re-run each watch cycle so newly-
-/// discovered targets are included or excluded as the patterns dictate.
+/// selection language (TDD-0011).
 fn resolve_pattern_selection(
     prepared: &Prepared,
     patterns: &[String],
@@ -274,18 +181,6 @@ fn resolve_pattern_selection(
     opts: &selection::SelectionOpts,
 ) -> anyhow::Result<Vec<TargetId>> {
     selection::resolve_patterns(&prepared.graph, patterns, test_mode, opts).map_err(Into::into)
-}
-
-/// All declared output absolute paths, used as the watcher exclusion
-/// set so the engine doesn't see its own writes.
-fn collect_output_paths(prepared: &Prepared, workspace_root: &AbsPath) -> HashSet<PathBuf> {
-    let mut out = HashSet::new();
-    for (_, spec) in prepared.graph.iter() {
-        for o in &spec.outputs {
-            out.insert(workspace_root.as_path().join(o.as_path()));
-        }
-    }
-    out
 }
 
 /// How a watch rebuild renders. Bundled to keep `run_build` under the
@@ -298,7 +193,8 @@ struct RenderOpts {
 }
 
 /// Run one build, blocking until it finishes (or cancellation). Same
-/// renderer wiring as `giant build` so users see consistent output.
+/// renderer wiring as `giant build` so users see consistent output. A
+/// fresh renderer per cycle gives each rebuild its own clean block.
 async fn run_build(
     prepared: &Prepared,
     selection: &[TargetId],
@@ -314,7 +210,6 @@ async fn run_build(
     } = render;
     let (tx, mut rx) = mpsc::channel::<Event>(1024);
     // Fold `toolchain`-tagged targets out of the human view (TDD-0017).
-    // The graph is already merged here, so we can compute the set up front.
     let hidden: Arc<Mutex<HashSet<TargetId>>> = Arc::new(Mutex::new(if show_toolchains {
         HashSet::new()
     } else {
@@ -369,32 +264,31 @@ async fn run_build(
 
     let _ = renderer_task.await;
 
-    // The renderer already emits the failed-target list in its
-    // summary block; the watch loop just needs a short message to log.
+    // The renderer already emits the failed-target list in its summary
+    // block; the watch loop just needs a short message to log.
     if summary.counts.failed > 0 {
         anyhow::bail!("{} target(s) failed", summary.counts.failed);
     }
     Ok(())
 }
 
-fn relative_to(workspace_root: &AbsPath, p: &Path) -> PathBuf {
-    p.strip_prefix(workspace_root.as_path())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|_| p.to_path_buf())
-}
-
-/// The standard watcher exclude set: `.git`, `.giant`, the cache dir,
-/// and every declared output path - so the engine's own writes don't
-/// loop the watcher. Shared by the session-mode watch / affected /
-/// change-subscription loops.
+/// The standard watcher exclude set: `.git`, the configured state dir,
+/// the cache dir, and every declared output path - so the engine's own
+/// writes don't loop the watcher. Shared by `build --watch` and the
+/// session-mode watch / affected / change-subscription loops.
+///
+/// `state_dir` is the workspace-relative state directory
+/// (`config.state.dir`, default `.giant`); honouring it rather than
+/// hardcoding `.giant` keeps a custom state dir from self-triggering.
 pub(crate) fn standard_excludes(
     workspace_root: &AbsPath,
     cache_root: &AbsPath,
+    state_dir: &Path,
     graph: &crate::graph::BuildGraph,
 ) -> Vec<PathBuf> {
     let mut excludes = vec![
         workspace_root.as_path().join(".git"),
-        workspace_root.as_path().join(".giant"),
+        workspace_root.as_path().join(state_dir),
         cache_root.as_path().to_path_buf(),
     ];
     for (_, spec) in graph.iter() {
@@ -403,6 +297,51 @@ pub(crate) fn standard_excludes(
         }
     }
     excludes
+}
+
+/// Debounce one change batch and reduce it to the affected subset of
+/// `selection` - the shared watch *mechanics* behind `build --watch` and
+/// the session's `watch.start`. Returns the targets to rebuild this
+/// cycle (possibly **empty** when a real change touched nothing in the
+/// selection - the caller decides whether to note that), or `None` when
+/// the watch is over (cancelled or the watcher channel closed).
+pub(crate) async fn next_affected_cycle(
+    graph: &crate::graph::BuildGraph,
+    rx: &mut tokio::sync::mpsc::Receiver<PathBuf>,
+    debouncer: &mut Debouncer,
+    selection: &[TargetId],
+    workspace_root: &AbsPath,
+    cancel: &CancellationToken,
+) -> Option<Vec<TargetId>> {
+    loop {
+        if cancel.is_cancelled() {
+            return None;
+        }
+        let batch = match debouncer.next_batch(rx, cancel).await {
+            // A non-empty batch is a real change set; an empty one is a
+            // cancellation wake - loop and the check above exits.
+            Some(b) if !b.is_empty() => b,
+            Some(_) => continue,
+            None => return None,
+        };
+        let rel: Vec<PathBuf> = batch
+            .iter()
+            .map(|p| {
+                p.strip_prefix(workspace_root.as_path())
+                    .unwrap_or(p)
+                    .to_path_buf()
+            })
+            .collect();
+        let refs: Vec<&Path> = rel.iter().map(|p| p.as_path()).collect();
+        let affected = selection::affected_targets(graph, &refs);
+        return Some(
+            selection
+                .iter()
+                .filter(|id| affected.contains(*id))
+                .cloned()
+                .collect(),
+        );
+    }
 }
 
 // =============================================================================

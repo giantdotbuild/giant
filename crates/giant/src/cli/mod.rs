@@ -81,10 +81,6 @@ pub enum Commands {
     /// Clear the local cache.
     Clean(clean::CleanArgs),
 
-    /// Run an initial build, then continuously rebuild affected
-    /// targets when files change. Ctrl-C to exit.
-    Watch(watch::WatchArgs),
-
     /// Persistent engine over stdio. Loads config once, runs
     /// discovery once, then reads JSON commands on stdin and emits
     /// NDJSON events on stdout. The protocol porcelains (the TUI in
@@ -178,7 +174,6 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Logs(args) => logs::execute(args, &global).await,
         Commands::Graph(args) => graph::execute(args, &global).await,
         Commands::Clean(args) => clean::execute(args, &global).await,
-        Commands::Watch(args) => watch::execute(args, &global).await,
         Commands::Session(args) => session::execute(args, &global).await,
         Commands::Completions(args) => completions::execute(args),
         Commands::External(args) => external::dispatch(args),

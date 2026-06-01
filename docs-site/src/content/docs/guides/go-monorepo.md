@@ -141,7 +141,7 @@ giant build 'go:bin:*'
 giant test --no-tag db
 
 # Watch one binary
-giant watch go:bin:server
+giant build go:bin:server --watch
 
 # What changed since main?
 giant affected --base main

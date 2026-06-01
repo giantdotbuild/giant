@@ -151,6 +151,9 @@ struct SessionState {
     /// Resolved absolute cache directory - the watcher must exclude it
     /// so cache writes don't trigger rebuild storms.
     cache_root: AbsPath,
+    /// Workspace-relative state directory (`config.state.dir`), excluded
+    /// from the watchers alongside the cache.
+    state_dir: std::path::PathBuf,
     log_capture: crate::executor::LogCapture,
     fresh_default: bool,
     event_tx: EventSender,
@@ -209,11 +212,13 @@ impl SessionState {
             .map(AbsPath::new)
             .unwrap_or_else(|_| prepared.workspace_root.clone());
         let log_capture = crate::executor::LogCapture::from_cache_config(&prepared.config.cache);
+        let state_dir = std::path::PathBuf::from(&prepared.config.state.dir);
         Self {
             graph: Arc::new(prepared.graph),
             cache: prepared.cache,
             workspace_root: prepared.workspace_root,
             cache_root,
+            state_dir,
             log_capture,
             fresh_default,
             event_tx,
@@ -385,6 +390,7 @@ impl SessionState {
             graph: self.graph.clone(),
             workspace_root: self.workspace_root.clone(),
             cache_root: self.cache_root.clone(),
+            state_dir: self.state_dir.clone(),
             event_tx: self.event_tx.clone(),
         };
         let cancel_for_task = cancel.clone();
@@ -400,6 +406,7 @@ impl SessionState {
             graph: self.graph.clone(),
             workspace_root: self.workspace_root.clone(),
             cache_root: self.cache_root.clone(),
+            state_dir: self.state_dir.clone(),
             event_tx: self.event_tx.clone(),
         };
         let cancel_for_task = cancel.clone();
@@ -416,6 +423,7 @@ impl SessionState {
             cache: self.cache.clone(),
             workspace_root: self.workspace_root.clone(),
             cache_root: self.cache_root.clone(),
+            state_dir: self.state_dir.clone(),
             log_capture: self.log_capture,
             fresh: self.fresh_default,
             event_tx: self.event_tx.clone(),
@@ -702,6 +710,7 @@ struct WatchCtx {
     cache: LocalCache,
     workspace_root: AbsPath,
     cache_root: AbsPath,
+    state_dir: std::path::PathBuf,
     log_capture: crate::executor::LogCapture,
     fresh: bool,
     event_tx: EventSender,
@@ -718,6 +727,7 @@ async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: Cancellatio
         cache,
         workspace_root,
         cache_root,
+        state_dir,
         log_capture,
         fresh,
         event_tx,
@@ -738,7 +748,8 @@ async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: Cancellatio
 
     // Watcher excludes: anything we write (cache, declared outputs)
     // plus .git / .giant to keep noise out.
-    let excludes = super::watch::standard_excludes(&workspace_root, &cache_root, &graph);
+    let excludes =
+        super::watch::standard_excludes(&workspace_root, &cache_root, &state_dir, &graph);
     let (_w_handle, mut rx) = match crate::watcher::spawn(workspace_root.as_path(), excludes) {
         Ok(p) => p,
         Err(e) => {
@@ -752,42 +763,28 @@ async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: Cancellatio
         }
     };
 
+    // Debounce + affected-filter are the shared watch mechanics
+    // (`next_affected_cycle`); only the per-cycle build differs from the
+    // CLI's `build --watch`.
     let mut debouncer = super::watch::Debouncer::new(
         std::time::Duration::from_millis(100),
         std::time::Duration::from_millis(500),
     );
-
-    loop {
-        if cancel.is_cancelled() {
-            break;
-        }
-        let batch = match debouncer.next_batch(&mut rx, &cancel).await {
-            Some(b) if !b.is_empty() => b,
-            Some(_) => continue, // empty batch from cancellation wake; loop checks above
-            None => break,
-        };
-
-        // Affected = targets whose inputs match any changed path,
-        // intersected with the user's watch selection.
-        let workspace_rel: Vec<std::path::PathBuf> = batch
-            .iter()
-            .map(|p| {
-                p.strip_prefix(workspace_root.as_path())
-                    .map(|s| s.to_path_buf())
-                    .unwrap_or_else(|_| p.clone())
-            })
-            .collect();
-        let rel_refs: Vec<&std::path::Path> = workspace_rel.iter().map(|p| p.as_path()).collect();
-        let affected = crate::selection::affected_targets(&graph, &rel_refs);
-        let to_build: Vec<TargetId> = selection
-            .iter()
-            .filter(|id| affected.contains(*id))
-            .cloned()
-            .collect();
+    while let Some(to_build) = super::watch::next_affected_cycle(
+        &graph,
+        &mut rx,
+        &mut debouncer,
+        &selection,
+        &workspace_root,
+        &cancel,
+    )
+    .await
+    {
+        // A real change that touched nothing in the selection - the
+        // session stays quiet (no build cycle to report).
         if to_build.is_empty() {
             continue;
         }
-
         cycle += 1;
         run_watch_cycle(CycleArgs {
             graph: &graph,
@@ -823,6 +820,7 @@ struct AffectedCtx {
     graph: Arc<BuildGraph>,
     workspace_root: AbsPath,
     cache_root: AbsPath,
+    state_dir: std::path::PathBuf,
     event_tx: EventSender,
 }
 
@@ -839,6 +837,7 @@ async fn affected_loop(ctx: AffectedCtx, base: String, cancel: CancellationToken
         graph,
         workspace_root,
         cache_root,
+        state_dir,
         event_tx,
     } = ctx;
 
@@ -865,7 +864,8 @@ async fn affected_loop(ctx: AffectedCtx, base: String, cancel: CancellationToken
 
     // Same exclusions as watch_loop - declared outputs, .git, .giant,
     // cache root - so the engine's own writes don't loop the watcher.
-    let excludes = super::watch::standard_excludes(&workspace_root, &cache_root, &graph);
+    let excludes =
+        super::watch::standard_excludes(&workspace_root, &cache_root, &state_dir, &graph);
     let (_w_handle, mut rx) = match crate::watcher::spawn(workspace_root.as_path(), excludes) {
         Ok(p) => p,
         Err(e) => {
@@ -952,6 +952,7 @@ struct ChangeCtx {
     graph: Arc<BuildGraph>,
     workspace_root: AbsPath,
     cache_root: AbsPath,
+    state_dir: std::path::PathBuf,
     event_tx: EventSender,
 }
 
@@ -968,6 +969,7 @@ async fn watch_subscribe_loop(
         graph,
         workspace_root,
         cache_root,
+        state_dir,
         event_tx,
     } = ctx;
     let requested: std::collections::HashSet<TargetId> = targets.into_iter().collect();
@@ -980,7 +982,8 @@ async fn watch_subscribe_loop(
 
     // Same exclusions as `affected_loop` - declared outputs, .git,
     // .giant, cache root - so the engine's own writes don't loop us.
-    let excludes = super::watch::standard_excludes(&workspace_root, &cache_root, &graph);
+    let excludes =
+        super::watch::standard_excludes(&workspace_root, &cache_root, &state_dir, &graph);
     let (_w_handle, mut rx) = match crate::watcher::spawn(workspace_root.as_path(), excludes) {
         Ok(p) => p,
         Err(_) => {

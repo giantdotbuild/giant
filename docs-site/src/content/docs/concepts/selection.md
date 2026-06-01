@@ -10,11 +10,11 @@ matcher, used everywhere.
 ## Empty: everything
 
 ```bash
-giant build         # all non-test targets
-giant test          # all test targets
-giant watch         # all non-test targets, continuously
-giant watch --test  # all test targets, continuously (TDD loop)
-giant watch --all   # everything, test + non-test, continuously
+giant build                    # all non-test targets
+giant test                     # all test targets
+giant build --watch            # all non-test targets, continuously
+giant test --watch             # all test targets, continuously (TDD loop)
+giant build --with-tests --watch  # everything, test + non-test, continuously
 ```
 
 ## Exact IDs

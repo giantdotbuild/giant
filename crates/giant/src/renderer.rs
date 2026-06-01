@@ -59,7 +59,7 @@ impl ColorChoice {
     }
 }
 
-/// Pick the right mode for a `giant build` / `giant watch` invocation.
+/// Pick the right mode for a `giant build` / `build --watch` invocation.
 /// `ndjson` short-circuits everything else.
 pub fn detect_mode(color: ColorChoice, ndjson: bool) -> Mode {
     if ndjson {

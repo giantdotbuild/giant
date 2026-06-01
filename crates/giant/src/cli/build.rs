@@ -72,6 +72,28 @@ pub struct BuildArgs {
     /// still build, and failures always surface. (TDD-0017.)
     #[arg(long)]
     pub show_toolchains: bool,
+
+    /// Rebuild the affected subset of the selection when files change,
+    /// until interrupted (Ctrl-C). The watch flags below only apply
+    /// together with `--watch`.
+    #[arg(long)]
+    pub watch: bool,
+
+    /// Include `test: true` targets in the selection. `build` excludes
+    /// them by default; `test` already selects only tests, so this is a
+    /// no-op there. With `--watch` this is the "watch everything" case.
+    #[arg(long)]
+    pub with_tests: bool,
+
+    /// Quiet window in ms: flush a change batch this long after the last
+    /// event in it. Default 100. Only meaningful with `--watch`.
+    #[arg(long, default_value_t = 100)]
+    pub quiet_ms: u64,
+
+    /// Max delay in ms: flush a batch this long after the first event in
+    /// it, even if events keep streaming. Default 500. With `--watch`.
+    #[arg(long, default_value_t = 500)]
+    pub max_delay_ms: u64,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -88,8 +110,21 @@ pub async fn execute(args: BuildArgs, global: &super::GlobalFlags) -> anyhow::Re
 pub(super) async fn execute_with_mode(
     args: BuildArgs,
     global: &super::GlobalFlags,
-    test_mode: selection::TestMode,
+    base_mode: selection::TestMode,
 ) -> anyhow::Result<()> {
+    // `--with-tests` widens the `build` selection to include tests;
+    // `test` is already `Only`, so it stays.
+    let test_mode = match base_mode {
+        selection::TestMode::Exclude if args.with_tests => selection::TestMode::Include,
+        m => m,
+    };
+
+    // Watch mode owns its own prepare + render loop (ADR-0023); hand off
+    // before the single-build setup below.
+    if args.watch {
+        return super::watch::run_watch(&args, global, test_mode).await;
+    }
+
     // Event channel + renderer. Used by both the bootstrap and the main
     // build, so we set it up before calling `prep::prepare`. id_width
     // starts at 0 and gets updated once we have a selection; bootstrap
@@ -310,7 +345,10 @@ fn print_note(mode: renderer::Mode, msg: &str) {
 
 /// Resolve the list of changed files from `--file` (explicit) or `--base`
 /// (git diff). Returns workspace-relative paths.
-fn resolve_changed_files(args: &BuildArgs, workspace_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+pub(super) fn resolve_changed_files(
+    args: &BuildArgs,
+    workspace_root: &Path,
+) -> anyhow::Result<Vec<PathBuf>> {
     if !args.file.is_empty() {
         return Ok(args
             .file

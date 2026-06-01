@@ -133,7 +133,7 @@ always surfaces. To see them:
 giant build --show-toolchains
 ```
 
-The same flag works on `giant test` and `giant watch`.
+The same flag works on `giant test` and on `--watch` (`build --watch` / `test --watch`).
 
 ## System-installed tools
 

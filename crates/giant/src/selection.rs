@@ -4,8 +4,8 @@
 //! 1. **Pattern resolution** ([`resolve_patterns`]) - the user-facing
 //!    selection language from TDD-0011: glob/exclusion patterns, tag
 //!    filters via [`SelectionOpts`], and test/non-test filtering via
-//!    [`TestMode`]. Used by `giant build`, `giant test`, `giant watch`,
-//!    `giant affected`, and (planned) the NDJSON command channel.
+//!    [`TestMode`]. Used by `giant build`, `giant test` (incl. their
+//!    `--watch` loop), `giant affected`, and the NDJSON command channel.
 //! 2. **Affected detection** ([`affected_targets`]) - given a list of
 //!    changed files, which targets need to rebuild?
 

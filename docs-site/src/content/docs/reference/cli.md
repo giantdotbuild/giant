@@ -39,9 +39,19 @@ giant build [PATTERNS...]
 | `--tag <tag>` | - | Include only targets carrying this tag. Repeatable (union). |
 | `--no-tag <tag>` | - | Exclude targets carrying this tag. Repeatable. |
 | `--show-toolchains` | off | Show `toolchain`-tagged targets, folded out by default. |
+| `--with-tests` | off | Include `test: true` targets in the selection. |
+| `--watch` | off | After the initial build, rebuild the affected subset when files change. Ctrl-C to exit. |
+| `--quiet-ms <n>` | 100 | (with `--watch`) Flush a change batch this long after the last event. |
+| `--max-delay-ms <n>` | 500 | (with `--watch`) Flush a batch this long after the first event. |
 
 Exit code: `0` on success, non-zero if any target failed. (No banner
 on failure - the summary block already names what failed.)
+
+`--watch` composes with the selection and every flag above:
+`giant build go:bin:* --watch`, `giant build --with-tests --watch`
+(watch everything). It prepares the graph once and rebuilds only the
+affected subset each cycle; a `giant.yaml` edit mid-watch isn't picked
+up - restart to re-discover.
 
 ## `giant test`
 
@@ -55,27 +65,19 @@ giant test [PATTERNS...]
 Passing a non-test exact id (e.g. `giant test go:bin:server`) errors -
 catches the obvious typo.
 
-## `giant watch`
+## Watching
 
-Run an initial build, then continuously rebuild affected targets when
-files change. Ctrl-C to exit.
+There is no `watch` subcommand. Watch is the `--watch` flag on `build`
+and `test`, so it composes with their selection and flags:
 
 ```
-giant watch [PATTERNS...]
+giant build go:bin:* --watch      # rebuild these on change
+giant test go:* --watch           # the TDD loop
+giant build --with-tests --watch  # watch everything
 ```
 
-| Flag | Default | Description |
-|---|---|---|
-| `-j, --jobs <n>` | num CPUs | Parallel jobs per rebuild. |
-| `--quiet-ms <n>` | 100 | Flush a batch this long after the last event. |
-| `--max-delay-ms <n>` | 500 | Flush a batch this long after the first event. |
-| `-q, --quiet` | off | Print only failures + summary per cycle. |
-| `--color <when>` | `auto` | See `build`. |
-| `--tag <tag>` | - | See `build`. |
-| `--no-tag <tag>` | - | See `build`. |
-| `--test` | off | Watch test targets only (TDD loop). Mutually exclusive with `--all`. |
-| `--all` | off | Watch every target - tests and non-tests. |
-| `--show-toolchains` | off | Show `toolchain`-tagged targets, folded out by default. |
+See [`giant build`](#giant-build) above for the watch flags
+(`--watch`, `--quiet-ms`, `--max-delay-ms`).
 
 ## `giant affected`
 

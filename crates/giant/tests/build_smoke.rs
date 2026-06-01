@@ -2483,12 +2483,12 @@ targets:
     .unwrap();
 
     let mut child = Command::new(giant_bin())
-        .arg("watch")
+        .args(["build", "--watch"])
         .current_dir(ws)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn giant watch");
+        .expect("spawn giant build --watch");
     let pid = child.id() as i32;
 
     // Give it time to complete initial build and start watching.
@@ -2564,12 +2564,12 @@ targets:
     .unwrap();
 
     let mut child = Command::new(giant_bin())
-        .args(["watch", "go:bin:*"])
+        .args(["build", "go:bin:*", "--watch"])
         .current_dir(ws)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn giant watch");
+        .expect("spawn giant build --watch");
     let pid = child.id() as i32;
 
     // Initial build should only touch the bin target.
