@@ -604,6 +604,7 @@ impl SessionState {
             workspace_root: self.workspace_root.clone(),
             cache_root: self.cache_root.clone(),
             state_dir: self.state_dir.clone(),
+            parallelism: self.parallelism,
             log_capture: self.log_capture,
             fresh: self.fresh_default,
             event_tx: self.event_tx.clone(),
@@ -1016,6 +1017,7 @@ struct WatchCtx {
     workspace_root: AbsPath,
     cache_root: AbsPath,
     state_dir: std::path::PathBuf,
+    parallelism: usize,
     log_capture: crate::executor::LogCapture,
     fresh: bool,
     event_tx: EventSender,
@@ -1033,23 +1035,34 @@ async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: Cancellatio
         workspace_root,
         cache_root,
         state_dir,
+        parallelism,
         log_capture,
         fresh,
         event_tx,
     } = ctx;
-    let mut cycle: u64 = 1;
-    run_watch_cycle(CycleArgs {
-        graph: &graph,
-        cache: &cache,
-        workspace_root: &workspace_root,
-        selection: &selection,
-        log_capture,
+    // One build per change cycle. Watch rebuilds pass no remote handles -
+    // rapid local iteration shouldn't push to the shared cache (the
+    // one-shot `start_build` does upload). Everything else mirrors the
+    // session's configured build.
+    let watch_job = |build_id: String, selection: Vec<TargetId>| BuildJob {
+        graph: graph.clone(),
+        selection,
+        cache: cache.clone(),
+        workspace_root: workspace_root.clone(),
+        parallelism,
         fresh,
-        event_tx: event_tx.clone(),
+        force_fresh: None,
+        events: event_tx.clone(),
         cancel: cancel.clone(),
-        build_id: format!("b_w_{cycle:04x}"),
-    })
-    .await;
+        build_id,
+        log_capture,
+        #[cfg(feature = "remote")]
+        remote: None,
+        #[cfg(feature = "remote")]
+        upload_tx: None,
+    };
+    let mut cycle: u64 = 1;
+    let _ = build(watch_job(format!("b_w_{cycle:04x}"), selection.clone())).await;
 
     // Watcher excludes: anything we write (cache, declared outputs)
     // plus .git / .giant to keep noise out.
@@ -1097,31 +1110,8 @@ async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: Cancellatio
             continue;
         }
         cycle += 1;
-        run_watch_cycle(CycleArgs {
-            graph: &graph,
-            cache: &cache,
-            workspace_root: &workspace_root,
-            selection: &to_build,
-            log_capture,
-            fresh,
-            event_tx: event_tx.clone(),
-            cancel: cancel.clone(),
-            build_id: format!("b_w_{cycle:04x}"),
-        })
-        .await;
+        let _ = build(watch_job(format!("b_w_{cycle:04x}"), to_build)).await;
     }
-}
-
-struct CycleArgs<'a> {
-    graph: &'a Arc<BuildGraph>,
-    cache: &'a LocalCache,
-    workspace_root: &'a AbsPath,
-    selection: &'a [TargetId],
-    log_capture: crate::executor::LogCapture,
-    fresh: bool,
-    event_tx: EventSender,
-    cancel: CancellationToken,
-    build_id: String,
 }
 
 /// State shared with the affected subscription task. Mirrors
@@ -1380,27 +1370,6 @@ fn relevant(
         .collect();
     paths.sort();
     Some(paths)
-}
-
-async fn run_watch_cycle(a: CycleArgs<'_>) {
-    let job = BuildJob {
-        graph: a.graph.clone(),
-        selection: a.selection.to_vec(),
-        cache: a.cache.clone(),
-        workspace_root: a.workspace_root.clone(),
-        parallelism: prep::num_cpus_estimate(),
-        fresh: a.fresh,
-        force_fresh: None,
-        events: a.event_tx,
-        cancel: a.cancel,
-        build_id: a.build_id,
-        log_capture: a.log_capture,
-        #[cfg(feature = "remote")]
-        remote: None,
-        #[cfg(feature = "remote")]
-        upload_tx: None,
-    };
-    let _ = build(job).await;
 }
 
 #[cfg(test)]
