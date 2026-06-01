@@ -109,6 +109,12 @@ pub enum Event {
     #[serde(rename = "watch.stopped")]
     WatchStopped,
 
+    /// A debounced batch touched a `watch.subscribe` scope. `paths` are
+    /// the in-scope changed paths (workspace-relative), advisory - the
+    /// client's signal is the event itself. Notify-only: no build runs.
+    #[serde(rename = "watch.changed")]
+    WatchChanged { paths: Vec<String> },
+
     #[serde(rename = "discovery.merged")]
     DiscoveryMerged {
         build: String,

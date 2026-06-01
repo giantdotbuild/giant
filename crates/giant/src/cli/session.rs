@@ -168,6 +168,10 @@ struct SessionState {
     /// watch - clients (the TUI) keep this alive while filtering by
     /// affected, and it auto-recomputes on file changes.
     affected: Option<AffectedSubscription>,
+    /// Active notify-only watch subscription, if any (`watch.subscribe`).
+    /// Independent of everything else - porcelains (giant-task --watch)
+    /// keep it alive to learn when a scoped change happens.
+    changes: Option<ChangeSubscription>,
     next_build_seq: u64,
 }
 
@@ -194,6 +198,11 @@ struct AffectedSubscription {
     handle: tokio::task::JoinHandle<()>,
 }
 
+struct ChangeSubscription {
+    cancel: CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+}
+
 impl SessionState {
     fn new(prepared: prep::Prepared, event_tx: EventSender, fresh_default: bool) -> Self {
         let cache_root = prep::resolve_cache_dir(&prepared.config.cache.dir)
@@ -212,6 +221,7 @@ impl SessionState {
             queued: None,
             watch: None,
             affected: None,
+            changes: None,
             next_build_seq: 0,
         }
     }
@@ -338,6 +348,33 @@ impl SessionState {
                 }
                 self.ack(command_id, None).await;
             }
+            Command::WatchSubscribe {
+                command_id,
+                targets,
+                globs,
+            } => {
+                // A subscribe that names an unknown target is a config
+                // error worth surfacing (vs. silently never firing).
+                if let Some(reason) = self.validate_subscribe(&targets, &globs) {
+                    self.reject(command_id, reason).await;
+                    return false;
+                }
+                // Replace any existing subscription, like affected.
+                if let Some(prev) = self.changes.take() {
+                    prev.cancel.cancel();
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(1), prev.handle).await;
+                }
+                self.start_changes(targets, globs);
+                self.ack(command_id, None).await;
+            }
+            Command::WatchUnsubscribe { command_id } => {
+                if let Some(c) = self.changes.take() {
+                    c.cancel.cancel();
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), c.handle).await;
+                }
+                self.ack(command_id, None).await;
+            }
         }
         false
     }
@@ -355,6 +392,21 @@ impl SessionState {
             affected_loop(ctx, base, cancel_for_task).await;
         });
         self.affected = Some(AffectedSubscription { cancel, handle });
+    }
+
+    fn start_changes(&mut self, targets: Vec<TargetId>, globs: Vec<String>) {
+        let cancel = CancellationToken::new();
+        let ctx = ChangeCtx {
+            graph: self.graph.clone(),
+            workspace_root: self.workspace_root.clone(),
+            cache_root: self.cache_root.clone(),
+            event_tx: self.event_tx.clone(),
+        };
+        let cancel_for_task = cancel.clone();
+        let handle = tokio::spawn(async move {
+            watch_subscribe_loop(ctx, targets, globs, cancel_for_task).await;
+        });
+        self.changes = Some(ChangeSubscription { cancel, handle });
     }
 
     fn start_watch(&mut self, selection: Vec<TargetId>) {
@@ -380,13 +432,30 @@ impl SessionState {
         format!("b_{:04x}", self.next_build_seq)
     }
 
+    /// The first target id not in the graph, as a rejection reason.
+    fn unknown_target(&self, targets: &[TargetId]) -> Option<String> {
+        targets
+            .iter()
+            .find(|id| self.graph.get(id).is_none())
+            .map(|id| format!("unknown target: {id}"))
+    }
+
     fn validate_targets(&self, targets: &[TargetId]) -> Option<String> {
         if targets.is_empty() {
             return Some("build command has empty target list".into());
         }
-        for id in targets {
-            if self.graph.get(id).is_none() {
-                return Some(format!("unknown target: {id}"));
+        self.unknown_target(targets)
+    }
+
+    /// A watch subscription may name zero targets (whole-workspace), but
+    /// any target it does name must exist, and any glob must compile.
+    fn validate_subscribe(&self, targets: &[TargetId], globs: &[String]) -> Option<String> {
+        if let Some(reason) = self.unknown_target(targets) {
+            return Some(reason);
+        }
+        for g in globs {
+            if let Err(e) = glob::Pattern::new(g) {
+                return Some(format!("bad glob {g:?}: {e}"));
             }
         }
         None
@@ -490,6 +559,10 @@ impl SessionState {
         if let Some(w) = self.watch.take() {
             w.cancel.cancel();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(2), w.handle).await;
+        }
+        if let Some(c) = self.changes.take() {
+            c.cancel.cancel();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), c.handle).await;
         }
         if let Some(r) = self.running.take() {
             r.cancel.cancel();
@@ -889,6 +962,139 @@ fn compute_affected(
     Ok(out)
 }
 
+/// State for a notify-only `watch.subscribe`. Like `AffectedCtx` (same
+/// excludes, no executor plumbing), but scoped by targets+globs instead
+/// of a git base, and it emits `watch.changed` rather than computing an
+/// affected set.
+struct ChangeCtx {
+    graph: Arc<BuildGraph>,
+    workspace_root: AbsPath,
+    cache_root: AbsPath,
+    event_tx: EventSender,
+}
+
+/// Long-running task owning one `watch.subscribe`. Watches the workspace
+/// (same exclusions as the affected loop) and emits `watch.changed` on
+/// each debounced batch relevant to `targets ∪ globs`. Never builds.
+async fn watch_subscribe_loop(
+    ctx: ChangeCtx,
+    targets: Vec<TargetId>,
+    globs: Vec<String>,
+    cancel: CancellationToken,
+) {
+    let ChangeCtx {
+        graph,
+        workspace_root,
+        cache_root,
+        event_tx,
+    } = ctx;
+    let requested: std::collections::HashSet<TargetId> = targets.into_iter().collect();
+    // Globs were validated at subscribe; recompile, dropping any that
+    // somehow don't (belt and braces - a bad one just never matches).
+    let matchers: Vec<glob::Pattern> = globs
+        .iter()
+        .filter_map(|g| glob::Pattern::new(g).ok())
+        .collect();
+
+    // Same exclusions as `affected_loop` - declared outputs, .git,
+    // .giant, cache root - so the engine's own writes don't loop us.
+    let mut excludes: Vec<std::path::PathBuf> = vec![
+        workspace_root.as_path().join(".git"),
+        workspace_root.as_path().join(".giant"),
+        cache_root.as_path().to_path_buf(),
+    ];
+    for (_, spec) in graph.iter() {
+        for o in &spec.outputs {
+            excludes.push(workspace_root.as_path().join(o.as_path()));
+        }
+    }
+    let (_w_handle, mut rx) = match crate::watcher::spawn(workspace_root.as_path(), excludes) {
+        Ok(p) => p,
+        Err(_) => {
+            // No watcher → no notifications possible. Hold until
+            // cancelled rather than busy-looping. (Notify-only: there is
+            // nothing to report and no snapshot to fall back on.)
+            cancel.cancelled().await;
+            return;
+        }
+    };
+
+    let mut debouncer = super::watch::Debouncer::new(
+        std::time::Duration::from_millis(200),
+        std::time::Duration::from_millis(800),
+    );
+
+    loop {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let batch = match debouncer.next_batch(&mut rx, &cancel).await {
+            Some(b) if !b.is_empty() => b,
+            Some(_) => continue,
+            None => break,
+        };
+        if let Some(paths) = relevant(&graph, &requested, &matchers, &batch, &workspace_root) {
+            let _ = event_tx.send(Event::WatchChanged { paths }).await;
+        }
+    }
+}
+
+/// Decide whether a debounced `batch` is relevant to a subscription
+/// scope, returning the in-scope paths to report (workspace-relative,
+/// sorted) or `None` to stay silent.
+///
+/// - Empty `requested` and `matchers` = whole-workspace: any non-empty
+///   batch is relevant.
+/// - Otherwise relevant when a changed path feeds one of the requested
+///   targets - via `affected_targets`, so a change to a *transitive*
+///   dependency counts - or matches a glob.
+///
+/// v1 reports the whole batch on a hit (the paths are advisory; the
+/// client's signal is the event). See TDD-0019 for per-path attribution.
+fn relevant(
+    graph: &BuildGraph,
+    requested: &std::collections::HashSet<TargetId>,
+    matchers: &[glob::Pattern],
+    batch: &[std::path::PathBuf],
+    workspace_root: &AbsPath,
+) -> Option<Vec<String>> {
+    if batch.is_empty() {
+        return None;
+    }
+    // The watcher emits absolute paths; target input globs and our glob
+    // matchers are workspace-relative, so strip the root first.
+    let rel: Vec<std::path::PathBuf> = batch
+        .iter()
+        .map(|p| {
+            p.strip_prefix(workspace_root.as_path())
+                .unwrap_or(p)
+                .to_path_buf()
+        })
+        .collect();
+    // Decide relevance before paying for the (sorted, owned) payload.
+    // `target_hit` is a full-graph scan, so let a cheap glob match
+    // short-circuit it.
+    let glob_hit = || {
+        rel.iter()
+            .any(|p| matchers.iter().any(|m| m.matches(&p.to_string_lossy())))
+    };
+    let target_hit = || {
+        let refs: Vec<&std::path::Path> = rel.iter().map(|p| p.as_path()).collect();
+        !requested.is_disjoint(&crate::selection::affected_targets(graph, &refs))
+    };
+    let whole_workspace = requested.is_empty() && matchers.is_empty();
+    if !(whole_workspace || glob_hit() || target_hit()) {
+        return None;
+    }
+
+    let mut paths: Vec<String> = rel
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    paths.sort();
+    Some(paths)
+}
+
 async fn run_watch_cycle(a: CycleArgs<'_>) {
     let job = BuildJob {
         graph: a.graph.clone(),
@@ -908,4 +1114,128 @@ async fn run_watch_cycle(a: CycleArgs<'_>) {
         upload_tx: None,
     };
     let _ = build(job).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Input, TargetSpec};
+    use crate::paths::{OutputPath, WsRelPath};
+    use crate::types::GlobPattern;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    fn spec(id: &str, deps: &[&str], outputs: &[&str], inputs: &[&str]) -> TargetSpec {
+        TargetSpec {
+            id: TargetId::new(id),
+            inputs: inputs
+                .iter()
+                .map(|g| Input::File {
+                    glob: GlobPattern::new(*g).unwrap(),
+                })
+                .collect(),
+            outputs: outputs
+                .iter()
+                .map(|o| OutputPath::new(*o).unwrap())
+                .collect(),
+            deps: deps.iter().map(|d| TargetId::new(*d)).collect(),
+            command: "true".into(),
+            cwd: WsRelPath::default(),
+            env: Default::default(),
+            cache: Some(true),
+            remote_cache: true,
+            exists: None,
+            timeout_secs: None,
+            test: false,
+            tags: Default::default(),
+            label: None,
+            scope: Vec::new(),
+            inferred_deps: Default::default(),
+        }
+    }
+
+    fn graph_with(specs: Vec<TargetSpec>) -> BuildGraph {
+        let mut g = BuildGraph::new();
+        for s in specs {
+            g.add_target(s).unwrap();
+        }
+        g.build_edges_and_validate().unwrap();
+        g
+    }
+
+    fn ws() -> AbsPath {
+        AbsPath::new("/ws")
+    }
+
+    // The watcher emits absolute paths; relevance strips the root.
+    fn abs(p: &str) -> PathBuf {
+        PathBuf::from("/ws").join(p)
+    }
+
+    #[test]
+    fn empty_batch_is_silent() {
+        let g = graph_with(vec![]);
+        assert_eq!(relevant(&g, &HashSet::new(), &[], &[], &ws()), None);
+    }
+
+    #[test]
+    fn empty_scope_watches_whole_workspace() {
+        let g = graph_with(vec![]);
+        let batch = [abs("anything.txt")];
+        assert_eq!(
+            relevant(&g, &HashSet::new(), &[], &batch, &ws()),
+            Some(vec!["anything.txt".to_string()]),
+        );
+    }
+
+    #[test]
+    fn glob_hit_reports_workspace_relative_paths() {
+        let g = graph_with(vec![]);
+        let m = [glob::Pattern::new("tests/e2e/**/*.go").unwrap()];
+        let batch = [abs("tests/e2e/login_test.go")];
+        assert_eq!(
+            relevant(&g, &HashSet::new(), &m, &batch, &ws()),
+            Some(vec!["tests/e2e/login_test.go".to_string()]),
+        );
+    }
+
+    #[test]
+    fn glob_miss_with_no_targets_is_silent() {
+        let g = graph_with(vec![]);
+        let m = [glob::Pattern::new("tests/**/*.go").unwrap()];
+        let batch = [abs("src/main.rs")];
+        assert_eq!(relevant(&g, &HashSet::new(), &m, &batch, &ws()), None);
+    }
+
+    #[test]
+    fn direct_target_hit_is_relevant() {
+        let g = graph_with(vec![spec("go:bin", &[], &["bin/server"], &["cmd/**/*.go"])]);
+        let req: HashSet<TargetId> = [TargetId::new("go:bin")].into();
+        let batch = [abs("cmd/server/main.go")];
+        assert!(relevant(&g, &req, &[], &batch, &ws()).is_some());
+    }
+
+    #[test]
+    fn transitive_dep_change_triggers_requested_target() {
+        // go:bin depends on go:lib; a change to go:lib's source must count
+        // - the whole reason for this feature.
+        let g = graph_with(vec![
+            spec("go:lib", &[], &["lib.a"], &["internal/**/*.go"]),
+            spec("go:bin", &["go:lib"], &["bin/server"], &["cmd/**/*.go"]),
+        ]);
+        let req: HashSet<TargetId> = [TargetId::new("go:bin")].into();
+        let batch = [abs("internal/store/db.go")];
+        assert!(
+            relevant(&g, &req, &[], &batch, &ws()).is_some(),
+            "a change to a transitive dependency must be relevant",
+        );
+    }
+
+    #[test]
+    fn unrelated_change_is_silent() {
+        let g = graph_with(vec![spec("go:bin", &[], &["bin/server"], &["cmd/**/*.go"])]);
+        let req: HashSet<TargetId> = [TargetId::new("go:bin")].into();
+        let batch = [abs("docs/readme.md")];
+        assert_eq!(relevant(&g, &req, &[], &batch, &ws()), None);
+    }
 }

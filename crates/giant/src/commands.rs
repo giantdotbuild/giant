@@ -89,6 +89,30 @@ pub enum Command {
         #[serde(default)]
         command_id: Option<String>,
     },
+
+    /// Notify-only watch. The engine watches the inputs of `targets`
+    /// (graph-expanded, transitively) plus `globs`, and emits
+    /// `watch.changed` on each relevant batch - it never builds. Empty
+    /// `targets` and `globs` watches the whole workspace.
+    ///
+    /// At most one is active per session; a second `watch.subscribe`
+    /// replaces the first. Independent of builds and `watch.start`.
+    #[serde(rename = "watch.subscribe")]
+    WatchSubscribe {
+        #[serde(default)]
+        command_id: Option<String>,
+        #[serde(default)]
+        targets: Vec<TargetId>,
+        #[serde(default)]
+        globs: Vec<String>,
+    },
+
+    /// End the active watch subscription, if any. No-op if none.
+    #[serde(rename = "watch.unsubscribe")]
+    WatchUnsubscribe {
+        #[serde(default)]
+        command_id: Option<String>,
+    },
 }
 
 impl Command {
@@ -102,7 +126,9 @@ impl Command {
             | Command::ConfigReload { command_id, .. }
             | Command::Shutdown { command_id, .. }
             | Command::AffectedSubscribe { command_id, .. }
-            | Command::AffectedUnsubscribe { command_id, .. } => command_id.as_deref(),
+            | Command::AffectedUnsubscribe { command_id, .. }
+            | Command::WatchSubscribe { command_id, .. }
+            | Command::WatchUnsubscribe { command_id, .. } => command_id.as_deref(),
         }
     }
 }
@@ -159,6 +185,36 @@ mod tests {
         let raw = r#"{"c":"shutdown"}"#;
         let cmd: Command = serde_json::from_str(raw).unwrap();
         assert!(matches!(cmd, Command::Shutdown { .. }));
+    }
+
+    #[test]
+    fn watch_subscribe_parses_with_targets_and_globs() {
+        let raw = r#"{"c":"watch.subscribe","command_id":"w1","targets":["go:bin:server"],"globs":["tests/e2e/**/*.go"]}"#;
+        let cmd: Command = serde_json::from_str(raw).unwrap();
+        match cmd {
+            Command::WatchSubscribe {
+                command_id,
+                targets,
+                globs,
+            } => {
+                assert_eq!(command_id.as_deref(), Some("w1"));
+                assert_eq!(targets, vec![TargetId::new("go:bin:server")]);
+                assert_eq!(globs, vec!["tests/e2e/**/*.go".to_string()]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn watch_subscribe_defaults_to_whole_workspace() {
+        // No targets, no globs → empty vecs (the whole-workspace case).
+        let cmd: Command = serde_json::from_str(r#"{"c":"watch.subscribe"}"#).unwrap();
+        match cmd {
+            Command::WatchSubscribe { targets, globs, .. } => {
+                assert!(targets.is_empty() && globs.is_empty());
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
