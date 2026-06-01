@@ -1,7 +1,6 @@
 //! `giant build` subcommand.
 
 use crate::events::Event;
-use crate::executor::{BuildJob, build};
 use crate::git;
 use crate::model::TargetId;
 use crate::renderer::{self, ColorChoice, Renderer};
@@ -138,6 +137,10 @@ pub(super) async fn execute_with_mode(
     // merged the graph (below) - it can't be known at construction.
     let hidden: Arc<Mutex<HashSet<TargetId>>> = Arc::new(Mutex::new(HashSet::new()));
     let hidden_for_render = hidden.clone();
+    // The renderer also captures the main build's `build.finished`
+    // counts so the caller can set the exit code - in the unified path
+    // (TDD-0021) the build runs inside the engine and we no longer get
+    // its return value, only the event stream.
     let renderer_task = tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         let mut out = tokio::io::stdout();
@@ -145,6 +148,7 @@ pub(super) async fn execute_with_mode(
         // once `BuildStarted` arrives with the full target list.
         let mut r = Renderer::new(mode, 0, quiet);
         r.set_hidden(hidden_for_render);
+        let mut final_counts: Option<crate::events::TargetCounts> = None;
         // Heartbeat: every second we ask the renderer if any
         // currently-running targets have been quiet long enough to
         // warrant a "still running" line. The renderer itself decides
@@ -156,6 +160,13 @@ pub(super) async fn execute_with_mode(
                 ev = rx.recv() => {
                     match ev {
                         Some(ev) => {
+                            // Capture the real build's counts (not the
+                            // discovery bootstrap's).
+                            if let Event::BuildFinished { id, counts, .. } = &ev
+                                && !id.starts_with("bootstrap_")
+                            {
+                                final_counts = Some(counts.clone());
+                            }
                             if let Some(line) = r.render(&ev) {
                                 let _ = out.write_all(line.as_bytes()).await;
                                 let _ = out.flush().await;
@@ -172,6 +183,7 @@ pub(super) async fn execute_with_mode(
                 }
             }
         }
+        final_counts
     });
 
     let cancel = CancellationToken::new();
@@ -247,63 +259,37 @@ pub(super) async fn execute_with_mode(
         return Ok(());
     }
 
-    let build_id = format!("b_{}", prep::short_random());
-
-    let (remote, upload_tx, upload_handle) = prep::open_remote(&prepared.config)?;
-
-    // Keep a handle to the cache so we can run post-build eviction
-    // after BuildJob consumes its copy.
+    // Keep cache handles for post-build eviction; `prepared` is consumed
+    // by the engine adapter below.
     let cache_for_evict = prepared.cache.clone();
     let cache_cfg = prepared.config.cache.clone();
-    let log_capture = crate::executor::LogCapture::from_cache_config(&cache_cfg);
 
-    let job = BuildJob {
-        graph: Arc::new(prepared.graph),
-        selection,
-        cache: prepared.cache,
-        workspace_root: prepared.workspace_root,
+    // Dispatch the build through the engine - the same `Command::Build`
+    // path the stdio session uses (TDD-0021). Events flow to our renderer
+    // via `tx`; the renderer captures the build's pass/fail counts.
+    drop(cancel);
+    super::session::run_one_build(
+        prepared,
+        tx,
+        global.config.clone(),
         parallelism,
-        fresh: global.fresh,
-        force_fresh: None,
-        events: tx,
-        cancel,
-        build_id,
-        log_capture,
-        #[cfg(feature = "remote")]
-        remote,
-        #[cfg(feature = "remote")]
-        upload_tx: upload_tx.clone(),
-    };
-    #[cfg(not(feature = "remote"))]
-    let _ = (remote, upload_tx);
-    let summary = build(job).await?;
+        selection,
+        global.fresh,
+    )
+    .await?;
 
-    // Drop the upload sender so the background task drains, then wait
-    // for it (bounded by reqwest's internal timeouts). Local + remote
-    // caches now reflect the build state.
-    #[cfg(feature = "remote")]
-    {
-        drop(upload_tx);
-        if let Some(h) = upload_handle {
-            let _ = h.await;
-        }
-    }
-    #[cfg(not(feature = "remote"))]
-    let _ = upload_handle;
-
-    let _ = renderer_task.await;
+    let counts = renderer_task.await.ok().flatten().unwrap_or_default();
 
     // Post-build cache eviction (TDD-0012). Silent: runs only if the
     // local cache is over its size limit. Synchronous because the CLI
-    // exits after this call; we don't have a long-lived runtime to
-    // hand the work to.
-    if summary.counts.failed == 0 {
+    // exits after this call.
+    if counts.failed == 0 {
         let _ = maybe_evict(&cache_for_evict, &cache_cfg).await;
     }
 
-    // The renderer already prints the failed-target list in the
-    // summary block; just request a non-zero exit, no extra banner.
-    if summary.counts.failed > 0 {
+    // The renderer already printed the failed-target list; just request a
+    // non-zero exit, no extra banner.
+    if counts.failed > 0 {
         return Err(super::SilentExit.into());
     }
     Ok(())

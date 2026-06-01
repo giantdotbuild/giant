@@ -172,6 +172,55 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
     Ok(())
 }
 
+/// Run one build through the engine and wait for it to finish - the
+/// in-process adapter behind `giant build` / `test` (TDD-0021). The same
+/// `Command::Build` → `start_build` path the stdio session uses; events
+/// flow to `event_tx` so the caller can render them, and the remote-cache
+/// uploader is opened and drained here. Pass/fail is read off the event
+/// stream by the caller (the renderer captures `build.finished`).
+pub(super) async fn run_one_build(
+    prepared: prep::Prepared,
+    event_tx: EventSender,
+    config_path: Option<std::path::PathBuf>,
+    parallelism: usize,
+    selection: Vec<TargetId>,
+    fresh: bool,
+) -> anyhow::Result<()> {
+    #[cfg(feature = "remote")]
+    let (remote, upload_tx, upload_handle) = prep::open_remote(&prepared.config)?;
+
+    let state = SessionState::new(prepared, event_tx, fresh, config_path, parallelism);
+    #[cfg(feature = "remote")]
+    let mut state = state.with_remote(remote, upload_tx.clone());
+    #[cfg(not(feature = "remote"))]
+    let mut state = state;
+
+    let (build_done_tx, mut build_done_rx) = mpsc::channel::<()>(8);
+    state
+        .handle_command(
+            Command::Build {
+                command_id: None,
+                targets: selection,
+                fresh,
+            },
+            &build_done_tx,
+        )
+        .await;
+    // Exactly one build; wait for it, then tear down.
+    let _ = build_done_rx.recv().await;
+    state.shutdown().await;
+    drop(state);
+
+    #[cfg(feature = "remote")]
+    {
+        drop(upload_tx);
+        if let Some(h) = upload_handle {
+            let _ = h.await;
+        }
+    }
+    Ok(())
+}
+
 /// Carries the engine state across commands. One per session.
 struct SessionState {
     graph: Arc<BuildGraph>,
@@ -209,6 +258,13 @@ struct SessionState {
     /// `prep::prepare` exactly as session startup did.
     config_path: Option<std::path::PathBuf>,
     parallelism: usize,
+    /// Remote-cache handles for the build path. The stdio session leaves
+    /// these `None` today; the in-process CLI adapter sets them so
+    /// `giant build` keeps using the remote cache (TDD-0021).
+    #[cfg(feature = "remote")]
+    remote: Option<crate::remote::RemoteCache>,
+    #[cfg(feature = "remote")]
+    upload_tx: Option<tokio::sync::mpsc::Sender<crate::remote::UploadJob>>,
 }
 
 struct RunningBuild {
@@ -277,7 +333,24 @@ impl SessionState {
             next_build_seq: 0,
             config_path,
             parallelism,
+            #[cfg(feature = "remote")]
+            remote: None,
+            #[cfg(feature = "remote")]
+            upload_tx: None,
         }
+    }
+
+    /// Attach remote-cache handles to the build path (the in-process CLI
+    /// adapter; the stdio session leaves them unset).
+    #[cfg(feature = "remote")]
+    fn with_remote(
+        mut self,
+        remote: Option<crate::remote::RemoteCache>,
+        upload_tx: Option<tokio::sync::mpsc::Sender<crate::remote::UploadJob>>,
+    ) -> Self {
+        self.remote = remote;
+        self.upload_tx = upload_tx;
+        self
     }
 
     async fn handle_command(&mut self, cmd: Command, build_done_tx: &mpsc::Sender<()>) -> bool {
@@ -630,7 +703,7 @@ impl SessionState {
             selection: targets,
             cache: self.cache.clone(),
             workspace_root: self.workspace_root.clone(),
-            parallelism: prep::num_cpus_estimate(),
+            parallelism: self.parallelism,
             fresh,
             force_fresh: None,
             events: self.event_tx.clone(),
@@ -638,9 +711,9 @@ impl SessionState {
             build_id: build_id.clone(),
             log_capture: self.log_capture,
             #[cfg(feature = "remote")]
-            remote: None,
+            remote: self.remote.clone(),
             #[cfg(feature = "remote")]
-            upload_tx: None,
+            upload_tx: self.upload_tx.clone(),
         };
         let event_tx = self.event_tx.clone();
         let id_for_task = build_id.clone();
