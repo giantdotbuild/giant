@@ -1,141 +1,191 @@
-//! `giant-task --watch` - re-run a task on file changes.
+//! `giant-task --watch` - re-run a task when relevant files change.
 //!
-//! Watches the task's declared `inputs:` patterns when present, falling
-//! back to the workspace root (with `.git/`, `.giant/`, and the cache
-//! dir excluded so we don't loop on our own writes). Uses the same
-//! `notify`-backed watcher as core, debounced via a quiet-window +
-//! max-delay pair. Ctrl-C exits the loop.
+//! The porcelain does no file watching itself. It spawns a `giant
+//! session` (the headless engine, ADR-0003) and subscribes to a
+//! notify-only watch scoped to the task's `deps:` (as target ids, which
+//! the engine expands through the graph - so a change to a *transitive*
+//! dependency counts) and `inputs:` (as extra globs). On each
+//! `watch.changed` the task re-runs. See ADR-0022 / TDD-0019.
 //!
-//! Each cycle runs the task once. If a build is in flight when a new
-//! batch lands, the current cycle is allowed to finish; the new events
-//! become the next cycle's batch.
+//! The engine owns the watcher, the debouncer, and the graph; the
+//! porcelain only declares what to watch and reacts. Ctrl-C (or stdin
+//! EOF) ends the loop and drains the session.
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::ffi::OsString;
+use std::path::Path;
+use std::process::Stdio;
 
-use giant::watcher;
-use tokio::sync::mpsc;
+use giant::commands::Command as EngineCommand;
+use giant::events::Event;
+use giant::model::TargetId;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{ChildStdin, Command};
 
 use crate::config::TaskConfig;
+use crate::deps::GIANT_BIN_ENV;
 use crate::runner;
+use crate::schema::TaskSpec;
 
-#[allow(clippy::too_many_arguments)]
 pub async fn loop_forever(
-    cfg: &TaskConfig,
+    mut cfg: TaskConfig,
+    cfg_path: &Path,
+    workspace_root: &Path,
     name: &str,
     positionals: &[String],
-    args: &[String],
-    workspace_root: &Path,
+    arg_kvs: &[String],
     verbose: bool,
-    quiet_window: Duration,
-    max_delay: Duration,
 ) -> anyhow::Result<u8> {
-    let task = cfg
+    let mut task = cfg
         .tasks
         .get(name)
         .ok_or_else(|| anyhow::anyhow!("unknown task: {name}"))?
         .clone();
 
-    let excludes: Vec<PathBuf> = vec![
-        workspace_root.join(".git"),
-        workspace_root.join(".giant"),
-        workspace_root.join("output"), // most workspaces write build outputs here
-    ];
-
+    // Run once up front, like the old watcher did.
     println!("· initial run");
-    let _ = runner::run(cfg, name, positionals, args, workspace_root, verbose).await;
+    let _ = runner::run(&cfg, name, positionals, arg_kvs, workspace_root, verbose).await;
 
-    let (_handle, mut rx) = watcher::spawn(workspace_root, excludes.clone())
-        .map_err(|e| anyhow::anyhow!("file watcher failed to start: {e}"))?;
+    // Spawn the engine session: it loads config + discovery once, then
+    // streams events. We hold its stdin to send the subscribe command.
+    let bin = std::env::var_os(GIANT_BIN_ENV).unwrap_or_else(|| OsString::from("giant"));
+    let mut child = Command::new(&bin)
+        .args(["session", "--events", "ndjson"])
+        .current_dir(workspace_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "could not start `giant session` ({e}). Watch mode needs the \
+                 engine - ensure `giant` is on PATH or set {GIANT_BIN_ENV}."
+            )
+        })?;
 
-    let input_matchers = compile_matchers(&task.inputs);
-    println!(
-        "· watching {} - Ctrl-C to exit",
-        if task.inputs.is_empty() {
-            workspace_root.display().to_string()
-        } else {
-            format!("{} input pattern(s)", task.inputs.len())
-        }
-    );
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let mut events = BufReader::new(stdout).lines();
 
-    let mut debouncer = Debouncer::new(quiet_window, max_delay);
+    println!("· watching via engine - Ctrl-C to exit");
+
+    // Note: while a re-run (`runner::run`) is in flight we aren't reading
+    // the session's stdout. `watch.changed` events are tiny and debounced,
+    // so the pipe won't fill in practice - but a large `catalog.ready`
+    // re-emit during a long re-run could. If that ever bites, pump events
+    // through a background reader task instead of reading inline.
     loop {
-        let batch = match debouncer.next_batch(&mut rx).await {
-            Some(b) if !b.is_empty() => b,
-            Some(_) => continue,
-            None => break,
-        };
-
-        // Filter to paths matching the task's input patterns (if any).
-        // If no patterns, every batch counts.
-        let relevant: Vec<PathBuf> = if input_matchers.is_empty() {
-            batch.into_iter().collect()
-        } else {
-            batch
-                .into_iter()
-                .filter(|p| {
-                    let rel = p.strip_prefix(workspace_root).unwrap_or(p);
-                    let rel_str = rel.to_string_lossy();
-                    input_matchers.iter().any(|pat| pat.matches(&rel_str))
-                })
-                .collect()
-        };
-        if relevant.is_empty() {
-            continue;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            line = events.next_line() => {
+                let Some(line) = line? else { break }; // session closed stdout
+                let Some(event) = parse_event(&line) else { continue };
+                match event {
+                    Event::EngineReady => {
+                        subscribe(&mut stdin, &task).await?;
+                    }
+                    Event::WatchChanged { paths } => {
+                        announce(&paths);
+                        let _ = runner::run(&cfg, name, positionals, arg_kvs, workspace_root, verbose).await;
+                    }
+                    Event::CatalogReady => {
+                        // Config / discovery changed. Reload our task config so
+                        // future runs use it. But `catalog.ready` also fires on
+                        // discovery-output churn unrelated to this task - only
+                        // re-subscribe + re-run when the *watch scope* (deps or
+                        // inputs) actually moved, so we don't rerun on noise.
+                        match reload(cfg_path, name) {
+                            Ok((fresh_cfg, fresh_task)) => {
+                                let scope_moved = fresh_task.deps != task.deps
+                                    || fresh_task.inputs != task.inputs;
+                                cfg = fresh_cfg;
+                                task = fresh_task;
+                                if scope_moved {
+                                    subscribe(&mut stdin, &task).await?;
+                                    println!("· deps/inputs changed, re-running");
+                                    let _ = runner::run(&cfg, name, positionals, arg_kvs, workspace_root, verbose).await;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("· config reload failed: {e}");
+                                break;
+                            }
+                        }
+                    }
+                    Event::EngineShutdown { error, .. } => {
+                        if let Some(e) = error {
+                            eprintln!("· engine stopped: {e}");
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
         }
-
-        println!();
-        println!("· {} file(s) changed, re-running", relevant.len());
-        let _ = runner::run(cfg, name, positionals, args, workspace_root, verbose).await;
     }
 
+    // Closing stdin tells the session to drain and exit. We must keep
+    // reading its stdout while it does: once we stop, its event writer
+    // blocks on a full pipe, never sees the stdin-EOF, and never exits -
+    // a deadlock on `child.wait()`. Drain to EOF, then reap. Bounded so a
+    // wedged session can't hang us; SIGKILL as a backstop.
+    drop(stdin);
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while matches!(events.next_line().await, Ok(Some(_))) {}
+        child.wait().await
+    })
+    .await;
+    if drained.is_err() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
     Ok(0)
 }
 
-fn compile_matchers(patterns: &[String]) -> Vec<glob::Pattern> {
-    patterns
-        .iter()
-        .filter_map(|p| glob::Pattern::new(p).ok())
-        .collect()
+/// Reload the task config, returning the fresh config and the named
+/// task. Errors if the task vanished from the reloaded config.
+fn reload(cfg_path: &Path, name: &str) -> anyhow::Result<(TaskConfig, TaskSpec)> {
+    let cfg = TaskConfig::load(cfg_path)?;
+    let task = cfg
+        .tasks
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("task '{name}' no longer exists after reload"))?
+        .clone();
+    Ok((cfg, task))
 }
 
-/// Coalesce a burst of file events into one batch. Same shape as core
-/// uses for `giant watch`: flush after `quiet` ms of silence, OR after
-/// `max` ms from the first event, whichever comes first.
-struct Debouncer {
-    quiet: Duration,
-    max: Duration,
+/// Send `watch.subscribe { targets: deps, globs: inputs }`. The engine
+/// expands the targets through the graph; the globs cover files no
+/// target owns (e2e sources, fixtures).
+async fn subscribe(stdin: &mut ChildStdin, task: &TaskSpec) -> anyhow::Result<()> {
+    let cmd = EngineCommand::WatchSubscribe {
+        command_id: None,
+        targets: task.deps.iter().map(TargetId::new).collect(),
+        globs: task.inputs.clone(),
+    };
+    let mut line = serde_json::to_vec(&cmd)?;
+    line.push(b'\n');
+    stdin.write_all(&line).await?;
+    stdin.flush().await?;
+    Ok(())
 }
 
-impl Debouncer {
-    fn new(quiet: Duration, max: Duration) -> Self {
-        Self { quiet, max }
+/// Parse one NDJSON event line, tolerating blanks and the odd non-event
+/// line rather than bricking the loop.
+fn parse_event(line: &str) -> Option<Event> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
     }
+    serde_json::from_str(line).ok()
+}
 
-    async fn next_batch(&mut self, rx: &mut mpsc::Receiver<PathBuf>) -> Option<HashSet<PathBuf>> {
-        let first = rx.recv().await?;
-        let started = Instant::now();
-        let mut batch: HashSet<PathBuf> = HashSet::new();
-        batch.insert(first);
-
-        loop {
-            let quiet_left = self.quiet;
-            let max_left = self.max.saturating_sub(started.elapsed());
-            let timeout = quiet_left.min(max_left);
-            if timeout.is_zero() {
-                break;
-            }
-            tokio::select! {
-                evt = rx.recv() => {
-                    match evt {
-                        Some(p) => { batch.insert(p); }
-                        None => return Some(batch),
-                    }
-                }
-                _ = tokio::time::sleep(timeout) => break,
-            }
+fn announce(paths: &[String]) {
+    println!();
+    match paths {
+        [] => println!("· change detected, re-running"),
+        [one] => println!("· {one} changed, re-running"),
+        [first, rest @ ..] => {
+            println!("· {} changed (+{}), re-running", first, rest.len());
         }
-        Some(batch)
     }
 }

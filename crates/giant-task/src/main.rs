@@ -202,15 +202,17 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
         .to_path_buf();
 
     if cli.watch {
+        // Watching now happens in the engine session, which owns the
+        // debouncer; `--quiet-ms` / `--max-delay-ms` are no longer wired
+        // through (see TDD-0019). They stay accepted for compatibility.
         watch::loop_forever(
-            &cfg,
+            cfg,
+            &cfg_path,
+            &workspace_root,
             &name,
             &parsed.positionals,
             &parsed.arg_kvs,
-            &workspace_root,
             cli.verbose,
-            std::time::Duration::from_millis(cli.quiet_ms),
-            std::time::Duration::from_millis(cli.max_delay_ms),
         )
         .await
     } else {

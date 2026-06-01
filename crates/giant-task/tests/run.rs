@@ -855,3 +855,95 @@ tasks:
     // Conventional 128 + SIGTERM(15).
     assert_eq!(status.code(), Some(143), "expected 128 + SIGTERM exit code");
 }
+
+/// The whole point of ADR-0022/TDD-0019: `--watch` reruns the task when a
+/// *dependency's* source changes, not just the task's own `inputs:`. The
+/// engine session expands `deps:` through the graph; the porcelain only
+/// subscribes and reacts. End-to-end through a real `giant session`.
+#[test]
+fn watch_reruns_task_when_a_dep_source_changes() {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    fn line_count(p: &std::path::Path) -> usize {
+        std::fs::read_to_string(p)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.txt"), "v0").unwrap();
+    // One giant.yaml: `targets:` for the engine, `tasks:` for the
+    // porcelain. The task depends on target `lib`; `lib`'s input is
+    // src/*.txt - which is NOT one of the task's own inputs.
+    write_config(
+        root,
+        r#"
+workspace: { name: w }
+targets:
+  - id: "lib"
+    inputs: ["src/**/*.txt"]
+    outputs: ["out/lib.txt"]
+    command: "mkdir -p out && cp src/lib.txt out/lib.txt"
+tasks:
+  app:
+    deps: ["lib"]
+    command: "printf 'ran\n' >> runs.log"
+"#,
+    );
+
+    let runs = root.join("runs.log");
+    let mut child = Command::new(giant_task_bin())
+        // giant-task's own flags precede the task name.
+        .args(["--watch", "app"])
+        .current_dir(root)
+        // giant-task shells out to this binary for both `giant build`
+        // (deps) and `giant session` (the watch channel).
+        .env("GIANT_TASK_BUILD_BIN", giant_bin())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    // Wait for the initial run.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while line_count(&runs) < 1 {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("initial run never happened");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Edit the DEP's source repeatedly until a rerun lands. Repeating is
+    // robust against the subscription not being live for the first edit
+    // (the session takes a moment to reach engine.ready).
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let mut v = 1;
+    let reran = loop {
+        let mut f = std::fs::File::create(root.join("src/lib.txt")).unwrap();
+        write!(f, "v{v}").unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+        v += 1;
+        std::thread::sleep(Duration::from_millis(700));
+        if line_count(&runs) >= 2 {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+    };
+
+    // Stop the watcher (SIGINT → clean break → drains the session).
+    unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+    let _ = child.wait();
+
+    assert!(
+        reran,
+        "editing a dependency's source must re-run the watched task"
+    );
+}

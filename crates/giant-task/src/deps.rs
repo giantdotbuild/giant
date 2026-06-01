@@ -22,7 +22,10 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-const GIANT_BIN_ENV: &str = "GIANT_TASK_BUILD_BIN";
+/// Env var overriding which `giant` binary the porcelain shells out to
+/// (for `giant build` here, and `giant session` in watch mode). Defaults
+/// to `giant` on PATH.
+pub(crate) const GIANT_BIN_ENV: &str = "GIANT_TASK_BUILD_BIN";
 
 #[derive(Debug, thiserror::Error)]
 pub enum DepsError {
