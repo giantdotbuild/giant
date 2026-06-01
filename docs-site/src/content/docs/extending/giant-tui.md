@@ -227,9 +227,12 @@ A short list, deliberately:
 - **No multi-pane layout customization.** The browser → result
   split is fixed.
 - **No reading config independently.** The catalog comes from
-  `target.described` events emitted by the session at startup,
-  not from the TUI re-parsing `giant.yaml`. If you change
-  config, restart the TUI.
+  `target.described` events emitted by the session, not from the
+  TUI re-parsing `giant.yaml`. You don't need to restart on a config
+  edit, though: the session watches `giant.yaml` / `giant.json`,
+  re-runs discovery, and re-emits the catalog
+  (`catalog.invalidating` → `catalog.ready`); the TUI rebuilds its
+  browser from the new stream.
 
 If you want any of these, the session protocol is open - write
 your own porcelain. See [Porcelains](/extending/porcelains/).

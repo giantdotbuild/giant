@@ -43,6 +43,23 @@ The `t` field discriminates. All other fields are type-specific.
 }
 ```
 
+After `engine.hello`, a persistent session streams its catalog - one
+`target.described` per target in the merged graph - then `engine.ready`
+to signal it will accept commands.
+
+```jsonc
+{ "t": "target.described",
+  "id": "go:bin:server",
+  "command": "go build -o bin/server ./cmd/server",
+  "tags": ["go"],          // omitted when empty
+  "test": false,           // omitted when false
+  "inputs": ["cmd/server/**/*.go"],
+  "outputs": ["bin/server"],
+  "deps": ["proto:gen"] }
+
+{ "t": "engine.ready" }
+```
+
 ### Config
 
 ```jsonc
@@ -56,6 +73,23 @@ The `t` field discriminates. All other fields are type-specific.
   "column": 5,
   "message": "unknown field `inptus`" }
 ```
+
+### Catalog (live reload)
+
+A running session watches `giant.yaml` / `giant.json`. On an edit (or an
+explicit `config.reload` command) it re-runs discovery and re-emits the
+catalog without a restart. The swap is bracketed by these two events;
+between them the client drops its old catalog and rebuilds it from the
+fresh `target.described` stream.
+
+```jsonc
+{ "t": "catalog.invalidating" }
+{ "t": "catalog.ready" }
+```
+
+Between the two, the engine re-streams `target.described` for the new
+graph. On a reload that fails to parse, the engine keeps the old
+catalog and emits `command.error` instead of `catalog.ready`.
 
 ### Build lifecycle
 
@@ -116,6 +150,23 @@ The `t` field discriminates. All other fields are type-specific.
 { "t": "watch.state", "state": "building" }    // idle | building | building_with_pending | reloading_config | config_error
 { "t": "watch.stopped" }
 ```
+
+`watch.affected` fires once per change cycle; an empty `target_ids`
+means a real change touched nothing in the selection (no build runs).
+
+### Watch subscription (notify-only)
+
+In response to `watch.subscribe`, the engine pins a file watcher and
+notifies the client whenever any input of the subscribed targets - or
+their transitive deps - changes. No build runs; the client decides what
+to do. This is what backs dep-aware task watching in `giant-task`.
+
+```jsonc
+{ "t": "watch.changed",
+  "paths": ["proto/user.proto"] }   // advisory; the signal is the event itself
+```
+
+`watch.unsubscribe` ends it.
 
 ### Discovery
 
@@ -208,13 +259,32 @@ Command shapes (full list in `crates/giant/src/commands.rs`):
 { "c": "affected.unsubscribe",
   "command_id": "c_6" }
 
+{ "c": "watch.subscribe",
+  "command_id": "c_7",
+  "targets": ["proto:gen"],   // watch these + their transitive deps
+  "globs": ["proto/**/*.proto"] }   // plus any matching path
+
+{ "c": "watch.unsubscribe",
+  "command_id": "c_8" }
+
+{ "c": "config.reload",
+  "command_id": "c_9" }
+
 { "c": "shutdown",
-  "command_id": "c_7" }
+  "command_id": "c_10" }
 ```
+
+`watch.subscribe` is notify-only - the engine replies with
+`watch.changed` events, never builds. `config.reload` forces a
+re-discovery + catalog re-emit (the same thing a `giant.yaml` edit
+triggers automatically).
 
 Each command is acknowledged with a `command.accepted` (carrying the
 allocated `build_id` if applicable) or `command.rejected` (with a
-reason - e.g. `"watch is active - send watch.stop first"`).
+reason - e.g. `"watch is active - send watch.stop first"`). A command
+that is accepted but then fails mid-flight (e.g. discovery can't run on
+a reload) emits `command.error { command_id, message }` - distinct from
+`build.finished { ok: false }`, which is a targeted build failure.
 Subsequent events for the work the command kicked off (`build.*`,
 `target.*`) come back on the normal event stream.
 

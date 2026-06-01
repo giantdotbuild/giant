@@ -100,35 +100,49 @@ tasks:
       KEY: "value"
     cwd: "..."                  # workspace-relative; default = root
     timeout_secs: 300           # kill after N seconds; default = no timeout
-    inputs: ["..."]             # optional; file globs that, with --watch,
-                                # narrow which file changes trigger a re-run
+    inputs: ["..."]             # optional; extra watch globs for files no
+                                # target owns (consulted by --watch)
 ```
 
 ## Watch mode
 
 `giant task <name> --watch` runs the task once, then re-runs it
-whenever workspace files change. Ctrl-C exits.
+whenever a relevant input changes. Ctrl-C exits.
+
+This is dep-aware, and giant-task does no file watching itself. It
+opens a `giant session` and subscribes to the task's dependencies with
+`watch.subscribe { targets: deps, globs: inputs }`. The engine watches
+the inputs of those `deps:` targets - and their transitive deps - plus
+any path matching the task's `inputs:` globs, and notifies giant-task
+(a `watch.changed` event) when one changes. So editing a file that a
+dependency target consumes retriggers the task, even though the task
+never named that file.
 
 ```console
 $ giant task test:unit --watch
 · initial run
 …
-· watching tests/**/*.go - Ctrl-C to exit
-· 3 file(s) changed, re-running
+· watching via engine - Ctrl-C to exit
+· change detected, re-running
 …
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--watch` | off | Re-run on file changes. |
-| `--quiet-ms <n>` | 100 | Coalesce events within this idle window. |
-| `--max-delay-ms <n>` | 500 | Force-flush a batch this long after the first event. |
+| `--watch` | off | Re-run on changes, watched by the engine. |
 
-If the task declares `inputs:`, only changes matching one of those
-globs trigger a re-run. Without `inputs:`, every file change in the
-workspace (minus `.git/`, the state directory, and common build
-output dirs) re-runs the task - useful as a smoke loop but noisy in
-large workspaces, so declare `inputs:` where you can.
+What gets watched:
+
+- **`deps:`** - the engine expands these through the graph and watches
+  every input they (transitively) depend on.
+- **`inputs:`** - extra globs for files no target owns (e2e sources,
+  fixtures).
+- **Neither declared** - falls back to the whole workspace (minus
+  `.git/`, the state dir, and the cache dir). Handy as a smoke loop but
+  noisy; declare `deps:` / `inputs:` where you can.
+
+Because the watching lives in core, a task and a `giant build --watch`
+see the same change signal - one file-watching implementation, not two.
 
 Task names follow the same rules as workspace names (alphanumeric,
 hyphen, underscore; no leading digit). Names that would shadow a

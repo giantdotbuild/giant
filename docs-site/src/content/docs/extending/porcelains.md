@@ -77,7 +77,8 @@ Use lowercase, hyphen-separated names. `giant-task`, `giant-tui`,
 filesystems.
 
 Reserved built-in names (don't shadow these): `build`, `test`,
-`watch`, `affected`, `graph`, `clean`, `explain`, `logs`, `session`.
+`affected`, `explain`, `graph`, `clean`, `watch`, `session`,
+`completions`.
 
 ## First-party porcelains
 

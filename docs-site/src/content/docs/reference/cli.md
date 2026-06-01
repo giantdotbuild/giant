@@ -194,9 +194,15 @@ giant session --events ndjson <commands.jsonl >events.jsonl
 | `--events <fmt>` | `ndjson` | Only `ndjson` today; flag shape matches `giant build`. |
 
 Commands accepted on stdin: `build`, `cancel`, `watch.start`,
-`watch.stop`, `affected.subscribe`, `affected.unsubscribe`,
+`watch.stop`, `watch.subscribe`, `watch.unsubscribe`,
+`affected.subscribe`, `affected.unsubscribe`, `config.reload`,
 `shutdown`. See [Event protocol - Command channel](/reference/events/#command-channel)
 for the full wire format and ack semantics.
+
+The session also reloads on its own when `giant.yaml` / `giant.json`
+changes - it re-runs discovery and re-emits the catalog
+(`catalog.invalidating` → `catalog.ready`), so a `giant tui` reflects
+config edits without a restart. `config.reload` forces the same thing.
 
 ## Porcelain dispatch
 

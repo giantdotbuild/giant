@@ -78,22 +78,22 @@ giant build --affected --base main      # only what changed since main
 ```
 
 `*` stops at `:`; `**` crosses. `!pattern` excludes. Exact-id typos error;
-glob misses go silent. The same language is used by `giant test`, `giant watch`,
-and `giant affected`.
+glob misses go silent. The same language is used by `giant test`,
+`giant build --watch`, and `giant affected`.
 
 ## Common commands
 
 ```bash
 giant build             # build all non-test targets
 giant test              # run all test targets
-giant watch             # initial build, then rebuild on file changes
+giant build --watch     # initial build, then rebuild on file changes
 giant affected --base main    # list what would rebuild, no work done
 giant graph             # show the dependency graph
 giant explain go:bin:server   # explain a target's cache key
 giant clean             # clear the local cache
 ```
 
-`--quiet`/`-q` on `build`, `test`, `watch` reduces output to failures plus
+`--quiet`/`-q` on `build` and `test` reduces output to failures plus
 the summary. `--events ndjson` switches the output to a machine-readable
 event stream consumed by porcelains.
 
@@ -254,10 +254,11 @@ contents.
 
 ## Status
 
-Working: build, test, watch, affected, graph, explain, clean, porcelain dispatch,
-local + remote cache, discovery, structural inputs with git fast-path, NDJSON event
-stream, LRU cache eviction. `giant session` runs a persistent engine, and the
-command channel lets porcelains send commands back over the protocol. `giant-task`
+Working: build, test, `--watch`, affected, graph, explain, clean, porcelain
+dispatch, local + remote cache, discovery, structural inputs with git fast-path,
+NDJSON event stream, LRU cache eviction. `giant session` runs a persistent engine
+that live-reloads on `giant.yaml` edits, and the command channel lets porcelains
+send commands back over the protocol. `giant-task`
 ships in `crates/giant-task/` and handles tasks, services with readiness probes,
 needs/finally, args, shell completions across six shells. `giant-tui` ships in
 `crates/giant-tui/` - a full TUI with a tag/status-toggle surface for filtering

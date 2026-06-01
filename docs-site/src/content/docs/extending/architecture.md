@@ -14,9 +14,10 @@ src/
 ├── lib.rs               # crate root; re-exports the high-traffic types
 ├── cli/                 # subcommand handlers
 │   ├── mod.rs
-│   ├── build.rs
+│   ├── build.rs         # build/test → Command::Build on an in-process session
 │   ├── test.rs
-│   ├── watch.rs
+│   ├── session.rs       # the engine core: SessionState + the Command/Event loop
+│   ├── watch.rs         # shared watch mechanics (excludes, debouncer) - not a subcommand
 │   ├── affected.rs
 │   ├── graph.rs
 │   ├── explain.rs
@@ -52,6 +53,12 @@ giant build go:bin:server
   │
   ▼
 [ selection ] resolve_patterns(go:bin:server) → [go:bin:server]
+  │
+  ▼
+[ cli/session.rs ] SessionState::handle_command(Command::Build{...})
+  the same in-process engine giant session / giant tui drive; the CLI
+  is just another protocol client. Events stream back to the tty
+  renderer, which reads pass/fail off build.finished.
   │
   ▼
 [ executor ] build(BuildJob)
@@ -164,18 +171,26 @@ crash. Source in `fsmonitor.rs`; details in
 
 ## Watch loop
 
+`--watch` is a flag on `build`/`test`, not a subcommand. It dispatches
+`Command::WatchStart` to the same in-process `SessionState`; there is
+one build-watch loop and it lives in the engine (`cli/session.rs`),
+driven identically whether the client is the CLI or a TUI.
+
 ```
-spawn notify watcher → mpsc channel of changed paths
-loop:
-  debouncer.next_batch()       # quiet=100ms, max=500ms
-  re-run prep::prepare         # bootstrap may emit new targets
-  resolve_patterns()           # user's selection
-  affected_targets()           # intersect with file changes
-  if non-empty: build()
+session: watch_loop(selection)
+  build once
+  spawn notify watcher → mpsc channel of changed paths
+  loop:
+    debouncer.next_batch()       # quiet=100ms, max=500ms
+    affected_targets()           # intersect changed paths with selection
+    emit watch.affected{ids}     # empty = change touched nothing selected
+    if non-empty: build()
 ```
 
 The debouncer is a `tokio::select!` between a sleep, the channel, and
-a cancel token. Source in `cli/watch.rs`.
+a cancel token. The shared pieces - the exclude set, the debouncer,
+and the per-cycle affected step - live in `cli/watch.rs`; the loop that
+uses them is in `cli/session.rs`.
 
 ## NDJSON event protocol
 
@@ -184,9 +199,12 @@ The renderer task pulls from the matching `Receiver` and either prints
 human-readable lines or serializes the raw event to NDJSON depending
 on mode.
 
-The same machinery backs `giant session` - events fan out to the
-attached stdin/stdout client with the same shape, no serialization
-differences.
+The same machinery backs every entry point. `giant session` fans the
+events out to its stdin/stdout client; `giant build` / `giant test`
+run the identical `Command::Build` through an in-process session and
+feed the stream to the tty renderer. The renderer and the NDJSON
+writer are two consumers of one engine dispatch - the CLI has no
+private build path.
 
 ## Tokio task layout
 
