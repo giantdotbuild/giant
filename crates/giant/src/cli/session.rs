@@ -9,10 +9,11 @@
 //!   5. On EOF or `{"c":"shutdown"}`: cancel in-flight work, drain
 //!      events, exit.
 //!
-//! For the first cut we support `build`, `cancel`, and `shutdown`.
-//! `watch.start`/`watch.stop` and `config.reload` arrive in follow-up
-//! changesets; the protocol accepts them (Command enum has the
-//! variants) but the engine rejects them with `command.rejected`.
+//! Commands: `build`, `cancel`, `watch.start`/`watch.stop`,
+//! `affected.subscribe`/`unsubscribe`, `watch.subscribe`/`unsubscribe`,
+//! `config.reload`, and `shutdown`. An always-on watcher also triggers a
+//! reload on a `giant.yaml` / `giant.json` change, so the catalog stays
+//! live without a restart (TDD-0014).
 
 use crate::cache::LocalCache;
 use crate::cli::prep;
@@ -70,9 +71,10 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
         .await;
 
     let prep_cancel = CancellationToken::new();
+    let parallelism = prep::num_cpus_estimate();
     let prepared = match prep::prepare(
         global.config.as_deref(),
-        prep::num_cpus_estimate(),
+        parallelism,
         global.fresh,
         // Send bootstrap events into the same writer so the TUI sees
         // discovery progress as it happens.
@@ -100,11 +102,32 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
     emit_catalog(&event_tx, &prepared.graph).await;
     let _ = event_tx.send(Event::EngineReady).await;
 
-    let mut state = SessionState::new(prepared, event_tx.clone(), global.fresh);
+    let mut state = SessionState::new(
+        prepared,
+        event_tx.clone(),
+        global.fresh,
+        global.config.clone(),
+        parallelism,
+    );
 
     // Drive stdin → command channel.
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(64);
     tokio::spawn(read_commands(cmd_tx));
+
+    // Always-on config watcher: a `giant.yaml` / `giant.json` edit
+    // triggers a reload (re-discover + re-emit catalog). The handle must
+    // outlive the loop; dropping it stops the OS watch.
+    let (reload_tx, mut reload_rx) = mpsc::channel::<()>(8);
+    let _config_watch = spawn_config_watcher(
+        state.workspace_root.clone(),
+        super::watch::standard_excludes(
+            &state.workspace_root,
+            &state.cache_root,
+            &state.state_dir,
+            &state.graph,
+        ),
+        reload_tx,
+    );
 
     // Main dispatch loop. A finishing build can trigger the next
     // queued build, so we also watch for build-completion events
@@ -127,11 +150,17 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
             Some(()) = build_done_rx.recv() => {
                 state.on_build_finished(&build_done_tx).await;
             }
+            Some(()) = reload_rx.recv() => {
+                state.reload().await;
+            }
         }
     }
 
-    // Drain: cancel anything still running, wait briefly.
+    // Drain: cancel anything still running, wait briefly. Then drop the
+    // state so its `event_tx` clone is released - otherwise the writer
+    // task never sees the channel close and we'd hang here.
     state.shutdown().await;
+    drop(state);
     let _ = event_tx
         .send(Event::EngineShutdown {
             reason: ShutdownReason::Graceful,
@@ -176,6 +205,10 @@ struct SessionState {
     /// keep it alive to learn when a scoped change happens.
     changes: Option<ChangeSubscription>,
     next_build_seq: u64,
+    /// Config path + parallelism, kept so `config.reload` can re-run
+    /// `prep::prepare` exactly as session startup did.
+    config_path: Option<std::path::PathBuf>,
+    parallelism: usize,
 }
 
 struct RunningBuild {
@@ -194,20 +227,34 @@ struct QueuedBuild {
 struct WatchSession {
     cancel: CancellationToken,
     handle: tokio::task::JoinHandle<()>,
+    /// The client's selection, kept so a config reload can restart the
+    /// watch against the rebuilt graph.
+    selection: Vec<TargetId>,
 }
 
 struct AffectedSubscription {
     cancel: CancellationToken,
     handle: tokio::task::JoinHandle<()>,
+    /// Git baseline, kept so a reload can restart the subscription.
+    base: String,
 }
 
 struct ChangeSubscription {
     cancel: CancellationToken,
     handle: tokio::task::JoinHandle<()>,
+    /// Scope (targets + globs), kept so a reload can restart it.
+    targets: Vec<TargetId>,
+    globs: Vec<String>,
 }
 
 impl SessionState {
-    fn new(prepared: prep::Prepared, event_tx: EventSender, fresh_default: bool) -> Self {
+    fn new(
+        prepared: prep::Prepared,
+        event_tx: EventSender,
+        fresh_default: bool,
+        config_path: Option<std::path::PathBuf>,
+        parallelism: usize,
+    ) -> Self {
         let cache_root = prep::resolve_cache_dir(&prepared.config.cache.dir)
             .map(AbsPath::new)
             .unwrap_or_else(|_| prepared.workspace_root.clone());
@@ -228,6 +275,8 @@ impl SessionState {
             affected: None,
             changes: None,
             next_build_seq: 0,
+            config_path,
+            parallelism,
         }
     }
 
@@ -328,11 +377,8 @@ impl SessionState {
                 self.ack(command_id, None).await;
             }
             Command::ConfigReload { command_id } => {
-                self.reject(
-                    command_id,
-                    "config.reload arrives in a follow-up changeset".into(),
-                )
-                .await;
+                self.reload().await;
+                self.ack(command_id, None).await;
             }
             Command::AffectedSubscribe { command_id, base } => {
                 // Replace any existing subscription. A re-subscribe
@@ -394,10 +440,15 @@ impl SessionState {
             event_tx: self.event_tx.clone(),
         };
         let cancel_for_task = cancel.clone();
+        let base_for_loop = base.clone();
         let handle = tokio::spawn(async move {
-            affected_loop(ctx, base, cancel_for_task).await;
+            affected_loop(ctx, base_for_loop, cancel_for_task).await;
         });
-        self.affected = Some(AffectedSubscription { cancel, handle });
+        self.affected = Some(AffectedSubscription {
+            cancel,
+            handle,
+            base,
+        });
     }
 
     fn start_changes(&mut self, targets: Vec<TargetId>, globs: Vec<String>) {
@@ -410,10 +461,16 @@ impl SessionState {
             event_tx: self.event_tx.clone(),
         };
         let cancel_for_task = cancel.clone();
+        let (targets_for_loop, globs_for_loop) = (targets.clone(), globs.clone());
         let handle = tokio::spawn(async move {
-            watch_subscribe_loop(ctx, targets, globs, cancel_for_task).await;
+            watch_subscribe_loop(ctx, targets_for_loop, globs_for_loop, cancel_for_task).await;
         });
-        self.changes = Some(ChangeSubscription { cancel, handle });
+        self.changes = Some(ChangeSubscription {
+            cancel,
+            handle,
+            targets,
+            globs,
+        });
     }
 
     fn start_watch(&mut self, selection: Vec<TargetId>) {
@@ -429,10 +486,101 @@ impl SessionState {
             event_tx: self.event_tx.clone(),
         };
         let cancel_for_task = cancel.clone();
+        let selection_for_loop = selection.clone();
         let handle = tokio::spawn(async move {
-            watch_loop(ctx, selection, cancel_for_task).await;
+            watch_loop(ctx, selection_for_loop, cancel_for_task).await;
         });
-        self.watch = Some(WatchSession { cancel, handle });
+        self.watch = Some(WatchSession {
+            cancel,
+            handle,
+            selection,
+        });
+    }
+
+    /// Re-load config, re-run discovery, rebuild the graph, re-emit the
+    /// catalog, and restart any active subscriptions against the new
+    /// graph. Triggered by `config.reload` or a `giant.yaml` /
+    /// discovery-output change. A build in flight keeps its own graph
+    /// `Arc`, so reloading is safe to do alongside it (deviating from
+    /// TDD-0014's "queue until the build finishes" - simpler, and the
+    /// running build is unaffected).
+    async fn reload(&mut self) {
+        let _ = self.event_tx.send(Event::CatalogInvalidating).await;
+
+        // Snapshot active subscriptions' params, then tear them down -
+        // their loops hold the old graph and must be restarted.
+        let watch_sel = self.watch.take().map(|w| {
+            w.cancel.cancel();
+            w.handle.abort();
+            w.selection
+        });
+        let affected_base = self.affected.take().map(|a| {
+            a.cancel.cancel();
+            a.handle.abort();
+            a.base
+        });
+        let changes_scope = self.changes.take().map(|c| {
+            c.cancel.cancel();
+            c.handle.abort();
+            (c.targets, c.globs)
+        });
+
+        match prep::prepare(
+            self.config_path.as_deref(),
+            self.parallelism,
+            self.fresh_default,
+            self.event_tx.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        {
+            Ok(p) => {
+                self.cache_root = prep::resolve_cache_dir(&p.config.cache.dir)
+                    .map(AbsPath::new)
+                    .unwrap_or_else(|_| p.workspace_root.clone());
+                self.state_dir = std::path::PathBuf::from(&p.config.state.dir);
+                self.log_capture = crate::executor::LogCapture::from_cache_config(&p.config.cache);
+                self.workspace_root = p.workspace_root;
+                self.cache = p.cache;
+                self.graph = Arc::new(p.graph);
+            }
+            Err(e) => {
+                // Keep the previous graph; tell the client and still emit
+                // a `catalog.ready` so it isn't stuck on `invalidating`.
+                let _ = self
+                    .event_tx
+                    .send(Event::CommandError {
+                        command_id: "config.reload".into(),
+                        message: format!("reload failed, keeping previous config: {e:#}"),
+                    })
+                    .await;
+            }
+        }
+
+        emit_catalog(&self.event_tx, &self.graph).await;
+        let _ = self.event_tx.send(Event::CatalogReady).await;
+
+        // Restart subscriptions against the (possibly new) graph, dropping
+        // named targets that no longer exist.
+        if let Some(sel) = watch_sel {
+            let alive: Vec<TargetId> = sel
+                .into_iter()
+                .filter(|id| self.graph.get(id).is_some())
+                .collect();
+            if !alive.is_empty() {
+                self.start_watch(alive);
+            }
+        }
+        if let Some(base) = affected_base {
+            self.start_affected(base);
+        }
+        if let Some((targets, globs)) = changes_scope {
+            let alive: Vec<TargetId> = targets
+                .into_iter()
+                .filter(|id| self.graph.get(id).is_some())
+                .collect();
+            self.start_changes(alive, globs);
+        }
     }
 
     fn next_build_id(&mut self) -> String {
@@ -606,6 +754,40 @@ impl SessionState {
                 .await;
         }
     }
+}
+
+/// Spawn the always-on config watcher. Watches the workspace and, on a
+/// debounced `giant.yaml` / `giant.json` change, sends a reload signal.
+/// Returns the watcher handle (keep it alive); `None` if it couldn't
+/// start - reload then works only via the explicit `config.reload`
+/// command.
+fn spawn_config_watcher(
+    workspace_root: AbsPath,
+    excludes: Vec<std::path::PathBuf>,
+    reload_tx: mpsc::Sender<()>,
+) -> Option<crate::watcher::WatcherHandle> {
+    let (handle, mut rx) = crate::watcher::spawn(workspace_root.as_path(), excludes).ok()?;
+    tokio::spawn(async move {
+        // Never-cancelled: the task ends when `rx` closes (handle dropped
+        // at session shutdown).
+        let cancel = CancellationToken::new();
+        let mut deb = super::watch::Debouncer::new(
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(800),
+        );
+        while let Some(batch) = deb.next_batch(&mut rx, &cancel).await {
+            let config_changed = batch.iter().any(|p| {
+                matches!(
+                    p.file_name().and_then(|n| n.to_str()),
+                    Some("giant.yaml" | "giant.json")
+                )
+            });
+            if config_changed && reload_tx.send(()).await.is_err() {
+                break; // session gone
+            }
+        }
+    });
+    Some(handle)
 }
 
 async fn emit_catalog(tx: &EventSender, graph: &BuildGraph) {
