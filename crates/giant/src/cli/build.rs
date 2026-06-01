@@ -118,12 +118,6 @@ pub(super) async fn execute_with_mode(
         m => m,
     };
 
-    // Watch mode owns its own prepare + render loop (ADR-0023); hand off
-    // before the single-build setup below.
-    if args.watch {
-        return super::watch::run_watch(&args, global, test_mode).await;
-    }
-
     // Event channel + renderer. Used by both the bootstrap and the main
     // build, so we set it up before calling `prep::prepare`. id_width
     // starts at 0 and gets updated once we have a selection; bootstrap
@@ -256,6 +250,29 @@ pub(super) async fn execute_with_mode(
         drop(tx);
         let _ = renderer_task.await;
         print_note(mode, "no targets to build");
+        return Ok(());
+    }
+
+    // Watch: rebuild the affected subset on change, through the engine's
+    // `watch.start` - the same loop the stdio session runs (TDD-0021).
+    // Runs until Ctrl-C. The renderer turns `watch.affected` events into
+    // the per-cycle notes.
+    if args.watch {
+        print_note(
+            mode,
+            &format!("watching {} target(s) - Ctrl-C to exit", selection.len()),
+        );
+        super::session::run_watch_command(
+            prepared,
+            tx,
+            global.config.clone(),
+            parallelism,
+            selection,
+            global.fresh,
+        )
+        .await?;
+        let _ = renderer_task.await;
+        print_note(mode, "cancelled");
         return Ok(());
     }
 

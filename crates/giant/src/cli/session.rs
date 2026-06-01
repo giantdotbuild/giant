@@ -186,14 +186,17 @@ pub(super) async fn run_one_build(
     selection: Vec<TargetId>,
     fresh: bool,
 ) -> anyhow::Result<()> {
-    #[cfg(feature = "remote")]
+    // No-op without the `remote` feature (returns all-None).
     let (remote, upload_tx, upload_handle) = prep::open_remote(&prepared.config)?;
 
     let state = SessionState::new(prepared, event_tx, fresh, config_path, parallelism);
     #[cfg(feature = "remote")]
     let mut state = state.with_remote(remote, upload_tx.clone());
     #[cfg(not(feature = "remote"))]
-    let mut state = state;
+    let mut state = {
+        let _ = (remote, &upload_tx);
+        state
+    };
 
     let (build_done_tx, mut build_done_rx) = mpsc::channel::<()>(8);
     state
@@ -218,6 +221,53 @@ pub(super) async fn run_one_build(
             let _ = h.await;
         }
     }
+    #[cfg(not(feature = "remote"))]
+    let _ = (upload_tx, upload_handle);
+    Ok(())
+}
+
+/// Run a watch session through the engine - `build --watch` /
+/// `test --watch` (TDD-0021). Dispatches `watch.start`, lets the caller
+/// render the event stream off `event_tx`, and runs until Ctrl-C, then
+/// stops the watch and drains. Watch rebuilds deliberately do **not**
+/// upload to the remote cache - rapid local iteration shouldn't pollute
+/// the shared cache; the one-shot `giant build` still uploads.
+pub(super) async fn run_watch_command(
+    prepared: prep::Prepared,
+    event_tx: EventSender,
+    config_path: Option<std::path::PathBuf>,
+    parallelism: usize,
+    selection: Vec<TargetId>,
+    fresh: bool,
+) -> anyhow::Result<()> {
+    let mut state = SessionState::new(prepared, event_tx, fresh, config_path, parallelism);
+
+    // Ctrl-C → cancel the watch.
+    let cancel = CancellationToken::new();
+    {
+        let cancel = cancel.clone();
+        ctrlc::set_handler(move || cancel.cancel()).ok();
+    }
+
+    // `watch.start` spawns the loop; it doesn't use the build-done signal.
+    let (build_done_tx, _build_done_rx) = mpsc::channel::<()>(8);
+    state
+        .handle_command(
+            Command::WatchStart {
+                command_id: None,
+                targets: selection,
+            },
+            &build_done_tx,
+        )
+        .await;
+
+    cancel.cancelled().await;
+
+    state
+        .handle_command(Command::WatchStop { command_id: None }, &build_done_tx)
+        .await;
+    state.shutdown().await;
+    drop(state);
     Ok(())
 }
 
@@ -1035,8 +1085,14 @@ async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: Cancellatio
     )
     .await
     {
-        // A real change that touched nothing in the selection - the
-        // session stays quiet (no build cycle to report).
+        // Announce what this change cycle affects (empty = a real change
+        // touched nothing in the selection) so consumers - the CLI tty
+        // renderer, a TUI - can show it. Empty cycles run no build.
+        let _ = event_tx
+            .send(Event::WatchAffected {
+                target_ids: to_build.clone(),
+            })
+            .await;
         if to_build.is_empty() {
             continue;
         }

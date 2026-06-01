@@ -247,9 +247,22 @@ impl Renderer {
         match ev {
             Event::BuildStarted { target_ids, .. } => {
                 // Lock in the column width now that we know what's
-                // actually going to run.
+                // actually going to run. Reset per-cycle failure state so
+                // a watch stream's later summaries don't accumulate the
+                // failures of earlier cycles.
                 self.id_width = id_width(target_ids);
+                self.failed.clear();
                 None
+            }
+            // Watch loop: announce the affected subset before its build.
+            // Empty means a real change hit nothing in the selection.
+            Event::WatchAffected { target_ids } => {
+                let msg = if target_ids.is_empty() {
+                    "no targets affected".to_string()
+                } else {
+                    format!("{} target(s) affected, rebuilding", target_ids.len())
+                };
+                Some(format!("\n{}", note(&self.theme, &msg)))
             }
             Event::TargetStarted { id, .. } => {
                 // Hidden targets (toolchains) aren't tracked, so heartbeat
