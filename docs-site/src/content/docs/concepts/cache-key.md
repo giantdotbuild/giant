@@ -23,9 +23,7 @@ reproducibility):
    `GIANT_VERSION`.
 5. **File inputs** - for every file matched by an input glob, its
    workspace-relative path and content hash. Sorted by path.
-6. **Structural inputs** - fingerprint hash for each structural input
-   (see [Structural inputs](/concepts/structural-inputs/)).
-7. **Dep outputs** - for each dependency target, its
+6. **Dep outputs** - for each dependency target, its
    `outputs_content_hash` (the hash-of-hashes of its outputs), NOT its
    cache key. Sorted by dep ID. This is the early-cutoff property (see
    below).
@@ -85,10 +83,6 @@ file_inputs (12):
   cmd/server/main.go        sha256:9f3c8d...
   internal/auth/auth.go     sha256:7e2a4b...
   ...
-
-structural_inputs (1):
-  internal/**/*.go (lines: ["package ", "import "])
-    fingerprint: sha256:5c8a3f...
 
 dep_outputs (2):
   proto:gen          sha256:a1b2c3...

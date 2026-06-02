@@ -102,4 +102,4 @@ the cache key, and re-ran the command.
   example with more annotations on what's happening under the hood.
 - **[Concepts: targets and inputs](/concepts/targets/)** is the model.
 - **[Go monorepo guide](/guides/go-monorepo/)** is a real-world recipe
-  showing discovery, structural inputs, and inferred deps together.
+  showing discovery and inferred deps together.

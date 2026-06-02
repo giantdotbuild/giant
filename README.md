@@ -108,9 +108,7 @@ include:
   - id: "discover:go"
     inputs:
       - "go.mod"
-      - kind: structural
-        files: "**/*.go"
-        lines: ["package ", "import "]
+      - "**/*.go"
     outputs: [".giant/d/go.json"]
     command: "tools/discover-go.sh > .giant/d/go.json"
 ```
@@ -128,8 +126,8 @@ include:
 
 Giant runs discovery before the main build, merges the emitted targets, and
 infers cross-target dependencies wherever one target's output matches another's
-input. The structural input above only re-runs discovery when `package`/`import`
-lines change - function-body edits keep the cache warm.
+input. Discovery re-runs only when the files it recorded reading actually
+change, so it stays off the hot path on warm builds.
 
 ## Porcelains
 
@@ -202,8 +200,6 @@ A short tour of what's where:
 - `crates/giant/src/executor.rs` - parallel dispatch, cache key composition,
   early-cutoff, remote-cache fallback chain.
 - `crates/giant/src/cache.rs` - local content-addressed cache; LRU eviction.
-- `crates/giant/src/structural.rs` - three-stage structural input fingerprinting
-  (cold filesystem walk → mtime-skip warm validation → git fast-path).
 - `crates/giant/src/discovery.rs` - discovery target bootstrap and merge.
 - `crates/giant/src/graph.rs` - dependency graph, output-based dep inference.
 - `crates/giant/src/selection.rs` - pattern language (globs, exclusions, tags,
@@ -255,8 +251,8 @@ contents.
 ## Status
 
 Working: build, test, `--watch`, affected, graph, explain, clean, porcelain
-dispatch, local + remote cache, discovery, structural inputs with git fast-path,
-NDJSON event stream, LRU cache eviction. `giant session` runs a persistent engine
+dispatch, local + remote cache, discovery, NDJSON event stream, LRU cache
+eviction. `giant session` runs a persistent engine
 that live-reloads on `giant.yaml` edits, and the command channel lets porcelains
 send commands back over the protocol. `giant-task`
 ships in `crates/giant-task/` and handles tasks, services with readiness probes,

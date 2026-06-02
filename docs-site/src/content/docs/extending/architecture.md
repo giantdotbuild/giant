@@ -32,11 +32,10 @@ src/
 ├── executor.rs          # parallel dispatch, cache key composition
 ├── cache.rs             # local content-addressed cache + LRU eviction
 ├── remote.rs            # Bazel HTTP cache (feature-gated)
-├── structural.rs        # 3-stage structural input fingerprinting
 ├── watcher.rs           # notify-based file watcher
 ├── renderer.rs          # event-to-line renderer
 ├── events.rs            # NDJSON event types
-├── git.rs               # gix-based status/index queries for --affected --base
+├── git.rs               # repo discovery for --affected --base + fsmonitor config
 ├── fsmonitor.rs         # git fsmonitor hook protocol v2 client (TDD-0016)
 ├── paths.rs             # AbsPath / WsRelPath / OutputPath newtypes + mtime_ns helper
 └── types.rs             # GlobPattern newtype
@@ -66,7 +65,7 @@ giant build go:bin:server
     │
     ▼
   [ executor::compose_cache_key ]
-    hash workspace + id + command + cwd + env + inputs + structural + dep_outputs
+    hash workspace + id + command + cwd + env + inputs + dep_outputs
     │
     ▼
   [ cache::get_ac(key) ]
@@ -137,23 +136,6 @@ In the renderer, events with a `bootstrap_*` build id are filtered
 out of human output - the user sees one summary per real build, not
 two. Failures still surface.
 
-## Structural inputs
-
-Three stages, all in `structural.rs`:
-
-1. **Cold compute** (`compute_fingerprint_cold`) - walk the
-   filesystem, read every matched file, hash the prefix-matching lines,
-   write a sidecar.
-2. **Mtime-skip warm** (`compute_fingerprint_warm`) - walk again, but
-   for each file compare `(mtime, size)` against the sidecar; reuse
-   the recorded hash if unchanged.
-3. **Git fast-path** (`compute_fingerprint_via_git`) - when in a git
-   repo, ask `git status` for the modified file list; only revalidate
-   those, accept the rest from the sidecar.
-
-Stage 3 lets a 10k-file workspace answer a warm structural query in a
-few milliseconds.
-
 ## fsmonitor
 
 When the workspace's git config sets `core.fsmonitor`, the engine
@@ -220,7 +202,7 @@ private build path.
   watch loop reads.
 
 All tasks are async. No synchronous file I/O on the runtime -
-`spawn_blocking` wraps `std::fs` calls in `cache.rs` and `structural.rs`.
+`spawn_blocking` wraps `std::fs` calls in `cache.rs`.
 
 ## Why no daemon
 

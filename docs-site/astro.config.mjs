@@ -44,7 +44,6 @@ export default defineConfig({
             { label: 'Targets and inputs', slug: 'concepts/targets' },
             { label: 'The cache key', slug: 'concepts/cache-key' },
             { label: 'Discovery', slug: 'concepts/discovery' },
-            { label: 'Structural inputs', slug: 'concepts/structural-inputs' },
             { label: 'Selection language', slug: 'concepts/selection' },
           ],
         },

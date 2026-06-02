@@ -1,6 +1,6 @@
 ---
 title: Go monorepo
-description: A realistic Go monorepo setup - discovery, structural inputs, inferred deps.
+description: A realistic Go monorepo setup - discovery, recorded reads, inferred deps.
 ---
 
 A complete worked example: a Go monorepo with many packages, discovered
@@ -151,15 +151,16 @@ giant affected --base main
 
 - **Cold first build:** discovery runs, all packages compile.
 - **Edit function body in `internal/auth/auth.go`:** discovery
-  cache-hits (no structural change), `pkg:internal/auth` recompiles,
-  `bin:server` recompiles (its inputs cover auth source).
+  cache-hits (no `package`/`import` change), `pkg:internal/auth`
+  recompiles, `bin:server` recompiles (its inputs cover auth source).
 - **Edit a comment in `internal/util/format.go`:** depending on your
   inputs spec, the package might cache-hit (if comments aren't visible
   to the compiler-relevant bytes - they're not, but our cache key
   doesn't know that). For Go this is usually a recompile.
 - **Add `import "log"` to `internal/auth/auth.go`:** discovery's
-  structural input shifts → discovery re-runs → the emitted target
-  list might change → graph rebuild → relevant packages recompile.
+  recorded `package`/`import` lines shift → discovery re-runs → the
+  emitted target list might change → graph rebuild → relevant packages
+  recompile.
 - **Run `git checkout main`:** discovery cache-hits against the cache
   if you've been on main recently. Most packages cache-hit. Only what
   diverged rebuilds.
@@ -173,5 +174,5 @@ On a 10k-file Go monorepo with discovery + per-package targets:
 | Cold build (everything) | dominated by `go build` |
 | Warm no-op | <100 ms |
 | One-package edit, downstream rebuild | dominated by `go build` of affected |
-| Structural input fingerprint over 10k files (cold) | ~50 ms |
+| Recorded-reads excerpt scan over 10k files (cold) | ~50 ms |
 | Same after git status fast-path | ~5 ms |

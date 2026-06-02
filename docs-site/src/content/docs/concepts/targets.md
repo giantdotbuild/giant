@@ -20,9 +20,6 @@ targets:
     inputs:
       - "cmd/server/**/*.go"
       - "internal/**/*.go"
-      - kind: structural
-        files: "internal/**/*.go"
-        lines: ["package ", "import "]
     outputs: ["bin/server"]
     deps: []
     command: "go build -o bin/server ./cmd/server"
@@ -40,7 +37,7 @@ targets:
 | Field | Meaning |
 |---|---|
 | `id` | Unique target name. Required. |
-| `inputs` | Files (globs) and/or structural inputs that affect the cache key. |
+| `inputs` | File globs whose matched files affect the cache key. |
 | `outputs` | Files the command produces, relative to `cwd`. Cached. |
 | `deps` | Explicit target dependencies (most are inferred - see below). |
 | `command` | Shell command. Required unless `exists` succeeds. |
@@ -55,7 +52,7 @@ targets:
 
 ## Inputs
 
-Three input shapes:
+Two input shapes:
 
 ### File globs (the common case)
 
@@ -70,19 +67,6 @@ Standard glob semantics. `**` matches directories recursively; `*` does
 not cross `/`. Patterns are matched against workspace-relative paths.
 
 Every matched file's content hash contributes to the cache key.
-
-### Structural inputs
-
-```yaml
-inputs:
-  - kind: structural
-    files: "internal/**/*.go"
-    lines: ["package ", "import ", "//go:embed "]
-```
-
-Only lines starting with one of the listed prefixes contribute to the
-hash. Function-body edits don't invalidate the cache. The full story
-is on the [Structural inputs](/concepts/structural-inputs/) page.
 
 ### Output references (inferred deps)
 

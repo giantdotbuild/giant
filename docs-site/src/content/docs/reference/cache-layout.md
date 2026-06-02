@@ -17,9 +17,6 @@ is `~/.cache/giant`; you can override per-workspace via `cache.dir`.
 ├── cas/                 # content-addressed store - output bytes
 │   └── 9f/
 │       └── 9f3c8d7e2a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b
-├── structural/          # per-target sidecars for structural inputs
-│   └── 8e/
-│       └── 8e1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e.json
 ├── log/                 # per-target captured log blobs
 └── tmp/                 # transient write-then-rename staging
 ```
@@ -84,28 +81,6 @@ Pure content-addressed bytes. Filename = SHA-256 of contents (verified
 on read). No metadata, no JSON - just the raw output bytes from some
 target. Captured stdout/stderr blobs live in `cas/` too; they're CAS
 entries like any other.
-
-## `structural/`
-
-Sidecars for structural inputs. One per target that uses any structural
-input. Holds per-file `(mtime, size, filtered_hash)` tuples so warm
-validation can skip re-reading unchanged files.
-
-```jsonc
-{
-  "schema": 1,
-  "entries": [
-    {
-      "spec": { "files": ["**/*.go"], "lines": ["package ", "import "] },
-      "files": {
-        "internal/auth/auth.go": { "mtime_ns": 1715890000000000000, "size": 4096, "hash": "abcd..." },
-        ...
-      },
-      "fingerprint": "5c8a3f..."
-    }
-  ]
-}
-```
 
 ## `tmp/`
 

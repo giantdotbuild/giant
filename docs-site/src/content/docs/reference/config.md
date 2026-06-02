@@ -154,7 +154,7 @@ Regular build targets. Schema below.
 | Field | Required | Type | Description |
 |---|---|---|---|
 | `id` | yes | string | Unique target ID. Convention: `lang:kind:name`. |
-| `inputs` | no | list | File globs and/or structural inputs. |
+| `inputs` | no | list | File globs whose matched files feed the cache key. |
 | `outputs` | no | list | Files the command produces, relative to `cwd`. Each entry is a glob; a literal must exist, a glob captures all matches (≥1), named + glob compose. |
 | `deps` | no | list of strings | Additional explicit dependencies. |
 | `command` | yes* | string | Shell command. Required unless `exists` is set. |
@@ -169,25 +169,13 @@ Regular build targets. Schema below.
 
 ### Input shapes
 
-**File glob (string form):**
+A bare string is a file glob; the explicit object form is equivalent:
 
 ```yaml
 inputs:
-  - "src/**/*.go"
-  - "go.mod"
+  - "src/**/*.go"                  # string form
+  - { kind: file, glob: "go.mod" } # object form
 ```
-
-**Structural input:**
-
-```yaml
-inputs:
-  - kind: structural
-    files: "**/*.go"
-    lines: ["package ", "import ", "//go:embed "]
-```
-
-See [Structural inputs](/concepts/structural-inputs/) for the full
-story. The `files:` can be a string or list.
 
 ## `include`
 
@@ -201,7 +189,7 @@ field set differs from `targets:` in a few ways:
 | `command` | yes | string | The discovery command. |
 | `outputs` | yes | list | The JSON file(s) the command writes. |
 | `deps` | no | list of strings | Explicit dependencies (e.g. on a compiled discovery tool). |
-| `inputs` | no | list | Explicit files to content-hash into the discovery cache key. Optional - Giant already pulls in any argv token that resolves to a workspace file (the script, an in-tree binary on `$PATH`, etc.). Use this to declare helpers and embedded data the argv walk can't see (sourced shell libraries, config templates). Same `File`/`Structural` shapes as `targets.inputs`. |
+| `inputs` | no | list | Explicit files to content-hash into the discovery cache key. Optional - Giant already pulls in any argv token that resolves to a workspace file (the script, an in-tree binary on `$PATH`, etc.). Use this to declare helpers and embedded data the argv walk can't see (sourced shell libraries, config templates). Same file-glob shapes as `targets.inputs`. |
 | `cwd` | no | string | Working dir, workspace-relative. |
 | `env` | no | map | Env vars. Hashed into the discovery cache key. |
 | `scope` | no | list of strings | Directory prefixes the discovery may read from. Used as the sandbox fence (if sandboxing is on) and the fsmonitor narrowing hint. Contributes to the cache key. |

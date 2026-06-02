@@ -124,8 +124,7 @@ giant explain <TARGET> [--diff <OTHER_TARGET>]
 ```
 
 Output covers: the cache key itself, the command, cwd, env vars, file
-inputs (with their content hashes), structural inputs (with their
-fingerprints), and dep output hashes.
+inputs (with their content hashes), and dep output hashes.
 
 `--diff <other-target>` swaps the breakdown for a side-by-side
 comparison: only the fields that differ between the two targets are
