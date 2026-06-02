@@ -36,26 +36,7 @@ pub struct ExplainArgs {
 }
 
 pub async fn execute(args: ExplainArgs, global: &super::GlobalFlags) -> anyhow::Result<()> {
-    let (tx, sink) = prep::null_event_sink();
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let parallelism = prep::num_cpus_estimate();
-
-    let prepared = match prep::prepare(
-        global.config.as_deref(),
-        parallelism,
-        global.fresh,
-        tx,
-        cancel,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            sink.abort();
-            return Err(e);
-        }
-    };
-    let _ = sink.await;
+    let prepared = prep::prepare(global.config.as_deref()).await?;
 
     let target_id = TargetId::new(&args.target);
     if prepared.graph.get(&target_id).is_none() {

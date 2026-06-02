@@ -1,8 +1,8 @@
 //! Giant - build orchestration with content-addressed caching.
 //!
 //! The engine is language-agnostic: targets are `inputs → command → outputs`.
-//! Dynamic configuration is JSON read from files; one path is "discovery
-//! targets" that emit JSON to be merged into the graph (TDD-0003).
+//! Config is static `giant.yaml`/`giant.json`; producing it (discovery,
+//! matrices) is an offline generator's job, not the engine's (ADR-0024).
 //!
 //! See `docs/adr/` and `docs/tdd/` for the design.
 
@@ -10,10 +10,8 @@ pub mod cache;
 pub mod cli;
 pub mod commands;
 pub mod config;
-pub mod discovery;
 pub mod events;
 pub mod executor;
-pub mod fsmonitor;
 pub mod git;
 pub mod graph;
 pub mod model;

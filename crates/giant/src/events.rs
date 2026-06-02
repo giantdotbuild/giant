@@ -115,13 +115,6 @@ pub enum Event {
     #[serde(rename = "watch.changed")]
     WatchChanged { paths: Vec<String> },
 
-    #[serde(rename = "discovery.merged")]
-    DiscoveryMerged {
-        build: String,
-        id: TargetId,
-        added_targets: Vec<TargetId>,
-    },
-
     /// Describes one target in the merged graph. Emitted by
     /// `giant list --events ndjson` and (when it lands) by the
     /// `query.catalog` channel of a long-running engine. Exporting
@@ -176,13 +169,13 @@ pub enum Event {
     /// Engine accepted a command but it failed during execution.
     /// Different from `build.finished { ok: false }` (which is a
     /// targeted-failure event from the executor); this is for command-
-    /// level failures like "discovery couldn't run."
+    /// level failures like "config couldn't load."
     #[serde(rename = "command.error")]
     CommandError { command_id: String, message: String },
 
-    /// Catalog is about to be invalidated and re-emitted (config or
-    /// discovery output changed). Porcelains should hold off on
-    /// rendering until `catalog.ready` arrives.
+    /// Catalog is about to be invalidated and re-emitted (config
+    /// changed). Porcelains should hold off on rendering until
+    /// `catalog.ready` arrives.
     #[serde(rename = "catalog.invalidating")]
     CatalogInvalidating,
 

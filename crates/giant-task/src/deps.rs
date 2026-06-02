@@ -106,20 +106,10 @@ struct State {
     captured: HashMap<TargetId, Vec<String>>,
     /// IDs that finished as Failed, in completion order.
     failures: Vec<TargetId>,
-    /// True if we've already printed a "building …" line for a target
-    /// (so verbose mode can prefix log output properly).
-    bootstrap: bool,
 }
 
 impl State {
     fn consume(&mut self, ev: Event, verbose: bool) {
-        // Bootstrap (discovery) events are part of `giant build`'s
-        // pipeline. The renderer in core filters them; we do the same
-        // here so the user sees one summary per phase, not two.
-        if event_is_bootstrap(&ev) {
-            return;
-        }
-
         match ev {
             Event::TargetLog {
                 id, stream, line, ..
@@ -153,7 +143,6 @@ impl State {
             } => {
                 self.counts = Some(counts);
                 self.duration_ms = Some(duration_ms);
-                self.bootstrap = true;
             }
             _ => {}
         }
@@ -199,21 +188,6 @@ impl State {
         } else {
             render::deps_fail(counts, duration);
         }
-    }
-}
-
-/// Bootstrap events come from discovery - they have a build id that
-/// starts with `bootstrap_` (TDD-0003). Core's renderer filters them
-/// the same way.
-fn event_is_bootstrap(ev: &Event) -> bool {
-    match ev {
-        Event::BuildStarted { id, .. } | Event::BuildFinished { id, .. } => {
-            id.starts_with("bootstrap_")
-        }
-        Event::TargetFinished { build, .. } | Event::TargetLog { build, .. } => {
-            build.starts_with("bootstrap_")
-        }
-        _ => false,
     }
 }
 
@@ -284,36 +258,6 @@ mod tests {
         assert_eq!(s.failures, vec![TargetId::new("foo")]);
         // Buffer retained for replay.
         assert_eq!(s.captured.get(&TargetId::new("foo")).unwrap().len(), 2);
-    }
-
-    #[test]
-    fn bootstrap_events_are_filtered() {
-        let mut s = State::default();
-        s.consume(
-            Event::TargetLog {
-                build: "bootstrap_abc".into(),
-                id: TargetId::new("discover:go"),
-                stream: LogStream::Stdout,
-                line: "noise".into(),
-                truncated: false,
-            },
-            false,
-        );
-        s.consume(
-            Event::TargetFinished {
-                build: "bootstrap_abc".into(),
-                id: TargetId::new("discover:go"),
-                result: TargetResultKind::Failed,
-                duration_ms: 0,
-                exit_code: None,
-                outputs: vec![],
-                error: None,
-            },
-            false,
-        );
-        // Discovery events should be invisible to this layer.
-        assert!(s.captured.is_empty());
-        assert!(s.failures.is_empty());
     }
 
     #[test]

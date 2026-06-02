@@ -51,31 +51,7 @@ pub struct AffectedArgs {
 }
 
 pub async fn execute(args: AffectedArgs, global: &super::GlobalFlags) -> anyhow::Result<()> {
-    // Bootstrap silently: discovery still has to run so its targets
-    // appear in the graph, but per-target log lines would just be
-    // noise for a list-affected query.
-    let (tx, sink_handle) = prep::null_event_sink();
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let parallelism = prep::num_cpus_estimate();
-
-    let prepared = match prep::prepare(
-        global.config.as_deref(),
-        parallelism,
-        global.fresh,
-        tx,
-        cancel,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            sink_handle.abort();
-            return Err(e);
-        }
-    };
-    // Allow the sink to drain any final events, then move on.
-    drop(prepared.cache);
-    let _ = sink_handle.await;
+    let prepared = prep::prepare(global.config.as_deref()).await?;
 
     let changed = resolve_changed_files(&args, prepared.workspace_root.as_path())?;
     let changed_refs: Vec<&Path> = changed.iter().map(|p| p.as_path()).collect();

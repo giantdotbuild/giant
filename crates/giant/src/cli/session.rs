@@ -2,7 +2,7 @@
 //!
 //! Lifecycle:
 //!   1. Refuse if stdout is a TTY (would corrupt the protocol).
-//!   2. Load config + run discovery once.
+//!   2. Load config + build the graph once.
 //!   3. Emit `engine.hello` + `target.described` × N + `engine.ready`.
 //!   4. Read commands on stdin (one JSON object per line), dispatch
 //!      to the engine, multiplex events back on stdout.
@@ -70,19 +70,8 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
         })
         .await;
 
-    let prep_cancel = CancellationToken::new();
     let parallelism = prep::num_cpus_estimate();
-    let prepared = match prep::prepare(
-        global.config.as_deref(),
-        parallelism,
-        global.fresh,
-        // Send bootstrap events into the same writer so the TUI sees
-        // discovery progress as it happens.
-        event_tx.clone(),
-        prep_cancel.clone(),
-    )
-    .await
-    {
+    let prepared = match prep::prepare(global.config.as_deref()).await {
         Ok(p) => p,
         Err(e) => {
             let _ = event_tx
@@ -115,8 +104,8 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
     tokio::spawn(read_commands(cmd_tx));
 
     // Always-on config watcher: a `giant.yaml` / `giant.json` edit
-    // triggers a reload (re-discover + re-emit catalog). The handle must
-    // outlive the loop; dropping it stops the OS watch.
+    // triggers a reload (rebuild graph + re-emit catalog). The handle
+    // must outlive the loop; dropping it stops the OS watch.
     let (reload_tx, mut reload_rx) = mpsc::channel::<()>(8);
     let _config_watch = spawn_config_watcher(
         state.workspace_root.clone(),
@@ -621,13 +610,12 @@ impl SessionState {
         });
     }
 
-    /// Re-load config, re-run discovery, rebuild the graph, re-emit the
-    /// catalog, and restart any active subscriptions against the new
-    /// graph. Triggered by `config.reload` or a `giant.yaml` /
-    /// discovery-output change. A build in flight keeps its own graph
-    /// `Arc`, so reloading is safe to do alongside it (deviating from
-    /// TDD-0014's "queue until the build finishes" - simpler, and the
-    /// running build is unaffected).
+    /// Re-load config, rebuild the graph, re-emit the catalog, and
+    /// restart any active subscriptions against the new graph. Triggered
+    /// by `config.reload` or a `giant.yaml` / `giant.json` change. A
+    /// build in flight keeps its own graph `Arc`, so reloading is safe
+    /// to do alongside it (deviating from TDD-0014's "queue until the
+    /// build finishes" - simpler, and the running build is unaffected).
     async fn reload(&mut self) {
         let _ = self.event_tx.send(Event::CatalogInvalidating).await;
 
@@ -649,15 +637,7 @@ impl SessionState {
             (c.targets, c.globs)
         });
 
-        match prep::prepare(
-            self.config_path.as_deref(),
-            self.parallelism,
-            self.fresh_default,
-            self.event_tx.clone(),
-            CancellationToken::new(),
-        )
-        .await
-        {
+        match prep::prepare(self.config_path.as_deref()).await {
             Ok(p) => {
                 self.cache_root = prep::resolve_cache_dir(&p.config.cache.dir)
                     .map(AbsPath::new)
@@ -756,7 +736,6 @@ impl SessionState {
             workspace_root: self.workspace_root.clone(),
             parallelism: self.parallelism,
             fresh,
-            force_fresh: None,
             events: self.event_tx.clone(),
             cancel: cancel.clone(),
             build_id: build_id.clone(),
@@ -1046,7 +1025,6 @@ async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: Cancellatio
         workspace_root: workspace_root.clone(),
         parallelism,
         fresh,
-        force_fresh: None,
         events: event_tx.clone(),
         cancel: cancel.clone(),
         build_id,
@@ -1400,7 +1378,6 @@ mod tests {
             test: false,
             tags: Default::default(),
             label: None,
-            scope: Vec::new(),
             inferred_deps: Default::default(),
         }
     }

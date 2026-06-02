@@ -261,11 +261,7 @@ pub enum Focus {
 
 impl State {
     /// Fold one NDJSON event from the session into the view.
-    /// Bootstrap events from the build event stream are filtered.
     pub fn apply(&mut self, ev: Event) {
-        if is_bootstrap(&ev) {
-            return;
-        }
         match ev {
             // ----- Catalog / session lifecycle ----------------------
             Event::TargetDescribed {
@@ -843,20 +839,6 @@ fn result_kind_to_status(k: TargetResultKind) -> TargetStatus {
     }
 }
 
-fn is_bootstrap(ev: &Event) -> bool {
-    match ev {
-        Event::BuildStarted { id, .. } | Event::BuildFinished { id, .. } => {
-            id.starts_with("bootstrap_")
-        }
-        Event::TargetQueued { build, .. }
-        | Event::TargetStarted { build, .. }
-        | Event::TargetLog { build, .. }
-        | Event::TargetFinished { build, .. }
-        | Event::DiscoveryMerged { build, .. } => build.starts_with("bootstrap_"),
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1129,21 +1111,6 @@ mod tests {
         s.return_to_browser();
         assert_eq!(s.screen, Screen::Browser);
         assert_eq!(s.scroll_offset, 0);
-    }
-
-    #[test]
-    fn bootstrap_events_are_filtered() {
-        let mut s = State {
-            screen: Screen::Building,
-            ..State::default()
-        };
-        s.apply(Event::TargetStarted {
-            build: "bootstrap_x".into(),
-            id: tid("discover"),
-            cache_key: "".into(),
-            command: "".into(),
-        });
-        assert!(s.targets.is_empty());
     }
 
     #[test]

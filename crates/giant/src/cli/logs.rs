@@ -12,7 +12,6 @@
 
 use clap::Args;
 use std::io::Write;
-use tokio_util::sync::CancellationToken;
 
 use crate::model::{ContentHash, TargetId};
 
@@ -46,20 +45,7 @@ pub struct LogsArgs {
 }
 
 pub async fn execute(args: LogsArgs, global: &super::GlobalFlags) -> anyhow::Result<()> {
-    let (silent_tx, silent_rx) = tokio::sync::mpsc::channel::<crate::events::Event>(64);
-    tokio::spawn(async move {
-        let mut rx = silent_rx;
-        while rx.recv().await.is_some() {}
-    });
-
-    let prepared = prep::prepare(
-        global.config.as_deref(),
-        prep::num_cpus_estimate(),
-        false,
-        silent_tx,
-        CancellationToken::new(),
-    )
-    .await?;
+    let prepared = prep::prepare(global.config.as_deref()).await?;
 
     let target_id = TargetId::new(args.target.clone());
     let spec = prepared

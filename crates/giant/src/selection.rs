@@ -301,7 +301,6 @@ mod tests {
             test: false,
             tags: Default::default(),
             label: None,
-            scope: Vec::new(),
             inferred_deps: Default::default(),
         }
     }

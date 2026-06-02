@@ -81,11 +81,11 @@ pub enum Commands {
     /// Clear the local cache.
     Clean(clean::CleanArgs),
 
-    /// Persistent engine over stdio. Loads config once, runs
-    /// discovery once, then reads JSON commands on stdin and emits
-    /// NDJSON events on stdout. The protocol porcelains (the TUI in
-    /// particular) drive against. Refuses to run with stdout on a
-    /// TTY - pipe it. See TDD-0014.
+    /// Persistent engine over stdio. Loads config and builds the graph
+    /// once, then reads JSON commands on stdin and emits NDJSON events
+    /// on stdout. The protocol porcelains (the TUI in particular) drive
+    /// against. Refuses to run with stdout on a TTY - pipe it. See
+    /// TDD-0014.
     Session(session::SessionArgs),
 
     /// Generate a shell completion script for bash / zsh / fish /

@@ -37,9 +37,6 @@ pub struct Config {
     pub workspace: WorkspaceConfig,
 
     #[serde(default)]
-    pub include: Vec<TargetSpec>,
-
-    #[serde(default)]
     pub targets: Vec<TargetSpec>,
 
     #[serde(default)]
@@ -47,9 +44,6 @@ pub struct Config {
 
     #[serde(default)]
     pub state: StateConfig,
-
-    #[serde(default)]
-    pub discovery: DiscoveryConfig,
 
     /// How `giant <name>` routes when `<name>` is neither a built-in nor
     /// a `giant-<name>` binary on PATH. See ADR-0021. Core stays
@@ -171,7 +165,7 @@ fn find_config_upward(start_dir: &Path) -> Option<PathBuf> {
 /// Workspace-local engine state. Distinct from `cache.dir` (which can
 /// be shared / remote) - state is the small set of files giant writes
 /// next to the workspace so concurrent runs and other tools can see
-/// them: discovery sidecars, the fsmonitor token, build logs.
+/// them: build logs and other per-workspace state.
 ///
 /// Defaults to `.giant/` at the workspace root. Override when sharing
 /// a workspace with another tool that already owns `.giant/`, or when
@@ -193,18 +187,6 @@ impl Default for StateConfig {
 
 fn default_state_dir() -> String {
     ".giant".into()
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DiscoveryConfig {
-    /// When `true`, a discovery whose output lacks a `reads` manifest
-    /// is a hard error (the cooperative protocol is enforced -
-    /// ADR-0017). Default `false`: missing `reads` only produces a
-    /// warning, and the discovery's output is used once but not
-    /// cached.
-    #[serde(default)]
-    pub strict: bool,
 }
 
 fn default_schema_version() -> u32 {
@@ -355,8 +337,8 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Static validation: things checkable without the merged graph.
-    /// (TDD-0001 §Validation; merged validation runs after discovery per TDD-0003.)
+    /// Static validation: things checkable on a single config file.
+    /// (TDD-0001 §Validation.)
     pub fn validate_static(&self) -> Result<(), ConfigError> {
         // workspace.name
         if self.workspace.name.is_empty() {
@@ -377,28 +359,9 @@ impl Config {
             )));
         }
 
-        // Discovery entries traditionally relied on the cooperative
-        // `reads` manifest. Per ADR-0017 they may *also* declare
-        // `inputs:` - explicit content-hashed files that feed the
-        // cache key and are policed by the warm-path verifier even
-        // when the discovery script doesn't report them. The two
-        // mechanisms compose; no validation needed here.
-
-        // `scope:` is discovery-only; reject on regular targets so a typo
-        // isn't silently ignored.
-        for t in &self.targets {
-            if !t.scope.is_empty() {
-                return Err(ConfigError::Validation(format!(
-                    "target '{}' declares `scope:`; that field is only \
-                     valid on `include:` (discovery) entries.",
-                    t.id
-                )));
-            }
-        }
-
-        // target ID uniqueness across `include` and `targets`
+        // target ID uniqueness
         let mut seen = HashSet::new();
-        for t in self.include.iter().chain(self.targets.iter()) {
+        for t in &self.targets {
             if !seen.insert(t.id.clone()) {
                 return Err(ConfigError::Validation(format!(
                     "duplicate target id '{}'",
@@ -606,83 +569,6 @@ workspace: { name: p }
         let err = Config::load(f.path()).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("schema_version 999"), "got: {msg}");
-    }
-
-    /// Discovery entries may declare `inputs:` - these flow into the
-    /// discovery cache key (content-hashed) alongside the argv-walk
-    /// detection. The opposite of the originally-proposed behavior,
-    /// which rejected the field outright (ADR-0013, superseded by
-    /// ADR-0017).
-    #[test]
-    fn accept_inputs_on_include_entry() {
-        let f = write_yaml(
-            r#"
-workspace: { name: p }
-include:
-  - id: "discover:go"
-    inputs: ["tools/lib/**/*.sh"]
-    outputs: [".giant/d/go.json"]
-    command: "tools/discover-go.sh"
-"#,
-        );
-        let cfg = Config::load(f.path()).expect("inputs on discovery should load");
-        assert_eq!(cfg.include.len(), 1);
-        assert_eq!(cfg.include[0].id.as_str(), "discover:go");
-    }
-
-    #[test]
-    fn reject_scope_on_regular_target() {
-        let f = write_yaml(
-            r#"
-workspace: { name: p }
-targets:
-  - id: "rust:build"
-    inputs: ["src/**/*.rs"]
-    outputs: ["bin/app"]
-    command: "cargo build"
-    scope: ["src/"]
-"#,
-        );
-        let err = Config::load(f.path()).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("rust:build") && msg.contains("scope"),
-            "expected error naming the target and scope, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn accept_include_with_scope_and_no_inputs() {
-        let f = write_yaml(
-            r#"
-workspace: { name: p }
-include:
-  - id: "discover:go"
-    outputs: [".giant/d/go.json"]
-    command: "tools/discover-go.sh > .giant/d/go.json"
-    scope: ["pkg/", "cmd/"]
-"#,
-        );
-        let cfg = Config::load(f.path()).unwrap();
-        assert_eq!(cfg.include.len(), 1);
-        assert_eq!(cfg.include[0].scope.len(), 2);
-        assert!(cfg.include[0].inputs.is_empty());
-    }
-
-    #[test]
-    fn accept_include_without_scope() {
-        let f = write_yaml(
-            r#"
-workspace: { name: p }
-include:
-  - id: "discover:protos"
-    outputs: [".giant/d/protos.json"]
-    command: "tools/discover-protos.sh > .giant/d/protos.json"
-"#,
-        );
-        let cfg = Config::load(f.path()).unwrap();
-        assert_eq!(cfg.include.len(), 1);
-        assert!(cfg.include[0].scope.is_empty());
     }
 
     // --- dispatch routing (ADR-0021) ---

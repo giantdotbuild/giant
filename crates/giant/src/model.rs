@@ -175,11 +175,6 @@ pub struct TargetSpec {
     #[serde(default)]
     pub label: Option<String>,
 
-    /// Discovery-only: directory prefixes the entry is permitted to
-    /// read from. Empty on regular targets. See ADR-0017.
-    #[serde(default)]
-    pub scope: Vec<WsRelPath>,
-
     /// Runtime-only: the subset of `deps` populated by output-based
     /// inference. Display metadata for `giant explain`; never serialized.
     #[serde(skip)]

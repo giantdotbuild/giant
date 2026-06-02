@@ -229,21 +229,6 @@ impl Renderer {
     }
 
     fn render_human(&mut self, ev: &Event) -> Option<String> {
-        // Discovery's bootstrap pass runs as its own build under a
-        // `bootstrap_*` build id. We swallow its lifecycle and
-        // successful-target output so the user sees one summary, not
-        // two. Failures still surface - those need to be visible.
-        match ev {
-            Event::BuildStarted { id, .. } if is_bootstrap(id) => return None,
-            Event::BuildFinished { id, .. } if is_bootstrap(id) => return None,
-            Event::TargetFinished { build, result, .. }
-                if is_bootstrap(build) && !matches!(result, TargetResultKind::Failed) =>
-            {
-                return None;
-            }
-            Event::TargetLog { build, .. } if is_bootstrap(build) => return None,
-            _ => {}
-        }
         match ev {
             Event::BuildStarted { target_ids, .. } => {
                 // Lock in the column width now that we know what's
@@ -306,7 +291,7 @@ impl Renderer {
                     self.failed.push(id.clone());
                 }
                 // Toolchain/hidden targets are folded out - but a failing
-                // one still surfaces, like the bootstrap-swallow rule.
+                // one still surfaces.
                 if self.is_hidden(id) && !failed {
                     return None;
                 }
@@ -438,10 +423,6 @@ impl Renderer {
 
 /// Print a one-off informational note (e.g. "no targets affected").
 /// Uses a dim `·` marker so it sits visually quieter than verb lines.
-fn is_bootstrap(build_id: &str) -> bool {
-    build_id.starts_with("bootstrap_")
-}
-
 pub fn note(theme: &Theme, msg: &str) -> String {
     let dot = paint(theme.enabled, theme.dim, "·");
     format!("{dot} {msg}\n")

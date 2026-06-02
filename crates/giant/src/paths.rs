@@ -7,16 +7,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Mtime as nanoseconds since unix epoch. `None` when the platform doesn't
-/// expose mtime or the value would overflow `u64` (year 2554+). Used by
-/// `discovery.rs` (verify_reads fast path).
-pub fn mtime_ns(m: &std::fs::Metadata) -> Option<u64> {
-    use std::time::SystemTime;
-    let t = m.modified().ok()?;
-    let dur = t.duration_since(SystemTime::UNIX_EPOCH).ok()?;
-    u64::try_from(dur.as_nanos()).ok()
-}
-
 /// An absolute filesystem path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AbsPath(PathBuf);

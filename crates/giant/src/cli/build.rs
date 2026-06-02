@@ -118,17 +118,15 @@ pub(super) async fn execute_with_mode(
         m => m,
     };
 
-    // Event channel + renderer. Used by both the bootstrap and the main
-    // build, so we set it up before calling `prep::prepare`. id_width
-    // starts at 0 and gets updated once we have a selection; bootstrap
-    // log lines render with width=0 (just the prefix), which is fine.
+    // Event channel + renderer, set up before `prep::prepare`. id_width
+    // starts at 0 and gets updated once we have a selection.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(1024);
     let ndjson = matches!(args.events, Some(EventsFormat::Ndjson));
     let mode = renderer::detect_mode(args.color, ndjson);
     let quiet = args.quiet;
     // Toolchain targets are folded out of the human view. The set is
-    // shared with the renderer task and filled in once discovery has
-    // merged the graph (below) - it can't be known at construction.
+    // shared with the renderer task and filled in once the graph is
+    // loaded (below) - it can't be known at construction.
     let hidden: Arc<Mutex<HashSet<TargetId>>> = Arc::new(Mutex::new(HashSet::new()));
     let hidden_for_render = hidden.clone();
     // The renderer also captures the main build's `build.finished`
@@ -154,11 +152,7 @@ pub(super) async fn execute_with_mode(
                 ev = rx.recv() => {
                     match ev {
                         Some(ev) => {
-                            // Capture the real build's counts (not the
-                            // discovery bootstrap's).
-                            if let Event::BuildFinished { id, counts, .. } = &ev
-                                && !id.starts_with("bootstrap_")
-                            {
+                            if let Event::BuildFinished { counts, .. } = &ev {
                                 final_counts = Some(counts.clone());
                             }
                             if let Some(line) = r.render(&ev) {
@@ -183,16 +177,8 @@ pub(super) async fn execute_with_mode(
     let cancel = CancellationToken::new();
     let parallelism = args.jobs.unwrap_or_else(prep::num_cpus_estimate);
 
-    // Load config, open cache, run discovery bootstrap, merge graph.
-    let prepared = match prep::prepare(
-        global.config.as_deref(),
-        parallelism,
-        global.fresh,
-        tx.clone(),
-        cancel.clone(),
-    )
-    .await
-    {
+    // Load config, build the graph, open cache.
+    let prepared = match prep::prepare(global.config.as_deref()).await {
         Ok(p) => p,
         Err(e) => {
             drop(tx);
@@ -202,8 +188,7 @@ pub(super) async fn execute_with_mode(
     };
 
     // Fold `toolchain`-tagged targets out of the human view now that the
-    // graph (including discovery-emitted toolchains) is known. They still
-    // build; failures still surface (TDD-0017).
+    // graph is known. They still build; failures still surface (TDD-0017).
     if !args.show_toolchains {
         *hidden.lock().expect("hidden set mutex") = prepared.graph.ids_with_tag("toolchain");
     }

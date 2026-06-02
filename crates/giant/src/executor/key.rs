@@ -211,8 +211,8 @@ struct FileInputItem {
 
 /// Walk + hash file inputs. Walk is parallel via `expand_globs_batched`;
 /// hashing is parallel via rayon over the sorted path list. Sequential
-/// hashing was visibly slow on warm runs of large discovery targets
-/// (~1 ms per file × 70+ files); rayon brings that to ~10 ms.
+/// hashing was visibly slow on warm runs of large targets (~1 ms per
+/// file × 70+ files); rayon brings that to ~10 ms.
 fn compute_file_inputs(
     workspace_root: &AbsPath,
     cache: &LocalCache,

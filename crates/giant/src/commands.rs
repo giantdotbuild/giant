@@ -51,7 +51,7 @@ pub enum Command {
         command_id: Option<String>,
     },
 
-    /// Re-read the workspace config + re-run discovery, emit a fresh
+    /// Re-read the workspace config, rebuild the graph, emit a fresh
     /// catalog stream. Triggered explicitly or by a giant.yaml file
     /// change (engine internal).
     #[serde(rename = "config.reload")]

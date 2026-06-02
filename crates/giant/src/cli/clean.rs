@@ -10,7 +10,7 @@
 //!   are deleted. Orphaned CAS blobs (referenced only by deleted AC
 //!   entries) get GC'd via the existing eviction pass.
 //!
-//! Doesn't run discovery - just reads cache.dir from the config and
+//! Doesn't build the graph - just reads cache.dir from the config and
 //! scans `ac/`.
 
 use clap::Args;

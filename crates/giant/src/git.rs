@@ -1,36 +1,14 @@
-//! Small focused git interface used by `giant affected` and the fsmonitor
-//! client.
+//! Small focused git interface used by `giant affected`.
 //!
-//! - `open`: discover the repository, distinguishing "not a repo" from
-//!   real errors so callers can fall back gracefully.
 //! - `affected_files_since`: files changed since a git ref, for
-//!   `giant affected`.
+//!   `giant affected`. Shells out to the `git` CLI.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
-    #[error("not a git repository: {0}")]
-    NotARepo(PathBuf),
-
     #[error("git operation failed: {0}")]
     Other(String),
-}
-
-/// Discover the git repository containing `workspace_root`. Distinguishes
-/// "not a repo" from real errors so callers can fall back gracefully.
-pub fn open(workspace_root: &Path) -> Result<gix::Repository, GitError> {
-    match gix::discover(workspace_root) {
-        Ok(repo) => Ok(repo),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("not a git repository") || msg.contains("does not exist") {
-                Err(GitError::NotARepo(workspace_root.to_path_buf()))
-            } else {
-                Err(GitError::Other(msg))
-            }
-        }
-    }
 }
 
 /// Files changed in the working tree (committed + uncommitted) since
