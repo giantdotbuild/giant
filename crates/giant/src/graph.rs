@@ -1,7 +1,7 @@
 //! Build graph backed by `petgraph`.
 //!
 //! Holds the merged set of targets and dep edges (explicit + output-inferred).
-//! See TDD-0003 for inference and merge semantics, TDD-0001 for the schema.
+//! See ADR-0004 for output-based inference, TDD-0001 for the schema and merge.
 
 use crate::model::{Input, TargetId, TargetSpec};
 use petgraph::Direction;
@@ -82,7 +82,7 @@ impl BuildGraph {
     /// times (clears existing edges first). Does three things:
     ///
     /// 1. Wire explicit `deps:` edges, checking they reference known IDs.
-    /// 2. Run output-based dep inference (TDD-0003), adding edges where a
+    /// 2. Run output-based dep inference (ADR-0004), adding edges where a
     ///    target's input glob matches another target's output paths.
     /// 3. Validate acyclic.
     ///
@@ -120,7 +120,7 @@ impl BuildGraph {
             }
         }
 
-        // 2. Output-based inference (TDD-0003).
+        // 2. Output-based inference (ADR-0004).
         let inferred = compute_inferred_edges(&self.targets)?;
         for (parent, dep) in inferred {
             if !seen_edges.insert((parent.clone(), dep.clone())) {
@@ -211,7 +211,7 @@ impl BuildGraph {
     }
 }
 
-/// Output-based dependency inference (TDD-0003).
+/// Output-based dependency inference (ADR-0004).
 ///
 /// For each target T and each input glob G, find producers whose output
 /// paths match G. Returns (parent, dep) tuples. Hard-errors when two
