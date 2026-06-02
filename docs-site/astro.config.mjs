@@ -42,6 +42,7 @@ export default defineConfig({
           label: 'Concepts',
           items: [
             { label: 'Targets and inputs', slug: 'concepts/targets' },
+            { label: 'Packages and labels', slug: 'concepts/packages' },
             { label: 'The cache key', slug: 'concepts/cache-key' },
             { label: 'Selection language', slug: 'concepts/selection' },
           ],
@@ -49,6 +50,7 @@ export default defineConfig({
         {
           label: 'Guides',
           items: [
+            { label: 'Generating config', slug: 'guides/generating-config' },
             { label: 'Docker images', slug: 'guides/docker' },
             { label: 'Tests with giant test', slug: 'guides/tests' },
             { label: 'Pinning toolchains', slug: 'guides/toolchains' },

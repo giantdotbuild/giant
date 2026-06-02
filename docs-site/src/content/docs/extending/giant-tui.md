@@ -16,11 +16,11 @@ $ giant tui
 ```
 giant ─ my-monorepo                                42 targets
 ─ Browse ────────────────────────────────────────────────────────
-  go:bin:server       ✓ idle
-> go:bin:worker       · building
-  go:test:auth        ✓ cached
-  go:test:store       ✗ failed
-  docker:api          · queued
+  //cmd/server:server   ✓ idle
+> //cmd/worker:worker   · building
+  //internal/auth:test  ✓ cached
+  //internal/store:test ✗ failed
+  //deploy:api          · queued
 ─ Filters ───────────────────────────────────────────────────────
   /                   ─ open search
   t                   ─ tag picker
@@ -30,8 +30,7 @@ giant ─ my-monorepo                                42 targets
 
 Under the hood it spawns one `giant session` subprocess and drives
 it with NDJSON commands. The TUI itself does no building - the
-engine does. See [TDD-0013](https://github.com/johnae/giant/blob/main/docs/tdd/0013-giant-tui.md)
-for the design.
+engine does.
 
 ## Install
 
@@ -58,8 +57,8 @@ giant-tui 0.1.0
 Patterns on the command line pre-fill the search filter:
 
 ```bash
-giant tui 'go:**'           # opens with go targets pre-selected
-giant tui 'go:test:*'        # narrowed further
+giant tui '//cmd/...'        # opens with the cmd/ subtree pre-selected
+giant tui '//cmd/server:*'   # narrowed to one package
 ```
 
 Same selection grammar as `giant build` ([selection
@@ -126,7 +125,7 @@ Multi-select with three states per tag: neutral, include, exclude.
 
 ## What you'll see
 
-The catalog list is sorted by ID and reflects three layers of
+The catalog list is sorted by label and reflects three layers of
 filtering: search substring, status, and tag include/exclude.
 Test targets are hidden by default - press `T` to surface them
 (matches `giant build`'s rule).
@@ -176,7 +175,7 @@ engine's job. The TUI is purely a viewer + command source.
 If stdout isn't a TTY (you piped output, redirected to a file,
 ran inside CI), `giant-tui` falls back to invoking
 `giant build` with the same patterns and exiting with its status.
-This makes scripts like `giant tui 'go:**' | tee build.log`
+This makes scripts like `giant tui '//cmd/...' | tee build.log`
 do something sensible instead of dumping raw terminal escapes.
 
 ## How it composes with the engine
@@ -226,8 +225,8 @@ A short list, deliberately:
 - **No multi-pane layout customization.** The browser → result
   split is fixed.
 - **No reading config independently.** The catalog comes from
-  `target.described` events emitted by the session, not from the
-  TUI re-parsing `giant.yaml`. You don't need to restart on a config
+  `target.described` events the session emits; the TUI never re-parses
+  `giant.yaml` itself. You don't need to restart on a config
   edit, though: the session watches `giant.yaml` / `giant.json` and
   re-emits the catalog
   (`catalog.invalidating` → `catalog.ready`); the TUI rebuilds its

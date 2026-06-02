@@ -10,28 +10,32 @@ on its current inputs doesn't run again until something changes.
 ## Marking a target as a test
 
 ```yaml
-- id: "go:test:auth"
+# internal/auth/giant.yaml
+- name: "test"
   inputs:
-    - "internal/auth/**/*.go"
+    - "**/*.go"
   outputs:
-    - "test-cache/auth.ok"
+    - "//test-cache/auth.ok"
   test: true
+  tags: ["lang=go", "kind=test"]
+  cwd: "//"
   command: |
     go test ./internal/auth && touch test-cache/auth.ok
 ```
 
-The `test: true` field is the only difference from a regular target.
-The output file (`test-cache/auth.ok`) is what gets cached - its
-existence means "the test passed for these inputs."
+The target's label is `//internal/auth:test`. The `test: true` field is
+the only thing that separates it from a regular target. The output file
+(`test-cache/auth.ok`) is what gets cached - its existence means "the
+test passed for these inputs."
 
 ## Selection
 
 ```bash
-giant test                       # all test targets
-giant test go:test:auth          # one specific test
-giant test 'go:test:*'           # all Go tests
-giant test --tag fast            # only tests tagged fast
-giant test --no-tag db           # all tests except DB-dependent
+giant test                          # all test targets
+giant test //internal/auth:test     # one specific test
+giant test //internal/...           # every test under internal/
+giant test --tag fast               # only tests tagged fast
+giant test --no-tag db              # all tests except DB-dependent
 giant test --affected --base main   # tests touched by changes since main
 ```
 
@@ -46,12 +50,12 @@ file) and `go test` is skipped.
 
 This is correct if and only if your test inputs cover everything the
 test reads. If `auth_test.go` reads a fixture file under
-`testdata/auth/`, list it:
+`testdata/auth/`, list it (paths are package-relative):
 
 ```yaml
 inputs:
-  - "internal/auth/**/*.go"
-  - "internal/auth/testdata/**/*"
+  - "**/*.go"
+  - "testdata/**/*"
 ```
 
 Otherwise an edit to the fixture won't invalidate the cache and you'll
@@ -74,23 +78,23 @@ non-zero when any test target failed.
 ## Test output
 
 By default each test target's stdout/stderr is prefixed with the
-target ID and streamed live:
+target label and streamed live:
 
 ```console
 $ giant test
-[go:test:auth] === RUN   TestPassword
-[go:test:auth] --- PASS: TestPassword (0.01s)
-[go:test:auth] PASS
-✓ BUILD   go:test:auth   124ms
+[//internal/auth:test] === RUN   TestPassword
+[//internal/auth:test] --- PASS: TestPassword (0.01s)
+[//internal/auth:test] PASS
+✓ BUILD   //internal/auth:test   124ms
 
-[go:test:store] === RUN   TestCRUD
-[go:test:store] --- FAIL: TestCRUD/Create (0.02s)
-[go:test:store]     store_test.go:42: expected ID, got empty string
-[go:test:store] FAIL
-✗ FAIL    go:test:store  78ms  exit code 1
+[//internal/store:test] === RUN   TestCRUD
+[//internal/store:test] --- FAIL: TestCRUD/Create (0.02s)
+[//internal/store:test]     store_test.go:42: expected ID, got empty string
+[//internal/store:test] FAIL
+✗ FAIL    //internal/store:test  78ms  exit code 1
 
   FAIL  1 built · 0 cached · 1 failed  in 220ms
-  failed: go:test:store
+  failed: //internal/store:test
 ```
 
 The renderer is the same one `giant build` uses - see [CLI
@@ -102,12 +106,18 @@ Test targets run in parallel by default. A failure in one doesn't stop
 others - the build runs to completion so you see every failure, not
 just the first. The exit code is non-zero if any test failed.
 
-To stop on first failure, run with `-j1` (sequential) and rely on the
-fact that Giant won't start a downstream target once an upstream
-fails:
+There's no hard fail-fast flag. `-j1` runs targets one at a time, and a
+failure stops anything *downstream* of it - but independent test targets
+still run, so you don't get true stop-on-first-failure:
 
 ```bash
 giant test -j1
+```
+
+Re-run just what broke last time with `failed-last`:
+
+```bash
+giant test failed-last
 ```
 
 ## Test-only deps
@@ -116,17 +126,23 @@ Sometimes a test needs a setup target that production doesn't (e.g. a
 test database container). Express it as a regular dep:
 
 ```yaml
-- id: "test:fixtures:db"
+# internal/store/giant.yaml
+- name: "fixtures-db"
   command: "tools/start-test-db.sh"
+  cwd: "//"
   cache: false
-
-- id: "go:test:store"
-  inputs: ["internal/store/**/*.go"]
-  outputs: ["test-cache/store.ok"]
-  deps: ["test:fixtures:db"]
   test: true
+
+- name: "test"
+  inputs: ["**/*.go"]
+  outputs: ["//test-cache/store.ok"]
+  deps: ["//internal/store:fixtures-db"]
+  test: true
+  cwd: "//"
   command: "go test ./internal/store && touch test-cache/store.ok"
 ```
 
-`giant test` runs both. `giant build` runs neither (both opt out via
-`test: true` on one and being only-test-relevant on the other).
+`giant test` runs both - `fixtures-db` is pulled in as a dep of `test`.
+`giant build` runs neither: both carry `test: true`, so the default build
+excludes them. (Drop `test: true` from `fixtures-db` and a plain
+`giant build` would start your test database - keep it on.)

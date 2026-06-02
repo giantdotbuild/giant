@@ -12,43 +12,55 @@ inputs → command → outputs
 A target is one instance of that shape. A build graph is a DAG of
 targets connected by inferred or explicit dependencies.
 
+Targets are declared in `giant.yaml` files spread across the tree - each
+directory's file declares that directory's package. The engine scans and
+merges them into one graph. See [Packages](/concepts/packages/) for how
+config is split and how labels are derived.
+
 ## Full target schema
 
 ```yaml
 targets:
-  - id: "go:bin:server"
+  - name: "server"
     inputs:
-      - "cmd/server/**/*.go"
-      - "internal/**/*.go"
-    outputs: ["bin/server"]
+      - "**/*.go"
+      - "//go.mod"
+      - "//go.sum"
+    outputs: ["//bin/server"]
     deps: []
+    cwd: "//"
     command: "go build -o bin/server ./cmd/server"
-    cwd: ""
     env:
       CGO_ENABLED: "0"
     test: false
-    tags: ["release", "linux"]
+    tags: ["lang=go", "kind=bin", "release", "linux"]
     cache: true
     remote_cache: true
     exists: "test -f bin/server"
     timeout_secs: 300
 ```
 
+This target lives in `cmd/server/giant.yaml`, so its label is
+`//cmd/server:server`.
+
 | Field | Meaning |
 |---|---|
-| `id` | Unique target name. Required. |
-| `inputs` | File globs whose matched files affect the cache key. |
+| `name` | Local name, unique within the package; the engine identity is the `//package:name` label. Required. |
+| `inputs` | File globs whose matched files affect the cache key. Package-relative; `//` anchors to the workspace root. |
 | `outputs` | Files the command produces, relative to `cwd`. Cached. |
 | `deps` | Explicit target dependencies (most are inferred - see below). |
-| `command` | Shell command. Required unless `exists` succeeds. |
-| `cwd` | Working directory, workspace-relative. Default: workspace root. |
+| `command` | Shell command, run from `cwd`. Required unless `exists` succeeds. `//` is **not** rewritten here - the shell sees it verbatim. Write paths relative to `cwd` (set `cwd: "//"` to act from the workspace root). |
+| `cwd` | Working directory. Default: the package directory. `//` anchors to the workspace root. |
 | `env` | Environment variables. Hashed into the cache key. |
 | `test` | Marks this as a test target. `giant test` runs only these. |
-| `tags` | Free-form labels for `--tag` / `--no-tag` filtering. |
+| `tags` | Free-form labels (`lang=go`, `kind=bin`, …) for `--tag` / `--no-tag` filtering. |
 | `cache` | Set to `false` to never cache this target's outputs. |
 | `remote_cache` | Set to `false` to exclude from remote cache uploads. |
 | `exists` | External check; if it succeeds, the command is skipped. |
 | `timeout_secs` | Seconds before the command is killed. Default: unlimited. |
+
+Language and kind are not part of the identity - they live in `tags:`
+as `lang=go`, `kind=bin`, and so on. The label is purely path-derived.
 
 ## Inputs
 
@@ -58,13 +70,15 @@ Two input shapes:
 
 ```yaml
 inputs:
-  - "src/**/*.go"
-  - "go.mod"
-  - "go.sum"
+  - "src/**/*.rs"   # this package's own source
+  - "//Cargo.lock"  # the root lockfile, anchored to the workspace
 ```
 
 Standard glob semantics. `**` matches directories recursively; `*` does
-not cross `/`. Patterns are matched against workspace-relative paths.
+not cross `/`. Paths are package-relative by default - `src/**/*.rs`
+resolves under the directory holding this `giant.yaml`. A leading `//`
+anchors to the workspace root, so a crate package can reach the root
+lockfile without walking up with `../`.
 
 Every matched file's content hash contributes to the cache key.
 
@@ -113,9 +127,10 @@ side effects (e.g. linting, a `docker push`). Their cache hit means
 "the inputs and env are unchanged since the last successful run."
 
 ```yaml
-- id: "lint:go"
+- name: "lint"
   inputs: ["**/*.go"]
   outputs: []
+  tags: ["lang=go", "kind=lint"]
   command: "golangci-lint run ./..."
 ```
 
@@ -130,16 +145,21 @@ If target B's `inputs:` glob matches a file produced by target A's
 by walking the cross-product.
 
 ```yaml
-- id: "proto:gen"
-  inputs: ["api/**/*.proto"]
-  outputs: ["gen/api.pb.go"]
+# proto/giant.yaml
+- name: "gen"
+  inputs: ["**/*.proto"]
+  outputs: ["//gen/api.pb.go"]
+  tags: ["kind=gen"]
   command: "..."
 
-- id: "go:bin:server"
-  inputs: ["cmd/server/**/*.go", "gen/**/*.go"]
-  outputs: ["bin/server"]
+# cmd/server/giant.yaml
+- name: "server"
+  inputs: ["**/*.go", "//gen/**/*.go"]
+  outputs: ["//bin/server"]
+  tags: ["lang=go", "kind=bin"]
+  cwd: "//"
   command: "go build -o bin/server ./cmd/server"
-  # `deps: ["proto:gen"]` is inferred - gen/api.pb.go matches gen/**/*.go.
+  # `deps: ["//proto:gen"]` is inferred - //gen/api.pb.go matches //gen/**/*.go.
 ```
 
 ### Explicit
@@ -149,11 +169,11 @@ because the upstream target produces no file the downstream target
 reads:
 
 ```yaml
-- id: "deploy:production"
+- name: "production"
   inputs: []
   outputs: []
   cache: false
-  deps: ["docker:api", "docker:worker"]
+  deps: ["//docker:api", "//docker:worker"]
   command: "kubectl apply -f k8s/"
 ```
 
@@ -163,10 +183,11 @@ Some commands are expensive to dry-run but cheap to check. The
 canonical example is Docker:
 
 ```yaml
-- id: "docker:api"
+- name: "api"
   inputs: ["Dockerfile", "src/**/*"]
   outputs: []
   cache: false
+  tags: ["kind=image"]
   exists: "docker image inspect example/api:$GIANT_CACHE_KEY >/dev/null 2>&1"
   command: "docker build -t example/api:$GIANT_CACHE_KEY ."
 ```
@@ -185,12 +206,13 @@ Add `test: true` and the target only runs under `giant test`. The
 default `giant build` excludes them.
 
 ```yaml
-- id: "go:test:auth"
-  inputs: ["internal/auth/**/*.go"]
+- name: "auth"
+  inputs: ["**/*.go"]
   outputs: ["test-cache/auth.ok"]
   test: true
-  command: "go test ./internal/auth && touch test-cache/auth.ok"
+  tags: ["lang=go", "kind=test"]
+  command: "go test . && touch test-cache/auth.ok"
 ```
 
 Tests are normal targets - cached the same way as build targets,
-selected via the same language, run in parallel.
+selected via the same patterns, run in parallel.

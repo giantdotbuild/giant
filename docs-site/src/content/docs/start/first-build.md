@@ -15,7 +15,7 @@ cache:
   dir: ~/.cache/giant
 
 targets:
-  - id: "demo:greet"
+  - name: "demo"
     inputs: ["name.txt"]
     outputs: ["greeting.txt"]
     command: "echo \"hello, $(cat name.txt)\" > greeting.txt"
@@ -28,8 +28,15 @@ Three sections:
 - **`cache`** points to the local cache directory. `~/.cache/giant` is
   the default; you can override per-workspace.
 - **`targets`** is the list of things Giant knows how to build. Each
-  target has an `id`, a list of `inputs`, a list of `outputs`, and a
+  target has a `name`, a list of `inputs`, a list of `outputs`, and a
   `command`.
+
+This single file is the workspace root, so its targets live in the root
+package and are addressed as `//:name` - here, `//:demo`. That's enough
+for a small project. As the repo grows you split config across
+[packages](/concepts/packages/) (one `giant.yaml` per directory), and a
+large tree's package files are usually
+[generated](/guides/generating-config/) rather than hand-written.
 
 That's it for the minimum config. Everything else - tasks, remote
 cache, tags - is optional.
@@ -37,22 +44,25 @@ cache, tags - is optional.
 ## Anatomy of a target
 
 ```yaml
-- id: "demo:greet"
+- name: "demo"
   inputs: ["name.txt"]
   outputs: ["greeting.txt"]
   command: "echo \"hello, $(cat name.txt)\" > greeting.txt"
 ```
 
-- **`id`** is a unique name. The `:` is just a convention; nothing
-  enforces it. By convention, the parts read `<language>:<kind>:<name>`
-  - `go:bin:server`, `rust:test:auth`. Giant's selection language treats
-  `:` as a segment separator so `go:*` matches one segment.
-- **`inputs`** are file globs, relative to the workspace root. Anything
-  they match contributes to the cache key.
-- **`outputs`** are files the command produces. Relative to the
-  target's `cwd` (which defaults to the workspace root). Giant
-  fingerprints them after the build and stores them in the
-  content-addressed cache.
+- **`name`** is the target's local name, unique within its package. The
+  engine identity is the **label** `//<package>:<name>` - the package is
+  the directory of this `giant.yaml`, so a root-file target named `demo`
+  is `//:demo`. Selection matches against the full label (see the
+  [selection language](/concepts/selection/)).
+- **`inputs`** are file globs, **package-relative** by default. A bare
+  glob like `src/**/*.go` resolves under the package directory; prefix
+  `//` to reach the workspace root (`//Cargo.lock`). Anything they match
+  contributes to the cache key.
+- **`outputs`** are files the command produces. Package-relative unless
+  `//`-prefixed, and resolved against the target's `cwd` (which defaults
+  to the package directory). Giant fingerprints them after the build and
+  stores them in the content-addressed cache.
 - **`command`** is a shell command. Giant runs it via `sh -c` in the
   target's `cwd`.
 
@@ -60,13 +70,15 @@ cache, tags - is optional.
 
 ```console
 $ giant build
-✓ BUILD   demo:greet   4ms
+✓ BUILD   //:demo   4ms
   OK    1 built · 0 cached · 0 failed  in 4ms
 ```
 
 What happened, in order:
 
-1. **Config load.** Parse `giant.yaml`, validate.
+1. **Config load.** Scan the tree for `giant.yaml` files, merge them into
+   one graph (here just the root file), resolve package-relative paths,
+   validate.
 2. **Graph build.** One target, no dependencies.
 3. **Cache key compute.** SHA-256 over: the command, the cwd, the
    content hash of `name.txt`, the env vars listed under `built_in_env`,
@@ -82,7 +94,7 @@ What happened, in order:
 
 ```console
 $ giant build
-✓ CACHE   demo:greet   1ms
+✓ CACHE   //:demo   1ms
   OK    0 built · 1 cached · 0 failed  in 1ms
 ```
 
@@ -100,7 +112,7 @@ the in-process work is sub-millisecond per target.
 ```console
 $ echo galaxy > name.txt
 $ giant build
-✓ BUILD   demo:greet   3ms
+✓ BUILD   //:demo   3ms
 ```
 
 - `name.txt`'s content hash changed (its bytes are different).

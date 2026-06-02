@@ -52,17 +52,22 @@ workspace:
   name: my-monorepo
 
 targets:
-  - id: "go:bin:server"
+  - name: "server"
     inputs: ["cmd/server/**/*.go"]
-    outputs: ["bin/server"]
+    outputs: ["//bin/server"]
+    cwd: "//"
     command: "go build -o bin/server ./cmd/server"
 
 tasks:
   serve:
     command: "./bin/server"
     description: "Run the server locally"
-    deps: ["go:bin:server"]
+    deps: ["//:server"]
 ```
+
+`deps:` reference targets by their **label** - here `//:server`, the
+`server` target in the root package. In a split repo you'd write the
+full path, e.g. `deps: ["//crates/giant:giant"]`.
 
 Then:
 
@@ -85,7 +90,7 @@ tasks:
     command: "..."              # shell command or #! script body; optional
                                 #   if `services:` is set (foreground supervise)
     description: "..."          # optional; shown in `giant task list`
-    deps: ["..."]               # target IDs to build before running
+    deps: ["..."]               # target labels (//pkg:name) to build before running
     needs: ["..."]              # other task names to run before command
     services: ["..."]           # service names to start before, stop after
     finally: ["..."]            # task names to run after command (always)
@@ -156,7 +161,7 @@ services:
   <name>:
     command: "..."              # required; shell command (the daemon)
     description: "..."          # optional
-    deps: ["..."]               # target IDs to build before starting
+    deps: ["..."]               # target labels (//pkg:name) to build before starting
     needs: ["..."]              # other services to bring up (ready) first
     ready:                      # optional readiness probe
       command: "..."            # shell snippet; exit 0 = ready
@@ -219,7 +224,7 @@ policies, no REST control. For those, use
 ## Lifecycle of one task
 
 ```
-1. build deps          → giant build <ids>
+1. build deps          → giant build <labels>
 2. start services      → dependency-ordered, each gated on its `ready` probe
 3. run needs           → sequential, declared order
 4. run command         → the task's own command (or supervise, if absent)
@@ -268,7 +273,7 @@ services:
 tasks:
   run-test:
     command: "go test ./..."
-    deps: ["go:bin:server"]            # build first
+    deps: ["//:server"]                # build first
     services: ["db"]                   # spin up DB
     needs: ["migrate"]                 # run schema migrations first
     finally: ["wipe-test-data"]        # always clean up test rows
@@ -415,7 +420,7 @@ at 50 lines per target):
 $ giant task broken
 · building 1 dep(s)
 
-✗ fail:bad
+✗ //:bad
   going to fail
   this line too
   ✗ 1 failed · 0 built · 0 cached  in 2ms
@@ -449,14 +454,14 @@ giant-task --completions nushell >> ~/.config/nushell/completions.nu
 Dynamic completion of task names works at TAB time - `giant-task`
 reads the nearest `giant.yaml` and returns the matching tasks,
 including their descriptions. Same idea for `giant` itself: target
-IDs from `giant.yaml`'s `targets:`.
+labels from the merged `giant.yaml` package files.
 
 ## How it composes with the engine
 
 The `giant-task` binary doesn't reach into Giant's internals. The
 contract:
 
-- **Build deps:** spawned as `giant build <ids…> --events ndjson`,
+- **Build deps:** spawned as `giant build <labels…> --events ndjson`,
   the output parsed event-by-event so the porcelain can render a
   compact summary instead of streaming everything.
 - **Config schema:** parsed by `giant-task` directly with its own

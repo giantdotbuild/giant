@@ -45,7 +45,7 @@ sccache, or any Bazel-HTTP-cache-compatible server) and point Giant at
 it:
 
 ```yaml
-# giant.yaml
+# giant.yaml (workspace root - remote lives in the root config only)
 remote:
   enabled: true
   url: "https://cache.example.com"
@@ -63,8 +63,8 @@ offline without a remote cache).
 giant affected --base origin/main
 ```
 
-This prints the IDs of targets that would rebuild, one per line, without
-actually running anything. Useful for:
+This prints the labels of targets that would rebuild, one per line,
+without actually running anything. Useful for:
 
 - Driving downstream jobs in matrix CI.
 - Sanity-checking what a PR touches.
@@ -72,7 +72,7 @@ actually running anything. Useful for:
 
 ```bash
 # Build only Go binaries that changed, no tests
-giant affected --base origin/main 'go:bin:*' --no-tag flaky | xargs -r giant build
+giant affected --base origin/main --tag kind=bin --no-tag flaky | xargs -r giant build
 ```
 
 ## Sharded test runs
@@ -85,7 +85,7 @@ strategy:
     shard: [0, 1, 2, 3]
 steps:
   - run: |
-      tests=$(giant affected --base origin/main 'go:test:*' | awk "NR%4==${{ matrix.shard }}")
+      tests=$(giant affected --base origin/main --tag kind=test | awk "NR%4==${{ matrix.shard }}")
       [ -z "$tests" ] && exit 0
       echo "$tests" | xargs giant test --quiet
 ```
@@ -119,10 +119,10 @@ so the CI logs read cleanly.
 
 ```console
 $ giant build --quiet
-✗ FAIL    go:bin:badthing  120ms  exit code 1
+✗ FAIL    //cmd/badthing:badthing  120ms  exit code 1
 
   FAIL  3 built · 12 cached · 1 failed  in 1.8s
-  failed: go:bin:badthing
+  failed: //cmd/badthing:badthing
 $ echo $?
 1
 ```

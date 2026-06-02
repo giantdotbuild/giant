@@ -17,7 +17,7 @@ is `~/.cache/giant`; you can override per-workspace via `cache.dir`.
 ├── cas/                 # content-addressed store - output bytes
 │   └── 9f/
 │       └── 9f3c8d7e2a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b
-├── log/                 # per-target captured log blobs
+├── log/                 # reserved; captured logs currently live in cas/
 └── tmp/                 # transient write-then-rename staging
 ```
 
@@ -31,7 +31,7 @@ are `0o600`. Single-user assumption.
 
 ## `version`
 
-A single integer line - the bytes `1\n`, not a quoted JSON string.
+A single integer line - the bytes `1\n` (no JSON quoting).
 The cache layout schema version. If a binary expects a different
 version, it errors instead of silently using the wrong shape.
 
@@ -43,7 +43,7 @@ both the filename and the lookup index:
 ```jsonc
 {
   "schema": 1,
-  "target_id": "go:bin:server",
+  "target_id": "//src/go/server:server",
   "cache_key": "3a7f9c...",
   "command": "go build -o bin/server ./cmd/server",
   "cwd": "",
@@ -106,9 +106,13 @@ See `cache.max_size_gb` in [giant.yaml reference](/reference/config/).
 
 ## Sharing across workspaces
 
-Multiple workspaces can share one `cache.dir` - they're isolated by
-the workspace name being part of every cache key. CAS blobs naturally
-deduplicate across workspaces (same bytes = same hash = same path).
+Multiple workspaces can share one `cache.dir`. The cache key is purely
+content-addressed - it covers the command, cwd, environment, inputs, and
+dependency output hashes, but **not** the workspace name or target label.
+So two workspaces that build a target with an identical recipe land on the
+same key and share the entry; that's intended reuse (same recipe =
+same output). CAS blobs deduplicate the same way (same bytes = same hash =
+same path).
 
 Eviction works fine across multi-workspace caches, but doesn't
 fair-share. If one workspace dominates, it'll evict the other's older
@@ -116,7 +120,7 @@ entries. Document this for shared environments.
 
 ## Log capture and replay
 
-Cache hits would otherwise be silent - you'd see `CACHE  go:bin:server`
+Cache hits would otherwise be silent - you'd see `CACHE  //src/go/server:server`
 and nothing else, even if the original build emitted useful diagnostic
 output. To fix that, Giant captures each target's stdout and stderr
 into CAS blobs alongside its outputs. On a hit, those blobs are read
@@ -142,7 +146,7 @@ On a cache hit (local *or* remote), the executor reads the blobs from
 local CAS and emits one `target.log` event per line. Renderer output
 on a hit therefore matches a fresh build's output, modulo the
 `CACHE`/`BUILD` verb. Porcelains that listen on `target.log` get the
-replay for free.
+replay automatically.
 
 For a remote hit, the log blobs are fetched into local CAS alongside
 the output blobs, so the next local hit replays without touching the

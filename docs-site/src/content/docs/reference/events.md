@@ -49,13 +49,13 @@ to signal it will accept commands.
 
 ```jsonc
 { "t": "target.described",
-  "id": "go:bin:server",
+  "id": "//src/go/server:server",
   "command": "go build -o bin/server ./cmd/server",
   "tags": ["go"],          // omitted when empty
   "test": false,           // omitted when false
   "inputs": ["cmd/server/**/*.go"],
-  "outputs": ["bin/server"],
-  "deps": ["proto:gen"] }
+  "outputs": ["//bin/server"],
+  "deps": ["//proto:gen"] }
 
 { "t": "engine.ready" }
 ```
@@ -96,8 +96,8 @@ catalog and emits `command.error` instead of `catalog.ready`.
 ```jsonc
 { "t": "build.started",
   "id": "b_4f9c",
-  "selection": ["go:bin:*"],
-  "target_ids": ["go:bin:server", "go:bin:client"],
+  "selection": ["//src/go/..."],
+  "target_ids": ["//src/go/server:server", "//src/go/client:client"],
   "parallelism": 16 }
 
 { "t": "build.finished",
@@ -112,25 +112,25 @@ catalog and emits `command.error` instead of `catalog.ready`.
 ```jsonc
 { "t": "target.queued",
   "build": "b_4f9c",
-  "id": "go:bin:server",
-  "deps": ["proto:gen"] }
+  "id": "//src/go/server:server",
+  "deps": ["//proto:gen"] }
 
 { "t": "target.started",
   "build": "b_4f9c",
-  "id": "go:bin:server",
+  "id": "//src/go/server:server",
   "cache_key": "3a7f9c...",
   "command": "go build -o bin/server ./cmd/server" }
 
 { "t": "target.log",
   "build": "b_4f9c",
-  "id": "go:bin:server",
+  "id": "//src/go/server:server",
   "stream": "stdout",       // or "stderr"
   "line": "go: downloading github.com/...",
   "truncated": false }      // present and true if the line was cut short
 
 { "t": "target.finished",
   "build": "b_4f9c",
-  "id": "go:bin:server",
+  "id": "//src/go/server:server",
   "result": "built",        // built | cache_hit | remote_cache_hit | external_cache_hit | skipped | failed
   "duration_ms": 1240,
   "exit_code": 0,
@@ -141,12 +141,12 @@ catalog and emits `command.error` instead of `catalog.ready`.
 ### Watch
 
 ```jsonc
-{ "t": "watch.started", "filter": "go:**" }
+{ "t": "watch.started", "filter": "//src/go/..." }
 { "t": "watch.batch",
   "paths": ["src/main.go"],
   "more": 0,
   "config_changed": false }
-{ "t": "watch.affected", "target_ids": ["go:bin:server"] }
+{ "t": "watch.affected", "target_ids": ["//src/go/server:server"] }
 { "t": "watch.state", "state": "building" }    // idle | building | building_with_pending | reloading_config | config_error
 { "t": "watch.stopped" }
 ```
@@ -177,7 +177,7 @@ re-emits whenever the affected set changes.
 ```jsonc
 { "t": "affected.changed",
   "base": "main",
-  "target_ids": ["go:bin:server", "rust:lib:core"] }
+  "target_ids": ["//src/go/server:server", "//crates/core:core"] }
 
 { "t": "affected.error",
   "base": "origin/missing",
@@ -197,7 +197,7 @@ events are never dropped). After a drop, you'll see:
 { "t": "protocol.dropped",
   "count": 4837,
   "build": "b_4f9c",
-  "target": "go:bin:server" }
+  "target": "//src/go/server:server" }
 ```
 
 ## Versioning
@@ -229,12 +229,12 @@ Command shapes (full list in `crates/giant/src/commands.rs`):
 ```jsonc
 { "c": "build",
   "command_id": "c_1",
-  "targets": ["go:bin:server"],
+  "targets": ["//src/go/server:server"],
   "fresh": false }
 
 { "c": "watch.start",
   "command_id": "c_2",
-  "targets": ["go:bin:server"] }
+  "targets": ["//src/go/server:server"] }
 
 { "c": "watch.stop",
   "command_id": "c_3" }
@@ -252,7 +252,7 @@ Command shapes (full list in `crates/giant/src/commands.rs`):
 
 { "c": "watch.subscribe",
   "command_id": "c_7",
-  "targets": ["proto:gen"],   // watch these + their transitive deps
+  "targets": ["//proto:gen"],   // watch these + their transitive deps
   "globs": ["proto/**/*.proto"] }   // plus any matching path
 
 { "c": "watch.unsubscribe",

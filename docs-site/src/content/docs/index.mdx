@@ -19,7 +19,7 @@ import giantGarden from '../../assets/giant-garden.png';
     <p class="hero-tag">
       Giant tracks dependencies across language boundaries, builds in parallel,
       and caches outputs locally and remotely. Tiny core, language-agnostic engine,
-      one config file.
+      one config format.
     </p>
     <div class="cta-row">
       <a class="cta cta-primary" href="/start/quickstart/">Get started →</a>
@@ -40,12 +40,12 @@ import giantGarden from '../../assets/giant-garden.png';
     <span></span><span></span><span></span>
   </div>
   <pre set:html={`<code><span class="prompt">$</span> giant build
-<span class="ok">✓ BUILD</span>    proto:api                <span class="dim">340ms</span>
-<span class="cache">✓ CACHE</span>    go:lib:auth                <span class="dim">2ms</span>
-<span class="remote">↓ REMOTE</span>   rust:lib:core            <span class="dim">120ms</span>
-<span class="ok">✓ BUILD</span>    go:bin:server           <span class="dim">1.24s</span>
+<span class="ok">✓ BUILD</span>    //proto:gen              <span class="dim">340ms</span>
+<span class="cache">✓ CACHE</span>    //src/auth:auth            <span class="dim">2ms</span>
+<span class="remote">↓ REMOTE</span>   //src/core:core          <span class="dim">120ms</span>
+<span class="ok">✓ BUILD</span>    //cmd/server:server     <span class="dim">1.24s</span>
 
-  <span class="ok">OK</span>    1 built · 2 cached · 1 remote  in <span class="dim">1.27s</span></code>`} />
+  <span class="ok">OK</span>    2 built · 1 cached · 1 remote  in <span class="dim">1.27s</span></code>`} />
 </section>
 
 <section class="pillars">
@@ -53,7 +53,7 @@ import giantGarden from '../../assets/giant-garden.png';
     <h3>Language-agnostic</h3>
     <p>
       The engine knows nothing about Go, Rust, or Docker. Targets are just
-      <code>inputs → command → outputs</code> in one config file.
+      <code>inputs → command → outputs</code> in plain <code>giant.yaml</code> files.
     </p>
   </div>
   <div class="pillar">
@@ -107,8 +107,8 @@ import giantGarden from '../../assets/giant-garden.png';
     <p>Continuous rebuilds with a debouncer that honors your selection patterns.</p>
   </div>
   <div class="feature">
-    <h4>Globs + exclusion</h4>
-    <p><code>giant build 'go:**' '!go:test:*'</code> - same language across build, test, watch, affected.</p>
+    <h4>Path labels + exclusion</h4>
+    <p><code>giant build '//src/...' '!//src/legacy/...'</code> - same language across build, test, watch, affected.</p>
   </div>
   <div class="feature">
     <h4>Tags</h4>

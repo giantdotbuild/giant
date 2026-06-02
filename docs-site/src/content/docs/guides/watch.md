@@ -3,7 +3,7 @@ title: Watch mode
 description: Continuous rebuilds with a debouncer that respects your selection.
 ---
 
-Watch is the `--watch` flag on `build` and `test`, not a separate
+Watch is the `--watch` flag on `build` and `test`; there is no separate
 subcommand. It runs an initial build, then keeps rebuilding the affected
 targets as files change. It's the everyday development loop.
 
@@ -29,8 +29,8 @@ selection and every other flag.
 The same selection language `giant build` uses applies:
 
 ```bash
-giant build go:bin:server --watch        # one binary
-giant build 'go:**' '!go:test:*' --watch # everything Go, no tests
+giant build //cmd/server:server --watch  # one binary
+giant build //src/... --tag lang=go --watch  # everything Go under src/
 giant build --tag dev --watch            # dev-tagged targets
 ```
 
@@ -89,9 +89,9 @@ debouncer, same affected-detection.
 Mix with patterns and tags to scope further:
 
 ```bash
-giant test go:test:auth --watch          # only auth tests
+giant test //internal/auth:test --watch  # only auth tests
 giant test --tag fast --watch            # only fast-tagged tests
-giant test go:test:* '!go:test:integration:*' --watch
+giant test //internal/... --no-tag integration --watch
 ```
 
 If you want everything - tests AND production targets - together:
@@ -103,8 +103,9 @@ giant build --with-tests --watch
 ## The graph is fixed for the watch
 
 Watch prepares the graph from config once, then rebuilds the affected
-subset on the same graph each cycle. Editing `giant.yaml` mid-watch is
-**not** picked up - restart the watch to reload it. (The long-lived
+subset on the same graph each cycle. Editing a `giant.yaml` (any
+package's) mid-watch is **not** picked up - restart the watch to reload
+it. (The long-lived
 engine session reloads config on its own; the one-shot `--watch` keeps
 it simple.)
 

@@ -22,18 +22,23 @@ reproducibility):
    built-ins Giant always sets: `GIANT_TARGET_TRIPLE` and
    `GIANT_VERSION`.
 5. **File inputs** - for every file matched by an input glob, its
-   workspace-relative path and content hash. Sorted by path.
+   resolved workspace-relative path and content hash. Sorted by path.
+   A package-relative input (`src/foo.rs`) is resolved against the
+   package directory before hashing, so the hash always sees the same
+   workspace-relative path regardless of where the glob was written.
 6. **Dep outputs** - for each dependency target, its
    `outputs_content_hash` (the hash-of-hashes of its outputs), NOT its
-   cache key. Sorted by dep ID. This is the early-cutoff property (see
-   below).
+   cache key. Sorted by hash so dep order in your YAML never shifts the
+   key. This is the early-cutoff property (see below). (`giant explain`
+   displays this section sorted by dep label for readability - the order
+   in the hash itself is by hash value.)
 
 `outputs:` are NOT in the cache key. The recipe determines what
 gets built; the recipe's hash determines if we've seen it before.
 
-Neither the workspace name nor the target ID is hashed. Two targets
+Neither the workspace name nor the target label is hashed. Two targets
 with an identical command, inputs, env, and deps produce the same
-cache key - the ID does not disambiguate them. If you want two
+cache key - the label does not disambiguate them. If you want two
 recipes to cache separately, something in the recipe itself has to
 differ.
 
@@ -52,24 +57,28 @@ differ.
 ## Inspecting a key
 
 ```console
-$ giant explain go:bin:server
-target:      go:bin:server
-key:         3a7f9c4e8b2d1f5e6a8c9d7e4f3b2a1c5d6e9f8a7b4c3d2e1f5a6b7c8d9e
-cwd:         <workspace root>
+$ giant explain //cmd/server:server
+target:      //cmd/server:server
+cache key:   3a7f9c4e8b2d1f5e6a8c9d7e4f3b2a1c5d6e9f8a7b4c3d2e1f5a6b7c8d9e
+cache state: hit
+
+command:
+  go build -o bin/server ./cmd/server
+cwd:         //
 
 env (3):
   CGO_ENABLED=0
   GIANT_TARGET_TRIPLE=x86_64-unknown-linux-gnu
   GIANT_VERSION=0.1.0
 
-file_inputs (12):
+file inputs (12):
   cmd/server/main.go        sha256:9f3c8d...
   internal/auth/auth.go     sha256:7e2a4b...
   ...
 
-dep_outputs (2):
-  proto:gen          sha256:a1b2c3...
-  rust:lib:core      sha256:d4e5f6...
+deps (2):
+  //proto:gen        sha256:a1b2c3...
+  //src/core:core    sha256:d4e5f6...
 ```
 
 `giant explain` is the first thing to reach for when "why did this
@@ -82,10 +91,10 @@ keys - same recipe, different arch flag; same target before/after a
 refactor - pass `--diff <other-target>`:
 
 ```console
-$ giant explain go:bin:server --diff go:bin:server-debug
+$ giant explain //cmd/server:server --diff //cmd/server:server-debug
 comparing:
-  -  go:bin:server         (3a7f9c4e…)
-  +  go:bin:server-debug   (8d2b1f4a…)
+  -  //cmd/server:server         (3a7f9c4e…)
+  +  //cmd/server:server-debug   (8d2b1f4a…)
 
 ── command ──
   - go build -o bin/server ./cmd/server
@@ -106,15 +115,15 @@ invalidate downstream.
 
 Scenario:
 
-- Target `proto:gen` depends on `api/foo.proto`.
-- Edit `api/foo.proto` (cosmetic change - whitespace in a comment).
-- `proto:gen`'s cache key shifts (input content changed) → rebuild.
-- But `proto:gen` produces byte-identical output (`gen/foo.pb.go` is
+- Target `//proto:gen` depends on `proto/foo.proto`.
+- Edit `proto/foo.proto` (cosmetic change - whitespace in a comment).
+- `//proto:gen`'s cache key shifts (input content changed) → rebuild.
+- But `//proto:gen` produces byte-identical output (`gen/foo.pb.go` is
   the same).
-- Downstream `go:bin:server` consumes `gen/foo.pb.go`.
+- Downstream `//cmd/server:server` consumes `gen/foo.pb.go`.
 
-`server`'s cache key contribution from `proto:gen` is
-`outputs_content_hash`, NOT `proto:gen`'s cache key. Since the outputs
+`server`'s cache key contribution from `//proto:gen` is
+`outputs_content_hash`, NOT `//proto:gen`'s cache key. Since the outputs
 are byte-identical, the hash-of-hashes is unchanged. `server`
 cache-hits, never re-runs.
 
@@ -128,8 +137,8 @@ compiler, Node's interpreter, etc.), put it in `env:` so the cache key
 reflects it:
 
 ```yaml
-- id: "go:bin:server"
-  command: "go build -o bin/server ./cmd/server"
+- name: "server"
+  command: "go build -o //bin/server ."
   env:
     GOVERSION: "1.23.4"   # bump this when you bump Go
 ```

@@ -29,8 +29,12 @@ feature.
 
 ## Configure
 
+Remote cache settings live in the root `giant.yaml` only - a
+workspace-global setting that a nested [package](/concepts/packages/) can't
+carry.
+
 ```yaml
-# giant.yaml
+# giant.yaml (workspace root)
 remote:
   enabled: true
   url: "https://cache.example.com"
@@ -111,7 +115,8 @@ If two developers' workspaces produce the same cache key, they'll
 share the cached outputs. Giant doesn't ship any sandboxing, so make
 sure your build commands are reproducible:
 
-- Pin toolchain versions (set `GOVERSION` in `env:`).
+- Pin toolchain versions so every machine keys the same - see
+  [Pinning toolchains](/guides/toolchains/).
 - Avoid embedding absolute paths in outputs.
 - Don't depend on the user's `$HOME` or `$USER` unless they're listed
   in `env:`.
@@ -123,7 +128,8 @@ good.
 ## Disabling remote uploads per target
 
 ```yaml
-- id: "go:bin:server"
+# cmd/server/giant.yaml  →  //cmd/server:server
+- name: "server"
   remote_cache: false      # local cache only
 ```
 
@@ -138,15 +144,14 @@ Useful when:
 ## Inspecting cache behaviour
 
 ```console
-$ giant build go:bin:server
-↓ REMOTE  go:bin:server  120ms       # downloaded from remote
-$ giant build go:bin:server
-✓ CACHE   go:bin:server    2ms       # local cache hit
+$ giant build //cmd/server:server
+↓ REMOTE  //cmd/server:server  120ms       # downloaded from remote
+$ giant build //cmd/server:server
+✓ CACHE   //cmd/server:server    2ms       # local cache hit
 ```
 
 The verb tells you which layer answered.
 
-`giant explain` also shows whether a target is configured for remote
-cache. The stdout/stderr of the cached invocation is replayed
-automatically on any cache hit (local or remote) - see
+The stdout/stderr of the cached invocation is replayed automatically on
+any cache hit (local or remote) - see
 [Log capture and replay](/reference/cache-layout/#log-capture-and-replay).

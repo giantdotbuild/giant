@@ -17,35 +17,52 @@ existing cache machinery does the rest.
 
 ## A toolchain is a target
 
-A toolchain target declares an input that changes when the toolchain
+A toolchain target is a normal, statically-declared target: it lives in
+a `giant.yaml` like everything else (hand-written, or generated offline
+and checked in). It declares an input that changes when the toolchain
 changes, runs a command that writes a content-derived identity, and
-carries the `toolchain` tag:
+carries the `toolchain` tag. The dogfood keeps one at the workspace
+root, `//:devenv`, but the [package](/concepts/packages/) is up to you -
+`//toolchain:rust` works just as well. Its label is what build targets
+`deps:` on:
 
 ```yaml
+# giant.yaml (workspace root)
 targets:
-  - id: "//toolchain/rust"
-    inputs: ["devenv.lock", "devenv.nix"]
+  - name: "rust"               #  →  //:rust
+    inputs: ["//devenv.lock", "//devenv.nix"]
+    cwd: "//"
     command: "command -v rustc | xargs readlink -f > .giant/toolchains/rust.id"
-    outputs: [".giant/toolchains/rust.id"]
+    outputs: ["//.giant/toolchains/rust.id"]
     tags: ["toolchain"]
-
-  - id: "bin:server"
-    inputs: ["src/**/*.rs"]
-    command: "cargo build --release && install -m755 target/release/server bin/server"
-    outputs: ["bin/server"]
-    deps: ["//toolchain/rust"]
 ```
 
-`bin:server`'s key folds in `//toolchain/rust`'s output hash. Change the
-Rust toolchain and the id file's content changes, which re-keys
-`bin:server`. The id file lives under `.giant/` because it's generated
-state you never commit - only its content hash matters.
+```yaml
+# crates/server/giant.yaml
+targets:
+  - name: "server"             #  →  //crates/server:server
+    inputs: ["src/**/*.rs"]
+    cwd: "//"
+    command: "cargo build -p server --release && install -m755 target/release/server bin/server"
+    outputs: ["//bin/server"]
+    deps: ["//:rust"]
+```
+
+`//crates/server:server`'s key folds in `//:rust`'s output hash. Change
+the Rust toolchain and the id file's content changes, which re-keys the
+build target. The id file lives under `.giant/` because it's generated
+state you never commit - only its content hash matters. The target runs
+with `cwd: "//"` so the bare `.giant/...` it writes and the `//.giant/...`
+it declares as an output both resolve to the same place at the workspace
+root, regardless of which package the target lives in. (`//` is rewritten
+in `inputs`/`outputs`/`cwd`, but **not** inside `command` - so the command
+writes a path relative to its `cwd`, not a `//`-anchored one.)
 
 This is the same shape Bazel and Buck2 use: the toolchain is a node in
 the dependency graph, so a toolchain change re-keys exactly the targets
-that depend on it. A Node bump moves `//toolchain/node`'s id and leaves
-`//toolchain/rust`'s untouched, so your Rust targets stay cached. You
-get per-ecosystem scoping for free.
+that depend on it. A Node bump moves `//:node`'s id and leaves `//:rust`
+untouched, so your Rust targets stay cached. You get per-ecosystem
+scoping for free.
 
 ## With devenv
 
@@ -53,10 +70,12 @@ If you pin your tools with [devenv](https://devenv.sh) (or plain Nix),
 the cleanest identity is the resolved store path of the executable:
 
 ```yaml
-- id: "//toolchain/go"
-  inputs: ["devenv.lock", "devenv.nix"]
+# giant.yaml (workspace root)
+- name: "go"                   #  →  //:go
+  inputs: ["//devenv.lock", "//devenv.nix"]
+  cwd: "//"
   command: "command -v go | xargs readlink -f > .giant/toolchains/go.id"
-  outputs: [".giant/toolchains/go.id"]
+  outputs: ["//.giant/toolchains/go.id"]
   tags: ["toolchain"]
 ```
 
@@ -81,27 +100,32 @@ safe direction. If you want an exact-content identity, use the
 ### One toolchain target per tool
 
 Write one toolchain target per tool you pin, each carrying the
-`toolchain` tag, then stamp `deps: ["//toolchain/<tool>"]` on the build
-targets in that ecosystem:
+`toolchain` tag, then stamp `deps: ["//:<tool>"]` on the build targets in
+that ecosystem:
 
 ```yaml
+# giant.yaml (workspace root)
 targets:
-  - id: "//toolchain/go"
-    inputs: ["devenv.lock", "devenv.nix"]
+  - name: "go"                 #  →  //:go
+    inputs: ["//devenv.lock", "//devenv.nix"]
+    cwd: "//"
     command: "command -v go | xargs readlink -f > .giant/toolchains/go.id"
-    outputs: [".giant/toolchains/go.id"]
+    outputs: ["//.giant/toolchains/go.id"]
     tags: ["toolchain"]
 
-  - id: "//toolchain/node"
-    inputs: ["devenv.lock", "devenv.nix"]
+  - name: "node"               #  →  //:node
+    inputs: ["//devenv.lock", "//devenv.nix"]
+    cwd: "//"
     command: "command -v node | xargs readlink -f > .giant/toolchains/node.id"
-    outputs: [".giant/toolchains/node.id"]
+    outputs: ["//.giant/toolchains/node.id"]
     tags: ["toolchain"]
 ```
 
-Every Go target depends on `//toolchain/go`; every Node target on
-`//toolchain/node`. A Node bump moves `//toolchain/node`'s id and leaves
-the Go toolchain untouched, so your Go targets stay cached.
+Every Go target depends on `//:go`; every Node target on `//:node`. A
+Node bump moves `//:node`'s id and leaves the Go toolchain untouched, so
+your Go targets stay cached. (Prefer a dedicated package? Put them in
+`toolchain/giant.yaml` and the labels become `//toolchain:go` /
+`//toolchain:node` - same mechanism, different home.)
 
 ## With checked-in or git-lfs binaries
 
@@ -111,14 +135,16 @@ git-lfs - the resolved-path trick does **not** work. The path
 never moves and you'd reuse a stale artifact. Hash the content instead:
 
 ```yaml
-- id: "//toolchain/go"
-  inputs: ["bin/go"]
+# giant.yaml (workspace root)
+- name: "go"                   #  →  //:go
+  inputs: ["//bin/go"]
+  cwd: "//"
   command: "sha256sum bin/go | cut -d' ' -f1 > .giant/toolchains/go.id"
-  outputs: [".giant/toolchains/go.id"]
+  outputs: ["//.giant/toolchains/go.id"]
   tags: ["toolchain"]
 ```
 
-`inputs: ["bin/go"]` makes the target re-run only when the binary
+`inputs: ["//bin/go"]` makes the target re-run only when the binary
 changes; the id file holds the content digest. This works whether the
 working tree has the real binary (its bytes are hashed) or just the
 git-lfs pointer (the pointer file contains the content's `oid`, which

@@ -24,7 +24,8 @@ src/
 │   ├── clean.rs
 │   ├── external.rs      # porcelain dispatch (giant <name> → giant-<name>)
 │   └── prep.rs          # shared "load config + return graph"
-├── config.rs            # YAML/JSON parsing + static validation
+├── config.rs            # scan the tree for giant.yaml files, merge into one
+│                        #   graph, resolve package-relative paths + static validation
 ├── model.rs             # core types: TargetSpec, CacheKey, ContentHash
 ├── graph.rs             # build graph + topological sort
 ├── selection.rs         # pattern language + affected detection
@@ -41,15 +42,20 @@ src/
 
 ## The data flow of one build
 
+The shape is: scan the tree for `giant.yaml` files → merge them into one
+graph (path-derived labels, package-relative paths resolved at load) →
+select → execute. There is no separate discovery or bootstrap pass; the
+config is whatever static files are checked in.
+
 ```
-giant build go:bin:server
+giant build //crates/giant:giant
   │
   ▼
 [ cli/build.rs ]
-  load config → prep::prepare → build graph
+  config::load → scan + merge giant.yaml files → resolve paths → build graph
   │
   ▼
-[ selection ] resolve_patterns(go:bin:server) → [go:bin:server]
+[ selection ] resolve_patterns(//crates/giant:giant) → [//crates/giant:giant]
   │
   ▼
 [ cli/session.rs ] SessionState::handle_command(Command::Build{...})
@@ -63,7 +69,8 @@ giant build go:bin:server
     │
     ▼
   [ executor::compose_cache_key ]
-    hash workspace + id + command + cwd + env + inputs + dep_outputs
+    hash command + cwd + env + inputs + dep_outputs
+    (not the workspace name or target label - purely content-addressed)
     │
     ▼
   [ cache::get_ac(key) ]
@@ -103,12 +110,14 @@ exact bytes.
 
 ## Output-based dep inference
 
-Targets don't list each other by ID to express a dependency. Instead,
-a target declares the outputs it produces, and the engine links any
-target whose inputs match another target's outputs. That's how a
+Targets don't have to list each other by label to express a dependency.
+Instead, a target declares the outputs it produces, and the engine links
+any target whose inputs match another target's outputs. That's how a
 static target picks up a generated artifact without naming the target
-that produced it. The graph builder runs this pass once after loading
-`giant.yaml`'s `targets:`, before the topological sort.
+that produced it. The graph builder runs this pass once after the package
+scan has merged every `giant.yaml`'s `targets:` into one set, before the
+topological sort. (Targets may still declare explicit `deps:` by label -
+the dogfood config does - but inference covers the common case.)
 
 Toolchain folding rides on the same pass: targets tagged `toolchain`
 are folded into their dependents' cache keys so a toolchain change

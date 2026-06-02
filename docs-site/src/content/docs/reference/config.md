@@ -3,8 +3,10 @@ title: giant.yaml
 description: Full configuration schema.
 ---
 
-Giant reads `giant.yaml` (or `giant.json`) in your workspace root. The
-full schema:
+Giant reads `giant.yaml` (or `giant.json`) from every package in the
+tree - see [Config across the tree](#config-across-the-tree) below. The
+root file holds the workspace-global sections; a nested package file
+carries only `targets:`. The full schema (root file shown):
 
 ```yaml
 workspace:
@@ -31,7 +33,7 @@ remote:                       # feature-gated; only with --features remote
   max_blob_size_mb: 500
 
 targets:
-  - id: "<unique>"
+  - name: "<unique-in-package>"
     inputs: [...]
     outputs: [...]
     deps: [...]
@@ -46,13 +48,71 @@ targets:
     timeout_secs: 300
 ```
 
+## Config across the tree
+
+Config is split across the tree. Every directory with a `giant.yaml` (or
+`giant.json`) is a **package**; its file declares that package's targets.
+The engine scans the whole workspace, reads every package file, and merges
+them into one graph. See [Packages and labels](/concepts/packages/) for
+the full model.
+
+The **root** `giant.yaml` is mandatory. It marks the workspace (what `//`
+resolves against) and is the only file that may carry the workspace-global
+sections - `workspace`, `cache`, `remote` - plus the porcelain-owned
+`tasks:` / `services:` blocks. A **nested package file carries only
+`targets:`**; putting a root-only section (`workspace`, `cache`, `remote`,
+`tasks`, `services`) in a package file is a loud error, not a silent
+no-op.
+
+```yaml
+# crates/giant/giant.yaml  →  package //crates/giant
+targets:
+  - name: "giant"          # identity: //crates/giant:giant
+    inputs: ["src/**/*.rs", "Cargo.toml", "//Cargo.lock"]
+    outputs: ["//bin/giant"]
+    command: "cargo build --release -p giant"
+```
+
+A small project can keep every target in the root file (all `//:name`);
+splitting earns its keep when a subdirectory is a natural unit of
+ownership. For a large tree the package files are usually written by a
+[generator](/guides/generating-config/) rather than by hand.
+
+## Labels and identity
+
+A target's engine identity is its **label**, derived from where it lives:
+`//<package>:<name>`, where the package is the target's `giant.yaml`
+directory (workspace-relative). A target named `server` in
+`src/go/server/giant.yaml` is `//src/go/server:server`. A target in the
+root file has the empty package, so it is `//:name`. The `name:` field
+only has to be unique **within its own package** - two packages can each
+have a `build` target without colliding. See
+[Packages and labels](/concepts/packages/).
+
+## Package-relative paths
+
+Every path in a config file - `inputs`, `outputs`, `cwd`, and the
+references that drive dependency inference - resolves relative to the
+file's package:
+
+- **Bare = package-relative.** `src/**/*.go` in `src/go/server/giant.yaml`
+  means `src/go/server/src/**/*.go`.
+- **`//` = workspace root.** `//Cargo.lock` is the root file regardless of
+  which package references it; `//bin/giant` is a root-level output.
+- **`cwd` defaults to the package directory.** Set `cwd: "//"` to run from
+  the workspace root.
+
 ## `workspace`
+
+Root file only.
 
 | Field | Required | Description |
 |---|---|---|
-| `name` | yes | Workspace name. Alphanumeric, `-`, `_`. Used in cache keys. |
+| `name` | yes | Workspace name. Alphanumeric, `-`, `_`. Marks this file as the workspace root (the scan walks up to the nearest config with a non-empty `name`) and is surfaced in events. Not part of the cache key. |
 
 ## `cache`
+
+Root file only.
 
 | Field | Default | Description |
 |---|---|---|
@@ -80,7 +140,7 @@ both backwards-compatible (state defaults to `.giant/` in the
 workspace root, which is where it already was).
 
 Log capture/replay is what makes cache hits informative: without it
-you'd see `CACHE go:bin:server` and nothing else, even if the original
+you'd see `CACHE //src/go/server:server` and nothing else, even if the original
 build printed test failures, deprecation warnings, or compiler hints.
 With it the renderer (and any porcelain on the [event protocol](/reference/events/))
 sees the same `target.log` line stream a fresh build would have
@@ -88,6 +148,8 @@ produced. See [Log capture and replay](/reference/cache-layout/#log-capture-and-
 for storage details.
 
 ## `remote` (feature-gated)
+
+Root file only.
 
 | Field | Default | Description |
 |---|---|---|
@@ -136,12 +198,12 @@ Regular build targets. Schema below.
 
 | Field | Required | Type | Description |
 |---|---|---|---|
-| `id` | yes | string | Unique target ID. Convention: `lang:kind:name`. |
-| `inputs` | no | list | File globs whose matched files feed the cache key. |
-| `outputs` | no | list | Files the command produces, relative to `cwd`. Each entry is a glob; a literal must exist, a glob captures all matches (≥1), named + glob compose. |
-| `deps` | no | list of strings | Additional explicit dependencies. |
+| `name` | yes | string | Target name, unique within its package. The engine identity is the path-derived label `//<package>:<name>` (root targets are `//:name`). See [Labels and identity](#labels-and-identity). |
+| `inputs` | no | list | File globs whose matched files feed the cache key. Package-relative; `//` anchors the workspace root. |
+| `outputs` | no | list | Files the command produces, package-relative (`//` for root-level). Each entry is a glob; a literal must exist, a glob captures all matches (≥1), named + glob compose. |
+| `deps` | no | list of strings | Additional explicit dependencies, given as labels (`//pkg:name`). |
 | `command` | yes* | string | Shell command. Required unless `exists` is set. |
-| `cwd` | no | string | Working dir, workspace-relative. Default: workspace root. |
+| `cwd` | no | string | Working dir. Package-relative; `//` is the workspace root. Default: the package directory. |
 | `env` | no | map | Env vars. Hashed into the cache key. |
 | `test` | no | bool | `true` = test target. Default `false`. |
 | `tags` | no | list of strings | Free-form labels for filtering. |
@@ -171,10 +233,18 @@ new fields and may break older Giant binaries.
 
 ## Unknown-field handling
 
-Most top-level structs are `deny_unknown_fields`. A typo in a field
-name fails the config load - better than silently ignoring it.
+The structured config blocks - `workspace`, `cache`, `remote`, `state` -
+are `deny_unknown_fields`, so a typo there fails the config load rather
+than silently doing nothing:
 
 ```console
 $ giant build
-error: unknown field `inptus`, expected one of `id`, `inputs`, ...
+error: unknown field `maxsize`, expected one of `dir`, `max_size_gb`, ...
 ```
+
+The top-level document and individual target entries are deliberately
+**open**: porcelains (giant-task, giant-tui) add their own top-level
+sections, and the engine ignores keys it doesn't recognise. A typo in a
+target field name (`inptus:`) is therefore dropped silently rather than
+erroring - a generator is the usual author of targets, so the schema
+stays permissive on that side.
