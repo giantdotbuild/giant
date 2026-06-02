@@ -190,7 +190,6 @@ do something sensible instead of dumping raw terminal escapes.
 │                 │◄──────┤                 │
 └─────────────────┘       └─────────────────┘
    ratatui + crossterm        loads config,
-                              runs discovery,
                               executes builds
 ```
 
@@ -229,8 +228,8 @@ A short list, deliberately:
 - **No reading config independently.** The catalog comes from
   `target.described` events emitted by the session, not from the
   TUI re-parsing `giant.yaml`. You don't need to restart on a config
-  edit, though: the session watches `giant.yaml` / `giant.json`,
-  re-runs discovery, and re-emits the catalog
+  edit, though: the session watches `giant.yaml` / `giant.json` and
+  re-emits the catalog
   (`catalog.invalidating` → `catalog.ready`); the TUI rebuilds its
   browser from the new stream.
 

@@ -78,22 +78,30 @@ ever over-invalidates - it never reuses a stale artifact - so it's the
 safe direction. If you want an exact-content identity, use the
 `sha256sum` form below.
 
-### Generating toolchain targets
+### One toolchain target per tool
 
-Rather than hand-write one target per tool, emit them from a discovery
-script. Giant ships an example at `tools/discover-toolchains.sh`:
+Write one toolchain target per tool you pin, each carrying the
+`toolchain` tag, then stamp `deps: ["//toolchain/<tool>"]` on the build
+targets in that ecosystem:
 
 ```yaml
-include:
-  - id: "discover:toolchains"
-    command: "tools/discover-toolchains.sh > .giant/d/toolchains.json"
-    outputs: [".giant/d/toolchains.json"]
+targets:
+  - id: "//toolchain/go"
+    inputs: ["devenv.lock", "devenv.nix"]
+    command: "command -v go | xargs readlink -f > .giant/toolchains/go.id"
+    outputs: [".giant/toolchains/go.id"]
+    tags: ["toolchain"]
+
+  - id: "//toolchain/node"
+    inputs: ["devenv.lock", "devenv.nix"]
+    command: "command -v node | xargs readlink -f > .giant/toolchains/node.id"
+    outputs: [".giant/toolchains/node.id"]
+    tags: ["toolchain"]
 ```
 
-The script prints one toolchain target per tool as discovery JSON. A
-language discovery script that emits your build targets can stamp
-`deps: ["//toolchain/go"]` on each one, so the toolchain dependency is
-wired where the ecosystem is known.
+Every Go target depends on `//toolchain/go`; every Node target on
+`//toolchain/node`. A Node bump moves `//toolchain/node`'s id and leaves
+the Go toolchain untouched, so your Go targets stay cached.
 
 ## With checked-in or git-lfs binaries
 

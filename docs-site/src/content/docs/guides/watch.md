@@ -102,11 +102,11 @@ giant build --with-tests --watch
 
 ## The graph is fixed for the watch
 
-Watch prepares the graph (config + discovery) once, then rebuilds the
-affected subset on the same graph each cycle. Editing a `giant.yaml` or
-changing what discovery emits mid-watch is **not** picked up - restart
-the watch to re-discover. (The long-lived engine session reloads config
-on its own; the one-shot `--watch` keeps it simple.)
+Watch prepares the graph from config once, then rebuilds the affected
+subset on the same graph each cycle. Editing `giant.yaml` mid-watch is
+**not** picked up - restart the watch to reload it. (The long-lived
+engine session reloads config on its own; the one-shot `--watch` keeps
+it simple.)
 
 ## Performance
 

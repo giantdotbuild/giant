@@ -53,8 +53,7 @@ import giantGarden from '../../assets/giant-garden.png';
     <h3>Language-agnostic</h3>
     <p>
       The engine knows nothing about Go, Rust, or Docker. Targets are just
-      <code>inputs → command → outputs</code>. Discovery scripts materialize
-      the rest at config time.
+      <code>inputs → command → outputs</code> in one config file.
     </p>
   </div>
   <div class="pillar">
@@ -88,9 +87,8 @@ import giantGarden from '../../assets/giant-garden.png';
     <p>
       The whole engine is small enough to read in an afternoon -
       no plugin DLLs, no embedded scripting, no language-specific
-      special cases. Every behaviour comes from one of three places:
-      your <code>giant.yaml</code>, a discovery script, or a porcelain
-      binary on your PATH.
+      special cases. Every behaviour comes from one of two places:
+      your <code>giant.yaml</code> or a porcelain binary on your PATH.
     </p>
   </div>
 </section>

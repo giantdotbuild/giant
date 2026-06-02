@@ -43,14 +43,12 @@ export default defineConfig({
           items: [
             { label: 'Targets and inputs', slug: 'concepts/targets' },
             { label: 'The cache key', slug: 'concepts/cache-key' },
-            { label: 'Discovery', slug: 'concepts/discovery' },
             { label: 'Selection language', slug: 'concepts/selection' },
           ],
         },
         {
           label: 'Guides',
           items: [
-            { label: 'Go monorepo', slug: 'guides/go-monorepo' },
             { label: 'Docker images', slug: 'guides/docker' },
             { label: 'Tests with giant test', slug: 'guides/tests' },
             { label: 'Pinning toolchains', slug: 'guides/toolchains' },

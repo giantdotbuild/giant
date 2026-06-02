@@ -73,61 +73,35 @@ Push only:
 giant build --tag push
 ```
 
-## Discovery for many Dockerfiles
+## Many Dockerfiles, one target each
 
-If you have many Dockerfiles (one per service), use discovery:
+With several services, write one target per Dockerfile. Each points at
+its own `Dockerfile` and source tree, so a change to one service only
+re-keys that service's image:
 
 ```yaml
-include:
-  - id: "discover:docker"
-    command: "tools/discover-docker.sh > .giant/d/docker.json"
-    outputs: [".giant/d/docker.json"]
-    scope: ["."]
+targets:
+  - id: "docker:api"
+    inputs: ["services/api/Dockerfile", "services/api/**/*"]
+    outputs: []
+    cache: false
+    exists: "docker image inspect example/api:$GIANT_CACHE_KEY >/dev/null 2>&1"
+    command: "docker build -t example/api:$GIANT_CACHE_KEY -f services/api/Dockerfile services/api"
+
+  - id: "docker:worker"
+    inputs: ["services/worker/Dockerfile", "services/worker/**/*"]
+    outputs: []
+    cache: false
+    exists: "docker image inspect example/worker:$GIANT_CACHE_KEY >/dev/null 2>&1"
+    command: "docker build -t example/worker:$GIANT_CACHE_KEY -f services/worker/Dockerfile services/worker"
 ```
+
+Editing `services/api/**` re-keys `docker:api` and leaves
+`docker:worker` cache-warm. Build all images at once with a glob:
 
 ```bash
-#!/usr/bin/env bash
-# tools/discover-docker.sh
-set -euo pipefail
-
-# Collect Dockerfile paths up front so we can list them in both the
-# emitted targets and the `reads` manifest.
-mapfile -t dockerfiles < <(find . -name 'Dockerfile' -not -path './.giant/*')
-
-targets='[]'
-for df in "${dockerfiles[@]}"; do
-  svc="$(dirname "$df" | sed 's|^\./||;s|/|-|g')"
-  targets=$(jq -n \
-    --argjson acc "$targets" \
-    --arg id "docker:$svc" \
-    --arg dir "$(dirname "$df")" \
-    --arg cmd "docker build -t example/$svc:\$GIANT_CACHE_KEY -f $df $dir" \
-    '$acc + [{
-      id: $id,
-      inputs: ["\($dir)/Dockerfile", "\($dir)/**/*"],
-      outputs: [],
-      cache: false,
-      exists: ("docker image inspect example/" + ($id | sub("docker:"; "")) + ":$GIANT_CACHE_KEY >/dev/null 2>&1"),
-      command: $cmd
-    }]')
-done
-
-# `reads` for warm-skip: every Dockerfile (excerpt on FROM/COPY/ADD -
-# the lines that control discovery output), plus the directories
-# we walked.
-jq -n \
-  --argjson targets "$targets" \
-  --argjson dfiles "$(printf '%s\n' "${dockerfiles[@]}" | jq -R . | jq -s '.')" \
-  '{
-    targets: $targets,
-    reads: {
-      files: ($dfiles | map({path: ., lines: ["FROM ", "COPY ", "ADD "]})),
-      dirs:  [{path: ".", filter: "Dockerfile"}]
-    }
-  }'
+giant build 'docker:*'
 ```
-
-You get one `docker:<service>` target per Dockerfile, automatically.
 
 ## Multi-stage caching
 

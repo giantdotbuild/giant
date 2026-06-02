@@ -37,23 +37,6 @@ cache key - the ID does not disambiguate them. If you want two
 recipes to cache separately, something in the recipe itself has to
 differ.
 
-### Discovery targets
-
-Discovery targets (`include:` entries) use a separate composition:
-
-1. **The command, cwd, env, scope** - as above.
-2. **Content inputs** - the union of (a) every argv token in the
-   command that resolves to a real file in the workspace (including
-   `$PATH` lookups whose target lives in-tree, e.g.
-   `bin/my-discover`), and (b) any files matched by a declared
-   `inputs:` glob. Deduped on workspace-relative path so a file
-   caught both ways contributes once.
-
-No file inputs from the regular schema, no dep cache keys - the
-recorded-reads manifest (see [Discovery](/concepts/discovery/)) is
-the warm-path verifier, and dep edges from declared `deps:` order
-execution without leaking into the discovery's own key.
-
 ## What's NOT in the hash
 
 - **The current time, current user, current host.** Two users on two
@@ -151,20 +134,7 @@ reflects it:
     GOVERSION: "1.23.4"   # bump this when you bump Go
 ```
 
-Alternatively, derive it on the fly via a discovery target:
-
-```yaml
-include:
-  - id: "discover:toolchain-versions"
-    command: "tools/get-versions.sh > .giant/d/toolchains.json"
-    outputs: [".giant/d/toolchains.json"]
-    scope: ["."]
-```
-
-The discovery's script reads `go.mod` (and whatever else) and emits
-that in its `reads.files` manifest, so changes to the pinned version
-re-run the discovery automatically.
-
-And reference the resulting target IDs as deps. When the version
-changes, the discovery target's outputs shift, the cache keys shift,
-everything downstream rebuilds.
+Alternatively, capture the version in a target whose `command` writes
+it to a file. List that file in the `inputs:` of the targets that
+depend on the toolchain. When the version changes, the file's content
+changes, the cache keys shift, and everything downstream rebuilds.

@@ -31,8 +31,8 @@ Three sections:
   target has an `id`, a list of `inputs`, a list of `outputs`, and a
   `command`.
 
-That's it for the minimum config. Everything else - discovery, tasks,
-remote cache, tags - is optional.
+That's it for the minimum config. Everything else - tasks, remote
+cache, tags - is optional.
 
 ## Anatomy of a target
 
@@ -67,17 +67,15 @@ $ giant build
 What happened, in order:
 
 1. **Config load.** Parse `giant.yaml`, validate.
-2. **Discovery.** None in this config (no `include:` entries). If there
-   were, Giant would run them first.
-3. **Graph build.** One target, no dependencies.
-4. **Cache key compute.** SHA-256 over: the command, the cwd, the
+2. **Graph build.** One target, no dependencies.
+3. **Cache key compute.** SHA-256 over: the command, the cwd, the
    content hash of `name.txt`, the env vars listed under `built_in_env`,
    and the dependency hashes (none here).
-5. **Cache lookup.** Local cache miss - first run.
-6. **Execute.** Run `echo "hello, $(cat name.txt)" > greeting.txt`.
-7. **Fingerprint outputs.** Hash `greeting.txt`, store its bytes in the
+4. **Cache lookup.** Local cache miss - first run.
+5. **Execute.** Run `echo "hello, $(cat name.txt)" > greeting.txt`.
+6. **Fingerprint outputs.** Hash `greeting.txt`, store its bytes in the
    content-addressed store under the hash.
-8. **Write AC entry.** Save an action-cache JSON file mapping the cache
+7. **Write AC entry.** Save an action-cache JSON file mapping the cache
    key to the output hashes.
 
 ## The second build (cache hit)

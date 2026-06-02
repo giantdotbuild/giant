@@ -12,9 +12,9 @@ $ giant build
   OK    1 built · 2 cached · 1 remote  in 1.27s
 ```
 
-The engine is language-agnostic. Targets are `inputs → command → outputs`. Anything
-beyond that - Go packages, Docker images, protobuf - comes from discovery scripts
-the engine runs to materialize targets at config time.
+The engine is language-agnostic. Targets are `inputs → command → outputs`. Go
+packages, Docker images, protobuf - all of them are just targets with the right
+inputs, command, and outputs, declared in `giant.yaml`.
 
 > Full docs and a quickstart at **[giant.build](https://giant.build)**.
 
@@ -97,38 +97,6 @@ giant clean             # clear the local cache
 the summary. `--events ndjson` switches the output to a machine-readable
 event stream consumed by porcelains.
 
-## Discovery
-
-Some targets are too dynamic to hand-write - every Go package, every Dockerfile,
-every Rust crate. Discovery targets emit JSON that giant merges into the build
-graph:
-
-```yaml
-include:
-  - id: "discover:go"
-    inputs:
-      - "go.mod"
-      - "**/*.go"
-    outputs: [".giant/d/go.json"]
-    command: "tools/discover-go.sh > .giant/d/go.json"
-```
-
-`tools/discover-go.sh` writes something like:
-
-```json
-{ "targets": [
-  { "id": "go:pkg:internal/auth",
-    "inputs": ["internal/auth/**/*.go"],
-    "outputs": ["bin/auth"],
-    "command": "go build -o bin/auth ./internal/auth" }
-]}
-```
-
-Giant runs discovery before the main build, merges the emitted targets, and
-infers cross-target dependencies wherever one target's output matches another's
-input. Discovery re-runs only when the files it recorded reading actually
-change, so it stays off the hot path on warm builds.
-
 ## Porcelains
 
 Unknown subcommands dispatch to `giant-<name>` on PATH, the git/cargo/kubectl
@@ -171,12 +139,6 @@ remote:                       # feature-gated
   url: "https://..."
   auth: { kind: bearer, token_env: TOKEN }
 
-include:                      # discovery targets, run before main build
-  - id: "..."
-    inputs: [...]
-    outputs: [...]
-    command: "..."
-
 targets:
   - id: "<unique-id>"
     inputs: [...]             # globs, relative to workspace root
@@ -200,7 +162,6 @@ A short tour of what's where:
 - `crates/giant/src/executor.rs` - parallel dispatch, cache key composition,
   early-cutoff, remote-cache fallback chain.
 - `crates/giant/src/cache.rs` - local content-addressed cache; LRU eviction.
-- `crates/giant/src/discovery.rs` - discovery target bootstrap and merge.
 - `crates/giant/src/graph.rs` - dependency graph, output-based dep inference.
 - `crates/giant/src/selection.rs` - pattern language (globs, exclusions, tags,
   test mode).
@@ -251,7 +212,7 @@ contents.
 ## Status
 
 Working: build, test, `--watch`, affected, graph, explain, clean, porcelain
-dispatch, local + remote cache, discovery, NDJSON event stream, LRU cache
+dispatch, local + remote cache, NDJSON event stream, LRU cache
 eviction. `giant session` runs a persistent engine
 that live-reloads on `giant.yaml` edits, and the command channel lets porcelains
 send commands back over the protocol. `giant-task`

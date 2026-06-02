@@ -104,7 +104,7 @@ stdout. One-shot, easy, no shared state.
 For interactive porcelains (a TUI controlling a watch session, an IDE
 driving builds across files), spawn `giant session` once and speak
 NDJSON commands on stdin while parsing events from stdout. The engine
-loads config and runs discovery once, then stays warm. See
+loads config once, then stays warm. See
 [`giant session`](/reference/cli/#giant-session) and the
 [Command channel](/reference/events/#command-channel) section.
 

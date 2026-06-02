@@ -72,8 +72,7 @@ Every matched file's content hash contributes to the cache key.
 
 You don't write these explicitly - Giant infers them. If target B's
 input glob matches target A's output file, B automatically depends on
-A. See [the discovery page](/concepts/discovery/) for how this composes
-with discovery-generated targets.
+A.
 
 ## Outputs
 

@@ -44,7 +44,7 @@ The `t` field discriminates. All other fields are type-specific.
 ```
 
 After `engine.hello`, a persistent session streams its catalog - one
-`target.described` per target in the merged graph - then `engine.ready`
+`target.described` per target in the graph - then `engine.ready`
 to signal it will accept commands.
 
 ```jsonc
@@ -77,7 +77,7 @@ to signal it will accept commands.
 ### Catalog (live reload)
 
 A running session watches `giant.yaml` / `giant.json`. On an edit (or an
-explicit `config.reload` command) it re-runs discovery and re-emits the
+explicit `config.reload` command) it re-reads the config and re-emits the
 catalog without a restart. The swap is bracketed by these two events;
 between them the client drops its old catalog and rebuilds it from the
 fresh `target.described` stream.
@@ -167,15 +167,6 @@ to do. This is what backs dep-aware task watching in `giant-task`.
 ```
 
 `watch.unsubscribe` ends it.
-
-### Discovery
-
-```jsonc
-{ "t": "discovery.merged",
-  "build": "b_bootstrap_4f9c",
-  "id": "discover:go",
-  "added_targets": ["go:pkg:internal/auth", "go:pkg:internal/store"] }
-```
 
 ### Affected subscription
 
@@ -276,13 +267,13 @@ Command shapes (full list in `crates/giant/src/commands.rs`):
 
 `watch.subscribe` is notify-only - the engine replies with
 `watch.changed` events, never builds. `config.reload` forces a
-re-discovery + catalog re-emit (the same thing a `giant.yaml` edit
+config re-read + catalog re-emit (the same thing a `giant.yaml` edit
 triggers automatically).
 
 Each command is acknowledged with a `command.accepted` (carrying the
 allocated `build_id` if applicable) or `command.rejected` (with a
 reason - e.g. `"watch is active - send watch.stop first"`). A command
-that is accepted but then fails mid-flight (e.g. discovery can't run on
+that is accepted but then fails mid-flight (e.g. config can't be parsed on
 a reload) emits `command.error { command_id, message }` - distinct from
 `build.finished { ok: false }`, which is a targeted build failure.
 Subsequent events for the work the command kicked off (`build.*`,

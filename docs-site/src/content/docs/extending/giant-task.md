@@ -449,8 +449,7 @@ giant-task --completions nushell >> ~/.config/nushell/completions.nu
 Dynamic completion of task names works at TAB time - `giant-task`
 reads the nearest `giant.yaml` and returns the matching tasks,
 including their descriptions. Same idea for `giant` itself: target
-IDs from `giant.yaml`'s `targets:`/`include:` plus anything
-discovery wrote to disk on a previous build.
+IDs from `giant.yaml`'s `targets:`.
 
 ## How it composes with the engine
 

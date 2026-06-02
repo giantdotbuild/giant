@@ -30,15 +30,6 @@ remote:                       # feature-gated; only with --features remote
   skip_head: false
   max_blob_size_mb: 500
 
-discovery:
-  strict: false               # true = no `reads` manifest is an error
-
-include:                      # discovery targets, run during bootstrap
-  - id: "discover:go"
-    command: "tools/discover-go.sh > .giant/d/go.json"
-    outputs: [".giant/d/go.json"]
-    scope: ["src/"]           # optional; bounds reads + narrows fsmonitor
-
 targets:
   - id: "<unique>"
     inputs: [...]
@@ -81,7 +72,7 @@ The two-threshold setup avoids "always-evicting" behavior: trigger at
 
 | Field | Default | Description |
 |---|---|---|
-| `dir` | `.giant` | Per-workspace state directory. Holds discovery sidecars, the fsmonitor token, build logs - anything Giant writes that's specific to this workspace (vs. content-addressed blobs, which live under `cache.dir`). Relative paths resolve under the workspace root. |
+| `dir` | `.giant` | Per-workspace state directory. Holds build logs - anything Giant writes that's specific to this workspace (vs. content-addressed blobs, which live under `cache.dir`). Relative paths resolve under the workspace root. |
 
 Splitting state from cache lets the cache live in a shared user-wide
 directory while per-workspace state stays put. The default keeps
@@ -109,14 +100,6 @@ for storage details.
 | `tls.skip_verify` | `false` | If true, skip TLS cert verification. Don't use in production. |
 | `skip_head` | `false` | Skip the HEAD existence check before upload. |
 | `max_blob_size_mb` | `500` | Blobs larger than this (in MB) are not uploaded. |
-
-## `discovery`
-
-Workspace-level settings for discovery (`include:` entries).
-
-| Field | Default | Description |
-|---|---|---|
-| `strict` | `false` | When `true`, a discovery whose output omits a `reads` manifest is a hard error instead of a warning. Useful in CI to enforce the cooperative protocol. |
 
 ## `dispatch`
 
@@ -176,66 +159,6 @@ inputs:
   - "src/**/*.go"                  # string form
   - { kind: file, glob: "go.mod" } # object form
 ```
-
-## `include`
-
-Discovery entries: subprocesses that emit JSON to be merged into the
-graph. See [Discovery](/concepts/discovery/) for the workflow. The
-field set differs from `targets:` in a few ways:
-
-| Field | Required | Type | Description |
-|---|---|---|---|
-| `id` | yes | string | Unique target ID. |
-| `command` | yes | string | The discovery command. |
-| `outputs` | yes | list | The JSON file(s) the command writes. |
-| `deps` | no | list of strings | Explicit dependencies (e.g. on a compiled discovery tool). |
-| `inputs` | no | list | Explicit files to content-hash into the discovery cache key. Optional - Giant already pulls in any argv token that resolves to a workspace file (the script, an in-tree binary on `$PATH`, etc.). Use this to declare helpers and embedded data the argv walk can't see (sourced shell libraries, config templates). Same file-glob shapes as `targets.inputs`. |
-| `cwd` | no | string | Working dir, workspace-relative. |
-| `env` | no | map | Env vars. Hashed into the discovery cache key. |
-| `scope` | no | list of strings | Directory prefixes the discovery may read from. Used as the sandbox fence (if sandboxing is on) and the fsmonitor narrowing hint. Contributes to the cache key. |
-| `exists` | no | string | Same as on regular targets. |
-| `timeout_secs` | no | int | Same as on regular targets. |
-
-The discovery cache key is
-`cmd + cwd + env + scope + content`, where `content` is the deduped
-union of the argv-walk hits and any `inputs:` matches. Cooperatively-
-emitted `reads` from the script's JSON still drives the warm-path
-verifier - the two mechanisms compose.
-
-### Discovery output shape
-
-The JSON each discovery's `command` writes:
-
-```jsonc
-{
-  "schema_version": 1,
-  "targets": [ /* TargetSpec entries, same schema as `targets:` above */ ],
-  "include": [ /* nested discovery entries, processed recursively */ ],
-  "reads": {
-    "files": [
-      { "path": "go.mod" },
-      { "path": "main.go", "lines": ["package ", "import "] }
-    ],
-    "dirs": [
-      { "path": "pkg/", "filter": "*.go" }
-    ]
-  }
-}
-```
-
-`reads.files` entries take two forms:
-
-- **Whole-file**: `{ "path": "go.mod" }` - the verifier hashes the
-  entire file's contents. Any change invalidates.
-- **Excerpt**: `{ "path": "...", "lines": ["^pkg ", "^import "] }`
-  - the verifier hashes only the lines whose prefix matches any
-  pattern. Function-body edits that don't touch those lines leave
-  the recorded hash unchanged.
-
-`reads.dirs` entries hash a directory's listing (no recursion). With
-`filter:` set, only entry names matching any of the glob patterns
-contribute. Single-string and array forms both work for `lines:` and
-`filter:`.
 
 ## Schema version
 

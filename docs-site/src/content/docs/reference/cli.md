@@ -51,7 +51,7 @@ on failure - the summary block already names what failed.)
 `giant build go:bin:* --watch`, `giant build --with-tests --watch`
 (watch everything). It prepares the graph once and rebuilds only the
 affected subset each cycle; a `giant.yaml` edit mid-watch isn't picked
-up - restart to re-discover.
+up - restart to reload config.
 
 ## `giant test`
 
@@ -179,8 +179,8 @@ configured), see the `cache.max_size_gb` setting in
 
 ## `giant session`
 
-Persistent engine over stdio. Loads config once, runs discovery once,
-then reads NDJSON commands on stdin and emits NDJSON events on stdout.
+Persistent engine over stdio. Loads config once, then reads NDJSON
+commands on stdin and emits NDJSON events on stdout.
 The protocol porcelains (the TUI in particular) drive against. Refuses
 to run with stdout on a TTY - pipe it.
 
@@ -199,7 +199,7 @@ Commands accepted on stdin: `build`, `cancel`, `watch.start`,
 for the full wire format and ack semantics.
 
 The session also reloads on its own when `giant.yaml` / `giant.json`
-changes - it re-runs discovery and re-emits the catalog
+changes - it re-reads the config and re-emits the catalog
 (`catalog.invalidating` → `catalog.ready`), so a `giant tui` reflects
 config edits without a restart. `config.reload` forces the same thing.
 

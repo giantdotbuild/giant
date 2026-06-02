@@ -23,11 +23,10 @@ src/
 │   ├── explain.rs
 │   ├── clean.rs
 │   ├── external.rs      # porcelain dispatch (giant <name> → giant-<name>)
-│   └── prep.rs          # shared "load config + bootstrap + return graph"
+│   └── prep.rs          # shared "load config + return graph"
 ├── config.rs            # YAML/JSON parsing + static validation
 ├── model.rs             # core types: TargetSpec, CacheKey, ContentHash
 ├── graph.rs             # build graph + topological sort
-├── discovery.rs         # bootstrap + JSON merge
 ├── selection.rs         # pattern language + affected detection
 ├── executor.rs          # parallel dispatch, cache key composition
 ├── cache.rs             # local content-addressed cache + LRU eviction
@@ -35,8 +34,7 @@ src/
 ├── watcher.rs           # notify-based file watcher
 ├── renderer.rs          # event-to-line renderer
 ├── events.rs            # NDJSON event types
-├── git.rs               # repo discovery for --affected --base + fsmonitor config
-├── fsmonitor.rs         # git fsmonitor hook protocol v2 client (TDD-0016)
+├── git.rs               # repo discovery for --affected --base
 ├── paths.rs             # AbsPath / WsRelPath / OutputPath newtypes + mtime_ns helper
 └── types.rs             # GlobPattern newtype
 ```
@@ -48,7 +46,7 @@ giant build go:bin:server
   │
   ▼
 [ cli/build.rs ]
-  load config → prep::prepare → discovery bootstrap → merge graph
+  load config → prep::prepare → build graph
   │
   ▼
 [ selection ] resolve_patterns(go:bin:server) → [go:bin:server]
@@ -103,53 +101,19 @@ A SHA-256 over a deterministic byte stream. The composition is in
 for the user-facing story; the source is the source of truth for the
 exact bytes.
 
-## Discovery bootstrap
+## Output-based dep inference
 
-`cli::prep::prepare` runs every `include:` target through a worklist:
-the initial pending set is the top-level `include:` entries; each
-round, every pending discovery is either short-circuited by its
-sidecar (`.giant/discovery/<key>.json`) or dispatched through the
-normal build pipeline. Any `include:` entries emitted by completing
-discoveries get appended to the worklist for the next round; the
-loop terminates when nothing is pending. Each round's `BuildJob`
-carries a `build_id` like `bootstrap_r<round>_<hash>`. A per-target
-chain-depth counter (cap currently 8 generations) catches runaway
-emitters with a precise error reporting the chain.
+Targets don't list each other by ID to express a dependency. Instead,
+a target declares the outputs it produces, and the engine links any
+target whose inputs match another target's outputs. That's how a
+static target picks up a generated artifact without naming the target
+that produced it. The graph builder runs this pass once after loading
+`giant.yaml`'s `targets:`, before the topological sort.
 
-After each successful dispatch, the discovery's output JSON is
-parsed, its `reads` manifest is materialized into recorded hashes,
-and a fresh sidecar is written. Sidecar hits skip the merge-from-disk
-path and re-use the cached `targets` / `include` straight from the
-sidecar's payload. Output-based dep inference runs over the fully
-merged graph once all discoveries settle.
-
-When a sidecar mismatches (or is missing), the bootstrap pushes the
-discovery onto the per-build `force_fresh` set instead of deleting a
-specific AC entry. The executor consults this set ahead of the AC
-lookup and short-circuits any cache hit for those targets. That
-sidesteps the cache-key alignment problem for discoveries that
-declare `deps:` - their regular cache key includes dep output hashes
-the bootstrap can't see (deps haven't run yet at that point), so a
-straight `delete_ac` would target the wrong key and leak a stale hit.
-
-In the renderer, events with a `bootstrap_*` build id are filtered
-out of human output - the user sees one summary per real build, not
-two. Failures still surface.
-
-## fsmonitor
-
-When the workspace's git config sets `core.fsmonitor`, the engine
-opens a client against either the builtin daemon
-(`git fsmonitor--daemon query`) or a hook script (`<script> 2 <token>`)
-once per build. The returned set of changed paths narrows the
-recorded-reads verifier: file entries outside the set short-circuit to
-`Match`, dir entries skip if no changed path lives under them, and a
-fresh-instance signal forces a full check.
-
-Token storage at `.giant/fsmonitor-token` is updated only after the
-bootstrap completes - committing earlier would lose change reports on
-crash. Source in `fsmonitor.rs`; details in
-[TDD-0016](https://github.com/johnae/giant/blob/main/docs/tdd/0016-fsmonitor-client.md).
+Toolchain folding rides on the same pass: targets tagged `toolchain`
+are folded into their dependents' cache keys so a toolchain change
+invalidates everything built with it, without each target restating
+the dependency.
 
 ## Watch loop
 
@@ -223,8 +187,7 @@ clean up.
 - TUI (`giant-tui` porcelain in `crates/giant-tui/`; see
   [its docs page](/extending/giant-tui/)).
 - Service supervision (process-compose / overmind / systemd-run).
-- Embedded scripting language (discovery is a target, not a script
-  embedded in the engine).
+- Embedded scripting language.
 - Plugin DLLs (porcelains via subprocess, not loaded code).
 
 The pitch is a small, focused build engine. Anything that creeps the

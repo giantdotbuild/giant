@@ -101,5 +101,3 @@ the cache key, and re-ran the command.
 - **[Your first build](/start/first-build/)** walks through the same
   example with more annotations on what's happening under the hood.
 - **[Concepts: targets and inputs](/concepts/targets/)** is the model.
-- **[Go monorepo guide](/guides/go-monorepo/)** is a real-world recipe
-  showing discovery and inferred deps together.
