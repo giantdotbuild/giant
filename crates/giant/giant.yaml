@@ -1,0 +1,20 @@
+# Package //crates/giant - the engine + CLI binary.
+#
+# Source inputs are package-relative (this directory); the shared
+# Cargo manifests at the workspace root and the output binary are
+# `//`-rooted, and the command runs from the root (`cwd: "//"`) because
+# cargo drives the whole workspace.
+targets:
+  - name: "giant"
+    inputs:
+      - "src/**/*.rs"
+      - "build.rs"
+      - "Cargo.toml"
+      - "//Cargo.toml"
+      - "//Cargo.lock"
+    outputs: ["//bin/giant"]
+    cwd: "//"
+    command: "cargo build --release -p giant --bin giant && install -m 0755 target/release/giant bin/giant"
+    timeout_secs: 600
+    deps: ["//:devenv"]
+    tags: ["bin", "rust"]

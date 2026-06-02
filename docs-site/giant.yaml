@@ -1,0 +1,38 @@
+# Package //docs-site - the static documentation site.
+#
+# Everything here is package-relative: `cwd` defaults to this directory,
+# so the commands and the `src/`/`dist/` paths need no prefixes. Only the
+# toolchain dep reaches out of the package, with a `//`-rooted label.
+targets:
+  - name: "install"
+    inputs:
+      - "package.json"
+      - "package-lock.json"
+    outputs:
+      - "node_modules/.package-lock.json"
+    command: "npm ci"
+    timeout_secs: 180
+    deps: ["//:devenv"]
+    tags: ["docs"]
+
+  - name: "build"
+    # Explicit input list - input globs don't (yet) support `!exclude`,
+    # so we list the source dirs + top-level files rather than `**/*`
+    # which would pick up node_modules/, dist/, and .astro/.
+    inputs:
+      - "src/**/*"
+      - "public/**/*"
+      - "astro.config.mjs"
+      - "tsconfig.json"
+      - "package.json"
+      - "package-lock.json"
+    outputs:
+      - "dist/index.html"
+      - "dist/sitemap-index.xml"
+    command: "npx astro build"
+    timeout_secs: 120
+    # Depends on the toolchain directly, not just via :install - astro runs
+    # node here, and output-cutoff on :install could otherwise hide a
+    # toolchain change from this target.
+    deps: [":install", "//:devenv"]
+    tags: ["docs"]

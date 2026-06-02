@@ -8,26 +8,24 @@ cache:
   dir: .giant/cache
 
 # -----------------------------------------------------------------------------
-# Targets - content-addressed cached commands.
+# Per-package config (the multi-file model). Each package's targets live
+# in its own directory's giant.yaml; the engine scans and merges them:
 #
-# Cargo manages its own build cache, so the bin:* targets here aren't trying
-# to cache the build itself - they cache the "copy into ./bin/" step so
-# the workspace's giant + giant-task binaries refresh whenever the sources
-# change. ./bin is on PATH via devenv's enterShell, so a fresh `giant build`
-# means the next `giant task ...` uses the just-built version. (Unix
-# happily replaces a running binary; the in-flight process keeps the old
-# inode.)
+#   crates/giant/giant.yaml       → //crates/giant:giant       (the engine)
+#   crates/giant-task/giant.yaml  → //crates/giant-task:giant-task
+#   crates/giant-tui/giant.yaml   → //crates/giant-tui:giant-tui
+#   docs-site/giant.yaml          → //docs-site:install, //docs-site:build
 #
-# Bootstrap: `cargo install --path .` once, then giant builds giant.
+# This root file keeps the workspace-global settings, the toolchain target
+# (its inputs are root files), and the tasks.
 #
-# Toolchain pinning: `//toolchain/devenv` emits the realized devenv
-# profile store path as its identity. Every build target depends on it,
-# so a toolchain change re-keys them and stale artifacts are never reused
-# across machines or upgrades. The profile is the whole dev environment
-# (coarse: bumping any tool, even one unrelated to a given target,
-# rebuilds it) but it never misses an input - the right default for a
-# correctness check. Cargo.lock stays in each target's inputs: it pins
-# dependencies, a separate axis from the toolchain.
+# Toolchain pinning: `//:devenv` emits the realized devenv profile store
+# path as its identity. Every build target depends on it, so a toolchain
+# change re-keys them and stale artifacts are never reused across machines
+# or upgrades. The profile is the whole dev environment (coarse: bumping
+# any tool rebuilds everything) but it never misses an input - the right
+# default for a correctness check. Cargo.lock stays in each target's
+# inputs: it pins dependencies, a separate axis from the toolchain.
 # -----------------------------------------------------------------------------
 targets:
   - name: "devenv"
@@ -37,79 +35,6 @@ targets:
     outputs: [".giant/toolchains/devenv.id"]
     command: "readlink -f .devenv/profile > .giant/toolchains/devenv.id"
     tags: ["toolchain"]
-
-  - name: "giant"
-    inputs:
-      - "crates/giant/src/**/*.rs"
-      - "crates/giant/build.rs"
-      - "crates/giant/Cargo.toml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-    outputs: ["bin/giant"]
-    command: "cargo build --release -p giant --bin giant && install -m 0755 target/release/giant bin/giant"
-    timeout: 600
-    deps: [":devenv"]
-    tags: ["bin", "rust"]
-
-  - name: "giant-task"
-    inputs:
-      - "crates/giant-task/src/**/*.rs"
-      - "crates/giant-task/Cargo.toml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-    outputs: ["bin/giant-task"]
-    # -p selects the workspace member; --bin disambiguates within it.
-    command: "cargo build --release -p giant-task --bin giant-task && install -m 0755 target/release/giant-task bin/giant-task"
-    timeout: 600
-    deps: [":devenv"]
-    tags: ["bin", "rust", "porcelain"]
-
-  - name: "giant-tui"
-    inputs:
-      - "crates/giant-tui/src/**/*.rs"
-      - "crates/giant-tui/Cargo.toml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-    outputs: ["bin/giant-tui"]
-    command: "cargo build --release -p giant-tui --bin giant-tui && install -m 0755 target/release/giant-tui bin/giant-tui"
-    timeout: 600
-    deps: [":devenv"]
-    tags: ["bin", "rust", "porcelain"]
-
-  - name: "install"
-    inputs:
-      - "docs-site/package.json"
-      - "docs-site/package-lock.json"
-    outputs:
-      - "docs-site/node_modules/.package-lock.json"
-    cwd: "docs-site"
-    command: "npm ci"
-    timeout: 180
-    deps: [":devenv"]
-    tags: ["docs"]
-
-  - name: "build"
-    # Explicit input list - input globs don't (yet) support `!exclude`,
-    # so we list the source dirs + top-level files rather than `**/*`
-    # which would pick up node_modules/, dist/, and .astro/.
-    inputs:
-      - "docs-site/src/**/*"
-      - "docs-site/public/**/*"
-      - "docs-site/astro.config.mjs"
-      - "docs-site/tsconfig.json"
-      - "docs-site/package.json"
-      - "docs-site/package-lock.json"
-    outputs:
-      - "docs-site/dist/index.html"
-      - "docs-site/dist/sitemap-index.xml"
-    cwd: "docs-site"
-    command: "npx astro build"
-    timeout: 120
-    # Depends on the toolchain directly, not just via docs:install - astro
-    # runs node here, and output-cutoff on docs:install could otherwise
-    # hide a toolchain change from this target.
-    deps: [":install", ":devenv"]
-    tags: ["docs"]
 
 # -----------------------------------------------------------------------------
 # Tasks - named commands. Most are `cargo X` wrappers; the docs pipeline
@@ -158,23 +83,26 @@ tasks:
   bin:
     command: "echo refreshed bin/giant, bin/giant-task, and bin/giant-tui"
     description: "build the binaries and install them into ./bin"
-    deps: ["//:giant", "//:giant-task", "//:giant-tui"]
+    deps:
+      - "//crates/giant:giant"
+      - "//crates/giant-task:giant-task"
+      - "//crates/giant-tui:giant-tui"
 
   docs:
     command: "echo docs built to docs-site/dist/"
     description: "build the static docs site"
-    deps: ["//:build"]
+    deps: ["//docs-site:build"]
 
   docs-dev:
     # "$@" forwards anything after `giant task docs-dev --` to astro,
     # so e.g. `giant task docs-dev -- --host` binds on all interfaces.
     command: 'npx astro dev "$@"'
     description: "serve the docs site at localhost:4321 (blocks)"
-    deps: ["//:install"]
+    deps: ["//docs-site:install"]
     cwd: "docs-site"
 
   docs-preview:
     command: 'npx astro preview "$@"'
     description: "preview the production-built docs site"
-    deps: ["//:build"]
+    deps: ["//docs-site:build"]
     cwd: "docs-site"

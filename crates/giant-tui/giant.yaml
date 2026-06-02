@@ -1,0 +1,14 @@
+# Package //crates/giant-tui - the TUI porcelain binary.
+targets:
+  - name: "giant-tui"
+    inputs:
+      - "src/**/*.rs"
+      - "Cargo.toml"
+      - "//Cargo.toml"
+      - "//Cargo.lock"
+    outputs: ["//bin/giant-tui"]
+    cwd: "//"
+    command: "cargo build --release -p giant-tui --bin giant-tui && install -m 0755 target/release/giant-tui bin/giant-tui"
+    timeout_secs: 600
+    deps: ["//:devenv"]
+    tags: ["bin", "rust", "porcelain"]
