@@ -26,7 +26,7 @@ pub struct ExplainArgs {
     /// Compare this target's cache-key breakdown against another
     /// target's. Useful for "why does target X have a different key
     /// than target Y?" The output is a unified diff of command, cwd,
-    /// env, file inputs, structural inputs, and dep outputs.
+    /// env, file inputs, and dep outputs.
     #[arg(
         long,
         value_name = "OTHER_TARGET",
@@ -230,20 +230,6 @@ fn print_breakdown(
     }
     let _ = writeln!(w);
 
-    let _ = writeln!(w, "structural inputs ({}):", bd.structural_inputs.len());
-    for (i, s) in bd.structural_inputs.iter().enumerate() {
-        let _ = writeln!(w, "  [{}] files: {}", i + 1, s.files.join(", "));
-        let _ = writeln!(w, "      lines: {:?}", s.lines);
-        if !s.scope.is_empty() {
-            let _ = writeln!(w, "      scope: {}", s.scope.join(", "));
-        }
-        let _ = writeln!(w, "      fingerprint: {}", s.fingerprint.to_hex());
-    }
-    if bd.structural_inputs.is_empty() {
-        let _ = writeln!(w, "  (none)");
-    }
-    let _ = writeln!(w);
-
     let _ = writeln!(w, "deps ({}):", bd.dep_outputs.len());
     for (d, oh) in &bd.dep_outputs {
         let _ = writeln!(w, "  {:<60} {}", d, &oh.to_hex()[..16]);
@@ -314,12 +300,6 @@ fn print_diff(
     diff_file_inputs(&mut w, &lbd.file_inputs, &rbd.file_inputs);
 
     diff_dep_outputs(&mut w, &lbd.dep_outputs, &rbd.dep_outputs);
-
-    // Structural inputs: compare by index, ordered the same as in the
-    // key. We treat them as opaque blobs keyed on fingerprint - that's
-    // what feeds the cache key. A mismatch points the user at one of
-    // the discovery-time aggregations.
-    diff_structural(&mut w, &lbd.structural_inputs, &rbd.structural_inputs);
 
     let _ = w.flush();
 }
@@ -433,51 +413,6 @@ fn diff_dep_outputs<W: Write>(
                     r.map(|h| h.to_hex()[..16].to_string())
                         .unwrap_or_else(|| "<absent>".into())
                 );
-            }
-        }
-    }
-    if wrote_header {
-        let _ = writeln!(w);
-    }
-}
-
-fn diff_structural<W: Write>(
-    w: &mut W,
-    left: &[crate::executor::StructuralContribution],
-    right: &[crate::executor::StructuralContribution],
-) {
-    let n = left.len().max(right.len());
-    let mut wrote_header = false;
-    for i in 0..n {
-        let l = left.get(i);
-        let r = right.get(i);
-        let same = match (l, r) {
-            (Some(a), Some(b)) => a.fingerprint == b.fingerprint,
-            _ => false,
-        };
-        if same {
-            continue;
-        }
-        if !wrote_header {
-            let _ = writeln!(w, "── structural inputs ──");
-            wrote_header = true;
-        }
-        match l {
-            Some(s) => {
-                let _ = writeln!(w, "  - [{}] {}", i + 1, s.fingerprint.to_hex());
-                let _ = writeln!(w, "      files: {}", s.files.join(", "));
-            }
-            None => {
-                let _ = writeln!(w, "  - [{}] <absent>", i + 1);
-            }
-        }
-        match r {
-            Some(s) => {
-                let _ = writeln!(w, "  + [{}] {}", i + 1, s.fingerprint.to_hex());
-                let _ = writeln!(w, "      files: {}", s.files.join(", "));
-            }
-            None => {
-                let _ = writeln!(w, "  + [{}] <absent>", i + 1);
             }
         }
     }

@@ -225,9 +225,9 @@ impl PatternMatcher {
 /// Set of targets whose inputs match any of the given changed files,
 /// plus everything transitively downstream of them.
 ///
-/// "Matches" means: any input glob on the target (file or structural)
-/// `Pattern::matches` the workspace-relative path. We don't try to
-/// resolve "is this file ACTUALLY going to change the cache key?" -
+/// "Matches" means: any input glob on the target `Pattern::matches` the
+/// workspace-relative path. We don't try to resolve "is this file
+/// ACTUALLY going to change the cache key?" -
 /// that's the job of the cache-key compute. Affected detection just
 /// has to be sound (over-include is fine; under-include is a bug).
 pub fn affected_targets(graph: &BuildGraph, changed_files: &[&Path]) -> HashSet<TargetId> {
@@ -259,17 +259,12 @@ pub fn affected_targets(graph: &BuildGraph, changed_files: &[&Path]) -> HashSet<
 
 fn target_inputs_match_any(spec: &crate::model::TargetSpec, files: &[String]) -> bool {
     for input in &spec.inputs {
-        let globs: Vec<&str> = match input {
-            Input::File { glob } => vec![glob.as_str()],
-            Input::Structural { files: gs, .. } => gs.iter().map(|g| g.as_str()).collect(),
+        let Input::File { glob } = input;
+        let Ok(pattern) = glob::Pattern::new(glob.as_str()) else {
+            continue;
         };
-        for raw in globs {
-            let Ok(pattern) = glob::Pattern::new(raw) else {
-                continue;
-            };
-            if files.iter().any(|f| pattern.matches(f)) {
-                return true;
-            }
+        if files.iter().any(|f| pattern.matches(f)) {
+            return true;
         }
     }
     false
@@ -362,34 +357,6 @@ mod tests {
         ]);
         let aff = affected_targets(&g, &[Path::new("src/a/main.go")]);
         assert_eq!(aff, [TargetId::new("a")].into());
-    }
-
-    #[test]
-    fn structural_input_glob_matches_too() {
-        let g = graph_with(vec![TargetSpec {
-            id: TargetId::new("discover:go"),
-            inputs: vec![Input::Structural {
-                files: vec![GlobPattern::new("**/*.go").unwrap()],
-                lines: vec!["package ".into()],
-                scope: vec![],
-            }],
-            outputs: vec![OutputPath::new("d.json").unwrap()],
-            deps: vec![],
-            command: "true".into(),
-            cwd: WsRelPath::default(),
-            env: Default::default(),
-            cache: Some(true),
-            remote_cache: true,
-            exists: None,
-            timeout_secs: None,
-            test: false,
-            tags: Default::default(),
-            label: None,
-            scope: Vec::new(),
-            inferred_deps: Default::default(),
-        }]);
-        let aff = affected_targets(&g, &[Path::new("internal/util.go")]);
-        assert_eq!(aff, [TargetId::new("discover:go")].into());
     }
 
     // -------- pattern resolution (TDD-0011) --------

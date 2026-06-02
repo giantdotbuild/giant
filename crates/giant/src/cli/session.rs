@@ -924,11 +924,6 @@ async fn emit_catalog(tx: &EventSender, graph: &BuildGraph) {
             .iter()
             .map(|i| match i {
                 Input::File { glob } => glob.as_str().to_string(),
-                Input::Structural { files, .. } => {
-                    let joined: Vec<String> =
-                        files.iter().map(|g| g.as_str().to_string()).collect();
-                    format!("structural:{}", joined.join(","))
-                }
             })
             .collect();
         let _ = tx

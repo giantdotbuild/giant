@@ -22,7 +22,6 @@ pub mod paths;
 pub mod remote;
 pub mod renderer;
 pub mod selection;
-pub mod structural;
 pub mod types;
 pub mod watcher;
 

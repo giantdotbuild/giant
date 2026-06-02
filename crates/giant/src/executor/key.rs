@@ -1,7 +1,7 @@
 //! Cache-key composition (TDD-0009). Computes a target's content-addressed
-//! cache key from command, cwd, env, file inputs, structural inputs, and
-//! dep output hashes. `giant explain` reaches in via the `_with_breakdown`
-//! variant to show users what fed the hash.
+//! cache key from command, cwd, env, file inputs, and dep output hashes.
+//! `giant explain` reaches in via the `_with_breakdown` variant to show
+//! users what fed the hash.
 
 use super::ExecutorError;
 use crate::cache::LocalCache;
@@ -15,7 +15,8 @@ const GIANT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TARGET_TRIPLE: &str = env!("GIANT_TARGET_TRIPLE");
 
 /// Schema version for the cache-key composition. Bump on any change.
-const KEY_SCHEMA: &str = "v1";
+/// v2: dropped the `structural_inputs` section (ADR-0025).
+const KEY_SCHEMA: &str = "v2";
 
 /// Breakdown of what went into a target's cache key. Populated when the
 /// caller asks for it (see `compute_cache_key_with_breakdown`); the
@@ -30,7 +31,6 @@ pub struct CacheKeyBreakdown {
     pub user_env: std::collections::BTreeMap<String, String>,
     pub built_in_env: std::collections::BTreeMap<String, String>,
     pub file_inputs: Vec<FileInputContribution>,
-    pub structural_inputs: Vec<StructuralContribution>,
     /// dep_id → output_content_hash. The caller fills this in *after*
     /// the hash is computed (the inner compose has no view of dep IDs).
     pub dep_outputs: std::collections::BTreeMap<TargetId, ContentHash>,
@@ -41,14 +41,6 @@ pub struct FileInputContribution {
     pub rel_path: String,
     pub content_hash: ContentHash,
     pub size: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct StructuralContribution {
-    pub files: Vec<String>,
-    pub lines: Vec<String>,
-    pub scope: Vec<String>,
-    pub fingerprint: ContentHash,
 }
 
 /// Compute the cache key for a target. See TDD-0009 §Cache key composition.
@@ -121,15 +113,14 @@ fn empty_breakdown(spec: &TargetSpec) -> CacheKeyBreakdown {
             .collect(),
         built_in_env: built_in,
         file_inputs: Vec::new(),
-        structural_inputs: Vec::new(),
         dep_outputs: std::collections::BTreeMap::new(),
     }
 }
 
 /// The actual cache-key hash composition. Sync; caller wraps in
-/// spawn_blocking. If `breakdown` is `Some`, populates `file_inputs` and
-/// `structural_inputs` alongside hashing so `giant explain` can show
-/// exactly what bytes fed the hash.
+/// spawn_blocking. If `breakdown` is `Some`, populates `file_inputs`
+/// alongside hashing so `giant explain` can show exactly what bytes fed
+/// the hash.
 fn compose_cache_key_blocking(
     spec: &TargetSpec,
     workspace_root: &AbsPath,
@@ -170,55 +161,15 @@ fn compose_cache_key_blocking(
 
     // file inputs (expand globs, sort, hash content)
     h.update(b"file_inputs\0");
-    let mut file_globs: Vec<&str> = Vec::new();
-    // Collect structural-input specs as we walk; they hash separately
-    // so the section is independent of file-input order.
-    let mut structurals: Vec<StructuralSpec> = Vec::new();
-    for input in &spec.inputs {
-        match input {
-            Input::File { glob } => {
-                file_globs.push(glob.as_str());
-            }
-            Input::Structural {
-                files,
-                lines,
-                scope,
-            } => {
-                structurals.push(StructuralSpec {
-                    files: files.iter().map(|g| g.as_str().to_string()).collect(),
-                    lines: lines.clone(),
-                    scope: scope
-                        .iter()
-                        .map(|s| s.as_path().to_string_lossy().into_owned())
-                        .collect(),
-                });
-            }
-        }
-    }
-    // Canonicalise the structural specs ahead of time so the
-    // parallel-computed section is deterministic on both sides of
-    // the join. Sorts are cheap on a handful of specs.
-    for s in &mut structurals {
-        s.files.sort();
-        s.lines.sort();
-        s.scope.sort();
-    }
-    structurals.sort();
+    let file_globs: Vec<&str> = spec
+        .inputs
+        .iter()
+        .map(|input| match input {
+            Input::File { glob } => glob.as_str(),
+        })
+        .collect();
 
-    // Independent work - run concurrently. The file-input branch
-    // walks + hashes; the structural branch consults the gix
-    // fast-path / sidecar. Neither touches the other's data, so
-    // rayon::join gives us a clean wall-time overlap of the slower
-    // of the two phases.
-    let (file_result, structural_result): (
-        Result<Vec<FileInputItem>, std::io::Error>,
-        Result<Vec<ContentHash>, std::io::Error>,
-    ) = rayon::join(
-        || compute_file_inputs(workspace_root, cache, &file_globs),
-        || compute_structural_inputs(workspace_root, cache, &spec.id, &structurals),
-    );
-    let file_items = file_result?;
-    let structural_items = structural_result?;
+    let file_items = compute_file_inputs(workspace_root, cache, &file_globs)?;
 
     // Hash file_inputs section in deterministic order.
     for item in &file_items {
@@ -231,36 +182,6 @@ fn compose_cache_key_blocking(
                 rel_path: item.rel_path.clone(),
                 content_hash: item.content_hash,
                 size: item.size,
-            });
-        }
-    }
-
-    // Hash structural_inputs section. Same shape as before.
-    h.update(b"structural_inputs\0");
-    for (s, fp) in structurals.iter().zip(structural_items.iter()) {
-        for f in &s.files {
-            h.update(f.as_bytes());
-            h.update(b"\0");
-        }
-        h.update(b"|\0");
-        for l in &s.lines {
-            h.update(l.as_bytes());
-            h.update(b"\0");
-        }
-        h.update(b"|\0");
-        for sc in &s.scope {
-            h.update(sc.as_bytes());
-            h.update(b"\0");
-        }
-        h.update(b"|\0");
-        h.update(fp.as_bytes());
-        h.update(b"\0");
-        if let Some(bd) = breakdown.as_deref_mut() {
-            bd.structural_inputs.push(StructuralContribution {
-                files: s.files.clone(),
-                lines: s.lines.clone(),
-                scope: s.scope.clone(),
-                fingerprint: *fp,
             });
         }
     }
@@ -320,41 +241,6 @@ fn compute_file_inputs(
             })
         })
         .collect()
-}
-
-/// Compute structural-input fingerprints. Sequential across structural
-/// specs (usually only 1-2 per target) since `compute_fingerprint`
-/// uses gix and a per-target sidecar - contention rather than gain if
-/// parallelised at this layer.
-fn compute_structural_inputs(
-    workspace_root: &AbsPath,
-    cache: &LocalCache,
-    target_id: &TargetId,
-    structurals: &[StructuralSpec],
-) -> Result<Vec<ContentHash>, std::io::Error> {
-    structurals
-        .iter()
-        .map(|s| {
-            crate::structural::compute_fingerprint(
-                workspace_root,
-                cache,
-                target_id,
-                &s.files,
-                &s.lines,
-                &s.scope,
-            )
-            .map_err(|e| std::io::Error::other(e.to_string()))
-        })
-        .collect()
-}
-
-/// Internal canonical representation of one structural input, used to
-/// build a deterministic section of the cache key.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct StructuralSpec {
-    files: Vec<String>,
-    lines: Vec<String>,
-    scope: Vec<String>,
 }
 
 /// Expand a set of input globs against the workspace at most once.

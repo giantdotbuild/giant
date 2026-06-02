@@ -3,11 +3,11 @@
 //! See TDD-0007 for the on-disk layout, TDD-0012 for eviction. This module
 //! implements:
 //!
-//! - Directory layout (`ac/`, `cas/`, `structural/`, `tmp/`, `version`).
+//! - Directory layout (`ac/`, `cas/`, `log/`, `tmp/`, `version`).
 //! - Atomic writes via write-then-rename through `tmp/`.
 //! - Action-cache and content-addressed-storage read / write.
 
-use crate::model::{CacheKey, ContentHash, TargetId};
+use crate::model::{CacheKey, ContentHash};
 use crate::paths::AbsPath;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -70,7 +70,7 @@ impl LocalCache {
         let root = self.root.as_path().to_path_buf();
         let cache = self.clone();
         spawn_blocking(move || -> Result<(), CacheError> {
-            for sub in ["ac", "cas", "structural", "log", "tmp"] {
+            for sub in ["ac", "cas", "log", "tmp"] {
                 std::fs::create_dir_all(root.join(sub))?;
             }
             // Set 0700 on cache root (TDD-0007 §Permissions).
@@ -245,51 +245,6 @@ impl LocalCache {
     }
 
     // -----------------------------------------------------------------
-    // Structural-input sidecar storage (TDD-0002 / TDD-0007).
-    //
-    // The sidecar is a per-target JSON file holding per-file fingerprint
-    // state used to skip re-reads on warm validation. Sidecar path is
-    // sharded by hash of the target ID. Sync because the caller is
-    // already inside spawn_blocking (cache-key computation).
-    // -----------------------------------------------------------------
-
-    fn structural_sidecar_path(&self, target_id: &TargetId) -> PathBuf {
-        let hex = ContentHash::of_bytes(target_id.as_str().as_bytes()).to_hex();
-        let prefix = &hex[..2];
-        self.root
-            .as_path()
-            .join("structural")
-            .join(prefix)
-            .join(format!("{hex}.json"))
-    }
-
-    /// Read the raw bytes of a structural sidecar, or `Ok(None)` if absent.
-    /// Sync helper for use inside `spawn_blocking`.
-    pub fn get_structural_sidecar_raw(
-        &self,
-        target_id: &TargetId,
-    ) -> Result<Option<Vec<u8>>, CacheError> {
-        let path = self.structural_sidecar_path(target_id);
-        match std::fs::read(&path) {
-            Ok(b) => Ok(Some(b)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Write the raw bytes of a structural sidecar atomically.
-    /// Sync helper for use inside `spawn_blocking`.
-    pub fn put_structural_sidecar_raw(
-        &self,
-        target_id: &TargetId,
-        bytes: &[u8],
-    ) -> Result<(), CacheError> {
-        let path = self.structural_sidecar_path(target_id);
-        let tmp = self.new_tmp_path()?;
-        atomic_write_blocking(&tmp, &path, bytes)
-    }
-
-    // -----------------------------------------------------------------
     // Size accounting + LRU eviction (TDD-0012).
     //
     // The v1 design is "scan on demand" - no `size.json` counter, no
@@ -298,9 +253,8 @@ impl LocalCache {
     // TDD are a future optimization for >100k-entry caches.
     // -----------------------------------------------------------------
 
-    /// Total bytes consumed by the cache (ac/ + cas/ + structural/ +
-    /// log/). Excludes tmp/ and version. One filesystem walk; doesn't
-    /// open files.
+    /// Total bytes consumed by the cache (ac/ + cas/ + log/). Excludes
+    /// tmp/ and version. One filesystem walk; doesn't open files.
     pub async fn total_size(&self) -> Result<u64, CacheError> {
         let root = self.root.as_path().to_path_buf();
         let n = spawn_blocking(move || compute_total_size(&root)).await??;
@@ -338,7 +292,7 @@ pub struct EvictionReport {
 /// Sum the file sizes under the cache's tracked subdirs.
 fn compute_total_size(root: &Path) -> Result<u64, CacheError> {
     let mut total = 0u64;
-    for sub in ["ac", "cas", "structural", "log"] {
+    for sub in ["ac", "cas", "log"] {
         let dir = root.join(sub);
         if dir.exists() {
             total = total.saturating_add(dir_size(&dir)?);
@@ -651,7 +605,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let abs = AbsPath::new(dir.path().to_path_buf());
         let _cache = LocalCache::open(abs).await.unwrap();
-        for sub in ["ac", "cas", "structural", "log", "tmp"] {
+        for sub in ["ac", "cas", "log", "tmp"] {
             assert!(dir.path().join(sub).is_dir(), "expected {sub}/ to exist");
         }
         assert!(dir.path().join("version").is_file());
@@ -670,7 +624,7 @@ mod tests {
     async fn version_mismatch_rejected() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("version"), "999\n").unwrap();
-        for sub in ["ac", "cas", "structural", "log", "tmp"] {
+        for sub in ["ac", "cas", "log", "tmp"] {
             std::fs::create_dir_all(dir.path().join(sub)).unwrap();
         }
         let abs = AbsPath::new(dir.path().to_path_buf());

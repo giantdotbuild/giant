@@ -8,9 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Mtime as nanoseconds since unix epoch. `None` when the platform doesn't
-/// expose mtime or the value would overflow `u64` (year 2554+). Shared by
-/// `structural.rs` (Stage 2 mtime-skip) and `discovery.rs` (verify_reads
-/// fast path).
+/// expose mtime or the value would overflow `u64` (year 2554+). Used by
+/// `discovery.rs` (verify_reads fast path).
 pub fn mtime_ns(m: &std::fs::Metadata) -> Option<u64> {
     use std::time::SystemTime;
     let t = m.modified().ok()?;

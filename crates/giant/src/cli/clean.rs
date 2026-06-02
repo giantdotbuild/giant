@@ -218,7 +218,6 @@ fn read_target_id(path: &Path) -> Option<String> {
 struct Stats {
     ac: u64,
     cas: u64,
-    structural: u64,
     log: u64,
     total_bytes: u64,
     total_entries: u64,
@@ -252,8 +251,6 @@ fn collect_stats(root: &Path) -> Stats {
             s.ac += 1;
         } else if rel.starts_with("cas/") {
             s.cas += 1;
-        } else if rel.starts_with("structural/") {
-            s.structural += 1;
         } else if rel.starts_with("log/") {
             s.log += 1;
         }
@@ -269,11 +266,8 @@ fn print_summary(root: &Path, s: &Stats) {
     }
     println!("  size:    {}", human_bytes(s.total_bytes));
     println!("  entries: {} total", s.total_entries);
-    if s.ac > 0 || s.cas > 0 || s.structural > 0 || s.log > 0 {
-        println!(
-            "    {} AC, {} CAS, {} structural, {} log",
-            s.ac, s.cas, s.structural, s.log
-        );
+    if s.ac > 0 || s.cas > 0 || s.log > 0 {
+        println!("    {} AC, {} CAS, {} log", s.ac, s.cas, s.log);
     }
 }
 

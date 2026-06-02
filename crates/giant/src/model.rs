@@ -1,7 +1,7 @@
 //! Core types: `TargetId`, `ContentHash`, `CacheKey`, `TargetSpec`.
 //!
 //! See TDD-0001 for the schema, TDD-0009 for cache-key composition,
-//! TDD-0002 for structural input semantics.
+//! ADR-0007 for the YAML-as-sugar input forms.
 
 use crate::paths::{OutputPath, WsRelPath};
 use crate::types::GlobPattern;
@@ -206,19 +206,7 @@ impl TargetSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "InputRaw", into = "InputRaw")]
 pub enum Input {
-    File {
-        glob: GlobPattern,
-    },
-    Structural {
-        /// One or many globs; matches are unioned.
-        files: Vec<GlobPattern>,
-        /// Substring-prefix patterns. A line matches if it `starts_with` one.
-        lines: Vec<String>,
-        /// Optional scope for `git status` pathspecs. Auto-derived from
-        /// `files` when absent (TDD-0002 §Scope auto-derivation).
-        #[serde(default)]
-        scope: Vec<WsRelPath>,
-    },
+    File { glob: GlobPattern },
 }
 
 /// Wire format for `Input` - accepts a bare string or a tagged object.
@@ -232,33 +220,7 @@ enum InputRaw {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum InputTagged {
-    File {
-        glob: String,
-    },
-    Structural {
-        files: GlobOrList,
-        lines: Vec<String>,
-        #[serde(default)]
-        scope: Vec<WsRelPath>,
-    },
-}
-
-/// One glob string or a list of glob strings, untagged so YAML/JSON can give
-/// either form.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-enum GlobOrList {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl GlobOrList {
-    fn into_vec(self) -> Vec<String> {
-        match self {
-            GlobOrList::One(s) => vec![s],
-            GlobOrList::Many(v) => v,
-        }
-    }
+    File { glob: String },
 }
 
 impl TryFrom<InputRaw> for Input {
@@ -271,25 +233,6 @@ impl TryFrom<InputRaw> for Input {
             InputRaw::Tagged(InputTagged::File { glob }) => GlobPattern::new(glob)
                 .map(|g| Input::File { glob: g })
                 .map_err(|e| format!("invalid glob: {e}")),
-            InputRaw::Tagged(InputTagged::Structural {
-                files,
-                lines,
-                scope,
-            }) => {
-                if lines.is_empty() {
-                    return Err("structural input requires at least one line pattern".into());
-                }
-                let files: Result<Vec<GlobPattern>, _> = files
-                    .into_vec()
-                    .into_iter()
-                    .map(|s| GlobPattern::new(s).map_err(|e| format!("invalid glob: {e}")))
-                    .collect();
-                Ok(Input::Structural {
-                    files: files?,
-                    lines,
-                    scope,
-                })
-            }
         }
     }
 }
@@ -300,22 +243,6 @@ impl From<Input> for InputRaw {
             Input::File { glob } => InputRaw::Tagged(InputTagged::File {
                 glob: glob.as_str().to_string(),
             }),
-            Input::Structural {
-                files,
-                lines,
-                scope,
-            } => {
-                let files = if files.len() == 1 {
-                    GlobOrList::One(files.into_iter().next().unwrap().as_str().to_string())
-                } else {
-                    GlobOrList::Many(files.into_iter().map(|g| g.as_str().to_string()).collect())
-                };
-                InputRaw::Tagged(InputTagged::Structural {
-                    files,
-                    lines,
-                    scope,
-                })
-            }
         }
     }
 }
@@ -348,10 +275,8 @@ mod tests {
     fn input_deserializes_from_bare_string() {
         let yaml = r#""src/**/*.go""#;
         let input: Input = serde_yaml_ng::from_str(yaml).unwrap();
-        match input {
-            Input::File { glob } => assert_eq!(glob.as_str(), "src/**/*.go"),
-            _ => panic!("expected File"),
-        }
+        let Input::File { glob } = input;
+        assert_eq!(glob.as_str(), "src/**/*.go");
     }
 
     #[test]
@@ -359,54 +284,6 @@ mod tests {
         let yaml = r#"{ kind: file, glob: "src/**/*.go" }"#;
         let input: Input = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(matches!(input, Input::File { .. }));
-    }
-
-    #[test]
-    fn input_deserializes_structural_with_single_glob() {
-        let yaml = r#"
-            kind: structural
-            files: "**/*.go"
-            lines: ["^package ", "^import "]
-        "#;
-        let input: Input = serde_yaml_ng::from_str(yaml).unwrap();
-        match input {
-            Input::Structural {
-                files,
-                lines,
-                scope,
-            } => {
-                assert_eq!(files.len(), 1);
-                assert_eq!(files[0].as_str(), "**/*.go");
-                assert_eq!(lines, vec!["^package ", "^import "]);
-                assert!(scope.is_empty());
-            }
-            _ => panic!("expected Structural"),
-        }
-    }
-
-    #[test]
-    fn input_deserializes_structural_with_multiple_globs() {
-        let yaml = r#"
-            kind: structural
-            files: ["**/*.go", "**/*.s"]
-            lines: ["^package "]
-        "#;
-        let input: Input = serde_yaml_ng::from_str(yaml).unwrap();
-        match input {
-            Input::Structural { files, .. } => assert_eq!(files.len(), 2),
-            _ => panic!("expected Structural"),
-        }
-    }
-
-    #[test]
-    fn input_rejects_structural_without_lines() {
-        let yaml = r#"
-            kind: structural
-            files: "**/*.go"
-            lines: []
-        "#;
-        let result: Result<Input, _> = serde_yaml_ng::from_str(yaml);
-        assert!(result.is_err());
     }
 
     #[test]

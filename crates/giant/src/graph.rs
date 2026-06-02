@@ -240,21 +240,16 @@ fn compute_inferred_edges(
     let mut edges: Vec<(TargetId, TargetId)> = Vec::new();
     for (id, spec) in targets {
         for input in &spec.inputs {
-            let globs: Vec<&str> = match input {
-                Input::File { glob } => vec![glob.as_str()],
-                Input::Structural { files, .. } => files.iter().map(|g| g.as_str()).collect(),
+            let Input::File { glob } = input;
+            let Ok(pattern) = glob::Pattern::new(glob.as_str()) else {
+                continue;
             };
-            for raw in globs {
-                let Ok(pattern) = glob::Pattern::new(raw) else {
-                    continue;
-                };
-                for (output_path, prod) in &producer {
-                    if prod == id {
-                        continue; // a target doesn't depend on itself
-                    }
-                    if pattern.matches(output_path) {
-                        edges.push((id.clone(), prod.clone()));
-                    }
+            for (output_path, prod) in &producer {
+                if prod == id {
+                    continue; // a target doesn't depend on itself
+                }
+                if pattern.matches(output_path) {
+                    edges.push((id.clone(), prod.clone()));
                 }
             }
         }

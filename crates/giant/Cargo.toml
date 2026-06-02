@@ -38,10 +38,8 @@ petgraph = "0.8"
 dashmap = "6"
 rayon = "1"
 
-# Git (for structural input fast-path)
+# Git (repo discovery for affected detection + fsmonitor config)
 gix = { version = "0.68", default-features = false, features = [
-    "status",
-    "dirwalk",
     "parallel",
 ] }
 

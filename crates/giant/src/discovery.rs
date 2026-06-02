@@ -109,8 +109,7 @@ pub fn discovery_cache_key(spec: &TargetSpec, workspace_root: &AbsPath) -> Cache
 
 /// Expand the discovery target's declared `inputs:` to (workspace-
 /// relative path, content hash) pairs. Globs are resolved against
-/// `workspace_root`. `Input::Structural` is ignored - that variant
-/// is for regular targets' wave-mode inputs and doesn't apply here.
+/// `workspace_root`.
 fn expand_declared_inputs(
     spec: &TargetSpec,
     workspace_root: &AbsPath,
@@ -119,9 +118,7 @@ fn expand_declared_inputs(
     let ws = workspace_root.as_path();
     let mut out: Vec<(PathBuf, ContentHash)> = Vec::new();
     for input in &spec.inputs {
-        let Input::File { glob } = input else {
-            continue;
-        };
+        let Input::File { glob } = input;
         let pattern = ws.join(glob.as_str());
         let Some(pattern_str) = pattern.to_str() else {
             continue;
@@ -465,7 +462,6 @@ pub fn materialize_reads(
 ///   1. **mtime + size skip.** For file entries with recorded
 ///      `(mtime_ns, size)`, the verifier stats the current file and
 ///      reuses the recorded `content_hash` when both still match.
-///      Same idea as the structural-input sidecar's Stage 2 path.
 ///   2. **mtime skip for dirs.** Adding or removing a child file bumps
 ///      the parent dir's mtime on every common filesystem, so an
 ///      unchanged dir mtime means the listing hash is still valid.

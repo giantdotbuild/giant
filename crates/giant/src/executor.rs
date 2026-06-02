@@ -10,10 +10,7 @@ mod key;
 mod run;
 
 use key::compute_cache_key;
-pub use key::{
-    CacheKeyBreakdown, FileInputContribution, StructuralContribution,
-    compute_cache_key_with_breakdown,
-};
+pub use key::{CacheKeyBreakdown, FileInputContribution, compute_cache_key_with_breakdown};
 use run::{result_output_hash, run_target, try_cache_hit, try_exists_check, try_remote_hit};
 
 use crate::cache::LocalCache;

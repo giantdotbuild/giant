@@ -477,28 +477,6 @@ targets:
     }
 
     #[test]
-    fn load_with_structural_input() {
-        let f = write_yaml(
-            r#"
-workspace:
-  name: myproject
-targets:
-  - id: "discover:go"
-    inputs:
-      - "go.mod"
-      - kind: structural
-        files: "**/*.go"
-        lines: ["^package ", "^import "]
-    outputs: [".giant/d/go.json"]
-    command: "tools/discover-go.sh"
-"#,
-        );
-        let cfg = Config::load(f.path()).unwrap();
-        let t = &cfg.targets[0];
-        assert_eq!(t.inputs.len(), 2);
-    }
-
-    #[test]
     fn reject_missing_workspace_name() {
         let f = write_yaml(
             r#"
