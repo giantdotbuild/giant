@@ -646,6 +646,57 @@ targets:
 }
 
 #[test]
+fn command_env_exposes_workspace_root_and_package_dir() {
+    // A target in a nested package can reference $GIANT_WORKSPACE_ROOT and
+    // $GIANT_PACKAGE_DIR. The latter is the package's own directory: the
+    // workspace root joined with the package path. We verify the relationship
+    // through `exists` (which sets the same env) - equality means an EXTERNAL
+    // hit and the build command never runs.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: envpaths
+cache:
+  dir: ./cache
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(ws.join("src/app")).unwrap();
+    std::fs::write(
+        ws.join("src/app/giant.yaml"),
+        r#"
+targets:
+  - name: "app"
+    inputs: []
+    outputs: []
+    cache: false
+    command: "echo SHOULD_NOT_RUN > marker.txt"
+    exists: 'test "$GIANT_PACKAGE_DIR" = "$GIANT_WORKSPACE_ROOT/src/app"'
+"#,
+    )
+    .unwrap();
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("EXTERNAL"),
+        "expected external hit (env paths matched); got: {s}"
+    );
+    assert!(!ws.join("src/app/marker.txt").exists());
+}
+
+#[test]
 fn affected_with_file_only_runs_matching_targets() {
     // No git involved - pass --file directly. Verifies the
     // selection::affected_targets path: only `a` (whose input matches
@@ -1946,7 +1997,10 @@ targets:
         .unwrap();
     assert!(out2.status.success());
     let s2 = String::from_utf8_lossy(&out2.stdout);
-    assert!(cached(&s2, "//src/lib:build"), "expected cache hit; got: {s2}");
+    assert!(
+        cached(&s2, "//src/lib:build"),
+        "expected cache hit; got: {s2}"
+    );
 }
 
 #[test]
@@ -1996,7 +2050,9 @@ targets:
     );
     // The lib target produced out.txt and the root target consumed it.
     assert_eq!(
-        std::fs::read_to_string(ws.join("bundle.txt")).unwrap().trim(),
+        std::fs::read_to_string(ws.join("bundle.txt"))
+            .unwrap()
+            .trim(),
         "lib-data"
     );
 
@@ -2065,7 +2121,10 @@ targets:
         .output()
         .unwrap();
     assert!(out2.status.success());
-    assert!(cached(&String::from_utf8_lossy(&out2.stdout), "//src/tool:build"));
+    assert!(cached(
+        &String::from_utf8_lossy(&out2.stdout),
+        "//src/tool:build"
+    ));
 }
 
 #[test]
@@ -2119,7 +2178,10 @@ targets:
     let s = String::from_utf8_lossy(&out.stdout);
     // The parent's `**/*.txt` glob hashes its own file but stops at the
     // nested package - it must not claim the child package's b.txt.
-    assert!(s.contains("src/a.txt"), "expected src/a.txt in inputs; got:\n{s}");
+    assert!(
+        s.contains("src/a.txt"),
+        "expected src/a.txt in inputs; got:\n{s}"
+    );
     assert!(
         !s.contains("src/sub/b.txt"),
         "parent glob crossed the subpackage boundary; got:\n{s}"
@@ -2167,7 +2229,10 @@ targets:
         .output()
         .unwrap();
     let s2 = String::from_utf8_lossy(&out2.stdout);
-    assert!(s2.contains("//:bad"), "failed-last should rebuild //:bad; got:\n{s2}");
+    assert!(
+        s2.contains("//:bad"),
+        "failed-last should rebuild //:bad; got:\n{s2}"
+    );
     assert!(
         !s2.contains("//:ok"),
         "failed-last should NOT touch the target that passed; got:\n{s2}"
@@ -2184,7 +2249,15 @@ fn failed_last_with_no_failures_errors() {
     )
     .unwrap();
     // Clean build, then failed-last has nothing to do.
-    assert!(Command::new(giant_bin()).arg("build").current_dir(ws).output().unwrap().status.success());
+    assert!(
+        Command::new(giant_bin())
+            .arg("build")
+            .current_dir(ws)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
     let out = Command::new(giant_bin())
         .arg("build")
         .arg("failed-last")

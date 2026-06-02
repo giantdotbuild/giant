@@ -49,7 +49,7 @@ This target lives in `cmd/server/giant.yaml`, so its label is
 | `inputs` | File globs whose matched files affect the cache key. Package-relative; `//` anchors to the workspace root. |
 | `outputs` | Files the command produces, relative to `cwd`. Cached. |
 | `deps` | Explicit target dependencies (most are inferred - see below). |
-| `command` | Shell command, run from `cwd`. Required unless `exists` succeeds. `//` is **not** rewritten here - the shell sees it verbatim. Write paths relative to `cwd` (set `cwd: "//"` to act from the workspace root). |
+| `command` | Shell command, run from `cwd`. Required unless `exists` succeeds. `//` is **not** rewritten here - the shell sees it verbatim. Write paths relative to `cwd`, or use `$GIANT_WORKSPACE_ROOT` / `$GIANT_PACKAGE_DIR` (see [below](#environment-giant-sets-for-every-command)). |
 | `cwd` | Working directory. Default: the package directory. `//` anchors to the workspace root. |
 | `env` | Environment variables. Hashed into the cache key. |
 | `test` | Marks this as a test target. `giant test` runs only these. |
@@ -198,7 +198,31 @@ This lets you cache against an external system (Docker daemon, a remote
 registry) without storing the image bytes in Giant's local cache.
 
 `GIANT_CACHE_KEY` (the hex cache key) is provided in the environment
-when `exists` runs.
+when `exists` runs - see below.
+
+## Environment Giant sets for every command
+
+Giant injects a few variables into the environment of every `command`
+(and every `exists` check). Reach for these instead of `//` inside a
+command, which the shell does not rewrite:
+
+| Variable | Value |
+|---|---|
+| `GIANT_WORKSPACE_ROOT` | Absolute path to the workspace root. Write a root-anchored output as `$GIANT_WORKSPACE_ROOT/bin/server` rather than fighting `//`. |
+| `GIANT_PACKAGE_DIR` | Absolute path to this target's package directory (where its `giant.yaml` lives). Equal to the default `cwd`, so it still points at the package even when you set `cwd: "//"`. |
+| `GIANT_CACHE_KEY` | The target's hex cache key. Handy for tagging an external artifact by Giant's identity, e.g. `docker build -t img:$GIANT_CACHE_KEY .`. |
+
+Your `env:` map is applied after these and can override any of them.
+These are the two equivalent ways to land a binary in `//bin/`:
+
+```yaml
+# (a) act from the root
+cwd: "//"
+command: "go build -o bin/server ./cmd/server"
+
+# (b) stay in the package, anchor the output explicitly
+command: "go build -o $GIANT_WORKSPACE_ROOT/bin/server ."
+```
 
 ## Test targets
 

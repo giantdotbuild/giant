@@ -56,7 +56,8 @@ with `cwd: "//"` so the bare `.giant/...` it writes and the `//.giant/...`
 it declares as an output both resolve to the same place at the workspace
 root, regardless of which package the target lives in. (`//` is rewritten
 in `inputs`/`outputs`/`cwd`, but **not** inside `command` - so the command
-writes a path relative to its `cwd`, not a `//`-anchored one.)
+writes a path relative to its `cwd`, or uses `$GIANT_WORKSPACE_ROOT` /
+`$GIANT_PACKAGE_DIR`, never a `//`-anchored path.)
 
 This is the same shape Bazel and Buck2 use: the toolchain is a node in
 the dependency graph, so a toolchain change re-keys exactly the targets

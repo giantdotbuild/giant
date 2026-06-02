@@ -241,9 +241,8 @@ pub(super) async fn try_exists_check(
         .current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("GIANT_CACHE_KEY", key.to_hex())
-        .env("GIANT_WORKSPACE_ROOT", ctx.workspace_root.as_path());
+        .stderr(Stdio::piped());
+    apply_giant_env(&mut cmd, ctx, spec, key);
     apply_color_env(&mut cmd);
     for (k, v) in &spec.env {
         cmd.env(k, v);
@@ -311,9 +310,8 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
         .current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("GIANT_CACHE_KEY", key.to_hex())
-        .env("GIANT_WORKSPACE_ROOT", ctx.workspace_root.as_path());
+        .stderr(Stdio::piped());
+    apply_giant_env(&mut cmd, ctx, spec, key);
 
     // Color preservation: most modern CLIs disable color when they detect
     // stdout is a pipe (we use Stdio::piped). These env vars are the de
@@ -697,6 +695,22 @@ impl OutputFile {
             symlink_target: None,
         }
     }
+}
+
+/// Inject the `GIANT_*` variables every command (and `exists` check) can rely
+/// on: the cache key, the workspace root, and the target's own package
+/// directory. `//` is not rewritten inside a `command` string, so these are the
+/// portable way to reference workspace-root or package paths from the shell -
+/// e.g. `go build -o $GIANT_WORKSPACE_ROOT/bin/server`. The user's `env:` map is
+/// applied after these and can override them.
+fn apply_giant_env(cmd: &mut Command, ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey) {
+    let (package, _) = spec.id.split();
+    cmd.env("GIANT_CACHE_KEY", key.to_hex())
+        .env("GIANT_WORKSPACE_ROOT", ctx.workspace_root.as_path())
+        .env(
+            "GIANT_PACKAGE_DIR",
+            ctx.workspace_root.as_path().join(package),
+        );
 }
 
 /// Set color-forcing env vars on a child command. Each variable is the

@@ -208,8 +208,10 @@ pub(super) async fn execute_with_mode(
     let pattern_selection: Vec<TargetId> = if args.patterns.len() == 1
         && args.patterns[0] == "failed-last"
     {
-        let path =
-            prep::last_failures_path(prepared.workspace_root.as_path(), &prepared.config.state.dir);
+        let path = prep::last_failures_path(
+            prepared.workspace_root.as_path(),
+            &prepared.config.state.dir,
+        );
         let failed: Vec<TargetId> = prep::read_last_failures(&path)
             .into_iter()
             .filter(|id| prepared.graph.get(id).is_some())
