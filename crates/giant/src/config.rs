@@ -458,11 +458,13 @@ impl Config {
         Ok(())
     }
 
-    /// Scan the workspace rooted at `root_dir` and merge every package's
-    /// `giant.yaml` / `giant.json` into one config (TDD-0001 §scan and
-    /// merge). The root config supplies workspace-global settings and its
-    /// own root-package targets; each nested file contributes the targets
-    /// of its package (its directory, workspace-relative).
+    /// Scan the workspace rooted at `root_dir` and merge every config file
+    /// into one config (TDD-0001 §scan and merge). A package directory may
+    /// hold a primary `giant.yaml` plus any number of generator-owned
+    /// `giant.<infix>.yaml` files (ADR-0026); all of them contribute targets
+    /// to that package and are merged together. The primary root config
+    /// supplies workspace-global settings and its own root-package targets;
+    /// every other file is targets-only, scoped to its directory's package.
     pub fn scan(root_dir: &Path) -> Result<Self, ConfigError> {
         let root_path = find_config_in_dir(root_dir).ok_or(ConfigError::NotFound)?;
 
@@ -629,7 +631,10 @@ fn config_declares_workspace(path: &Path) -> bool {
     parsed.is_some_and(|p| !p.workspace.name.is_empty())
 }
 
-/// The `giant.yaml` / `giant.yml` / `giant.json` in `dir`, if any.
+/// The *primary* `giant.yaml` / `giant.yml` / `giant.json` in `dir`, if any.
+/// Generator-owned `giant.<infix>.yaml` files are deliberately excluded: the
+/// primary is the only file that may carry `workspace:`, so it alone marks the
+/// workspace root and supplies the root parse.
 fn find_config_in_dir(dir: &Path) -> Option<PathBuf> {
     ["giant.yaml", "giant.yml", "giant.json"]
         .into_iter()
@@ -637,8 +642,26 @@ fn find_config_in_dir(dir: &Path) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Every `giant.yaml` / `giant.yml` / `giant.json` under `root_dir`,
-/// respecting `.gitignore` and skipping the usual noise directories.
+/// Whether `name` is a giant config filename: the primary `giant.yaml` /
+/// `.yml` / `.json`, or a generator-owned `giant.<infix>.yaml` variant
+/// (ADR-0026), where `<infix>` is a non-empty filename-safe identifier
+/// (ASCII alphanumeric, `-`, `_`). Several files may share one directory;
+/// the scan merges them all into that package.
+fn is_config_filename(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("giant.") else {
+        return false;
+    };
+    let (infix, ext) = rest.rsplit_once('.').unwrap_or(("", rest));
+    matches!(ext, "yaml" | "yml" | "json")
+        && (infix.is_empty()
+            || infix
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+}
+
+/// Every config file under `root_dir` - primary `giant.yaml` plus any
+/// `giant.<infix>.yaml` variants - respecting `.gitignore` and skipping the
+/// usual noise directories.
 fn scan_config_files(root_dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for entry in ignore::WalkBuilder::new(root_dir)
@@ -647,10 +670,7 @@ fn scan_config_files(root_dir: &Path) -> Vec<PathBuf> {
         .flatten()
     {
         if entry.file_type().is_some_and(|t| t.is_file())
-            && matches!(
-                entry.file_name().to_str(),
-                Some("giant.yaml" | "giant.yml" | "giant.json")
-            )
+            && entry.file_name().to_str().is_some_and(is_config_filename)
         {
             out.push(entry.into_path());
         }
@@ -683,7 +703,8 @@ fn is_subpackage(pkg: &str, of: &str) -> bool {
     if of.is_empty() {
         !pkg.is_empty()
     } else {
-        pkg.strip_prefix(of).is_some_and(|rest| rest.starts_with('/'))
+        pkg.strip_prefix(of)
+            .is_some_and(|rest| rest.starts_with('/'))
     }
 }
 
@@ -981,6 +1002,76 @@ dispatch:
         // Output + cwd resolved package-relative.
         assert_eq!(t.outputs[0].as_path().to_str().unwrap(), "src/lib/out");
         assert_eq!(t.cwd.as_path().to_str().unwrap(), "src/lib");
+    }
+
+    #[test]
+    fn is_config_filename_matches_primary_and_infix() {
+        for ok in [
+            "giant.yaml",
+            "giant.yml",
+            "giant.json",
+            "giant.go.yaml",
+            "giant.docker.yml",
+            "giant.proto-gen.json",
+        ] {
+            assert!(is_config_filename(ok), "{ok} should match");
+        }
+        for no in [
+            "giant.yaml.bak",
+            "giants.yaml",
+            "giant.go.bar.yaml", // dotted infix is not filename-safe
+            "giant.toml",
+            "Giant.yaml",
+            "giant.",
+        ] {
+            assert!(!is_config_filename(no), "{no} should not match");
+        }
+    }
+
+    #[test]
+    fn scan_merges_infix_files_into_one_package() {
+        // A generator-owned `giant.bundle.yaml` co-exists with the primary
+        // `giant.yaml` in the same directory; both contribute targets to that
+        // package (ADR-0026 filename ownership).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("giant.yaml"), "workspace:\n  name: w\n").unwrap();
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::write(
+            root.join("app/giant.yaml"),
+            "targets:\n  - name: bin\n    outputs: [\"out\"]\n    command: \"true\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("app/giant.bundle.yaml"),
+            "targets:\n  - name: bundle\n    inputs: [\"out\"]\n    outputs: [\"app.tar\"]\n    command: \"true\"\n",
+        )
+        .unwrap();
+        let cfg = Config::scan(root).unwrap();
+        assert!(cfg.targets.iter().any(|t| t.id.as_str() == "//app:bin"));
+        assert!(cfg.targets.iter().any(|t| t.id.as_str() == "//app:bundle"));
+    }
+
+    #[test]
+    fn scan_rejects_duplicate_label_across_infix_files() {
+        // Two files in the same package can't both define the same target
+        // name - the merged-graph check catches the collision.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("giant.yaml"), "workspace:\n  name: w\n").unwrap();
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::write(
+            root.join("app/giant.yaml"),
+            "targets:\n  - name: x\n    outputs: [\"out\"]\n    command: \"true\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("app/giant.go.yaml"),
+            "targets:\n  - name: x\n    outputs: [\"out2\"]\n    command: \"true\"\n",
+        )
+        .unwrap();
+        let err = format!("{}", Config::scan(root).unwrap_err());
+        assert!(err.contains("duplicate target label"), "got: {err}");
     }
 
     #[test]
