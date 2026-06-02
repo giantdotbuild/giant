@@ -277,12 +277,14 @@ mod tests {
                     glob: GlobPattern::new(*i).unwrap(),
                 })
                 .collect(),
+            outputs_raw: Vec::new(),
             outputs: outputs
                 .iter()
                 .map(|o| OutputPath::new(*o).unwrap())
                 .collect(),
             deps: deps.iter().map(|d| TargetId::new(*d)).collect(),
             command: "true".into(),
+            cwd_raw: None,
             cwd: WsRelPath::default(),
             env: Default::default(),
             cache: Some(true),

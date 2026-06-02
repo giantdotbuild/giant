@@ -175,13 +175,30 @@ pub struct TargetSpec {
 
     #[serde(default)]
     pub inputs: Vec<Input>,
-    #[serde(default)]
+
+    /// Raw `outputs:` strings as written - package-relative or `//`-rooted.
+    /// The loader resolves these into `outputs`; this is the wire form.
+    #[serde(rename = "outputs", default)]
+    pub(crate) outputs_raw: Vec<String>,
+
+    /// Workspace-relative outputs, resolved from `outputs_raw` by the
+    /// loader. Never deserialized; the rest of the engine reads this.
+    #[serde(skip)]
     pub outputs: Vec<OutputPath>,
+
     #[serde(default)]
     pub deps: Vec<TargetId>,
     pub command: String,
-    #[serde(default)]
+
+    /// Raw `cwd:` string (package-relative or `//`-rooted); `None` = the
+    /// default (the package directory). The wire form.
+    #[serde(rename = "cwd", default)]
+    pub(crate) cwd_raw: Option<String>,
+
+    /// Workspace-relative working directory, resolved by the loader.
+    #[serde(skip)]
     pub cwd: WsRelPath,
+
     #[serde(default)]
     pub env: HashMap<String, String>,
     #[serde(default)]

@@ -58,7 +58,7 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
 }
 
 pub async fn execute(args: CleanArgs, global: &super::GlobalFlags) -> anyhow::Result<()> {
-    let (config, _workspace_root) = prep::load_config(global.config.as_deref())?;
+    let (config, _workspace_root) = crate::config::Config::load_root(global.config.as_deref())?;
     let cache_root = prep::resolve_cache_dir(&config.cache.dir)?;
 
     // Selective mode if either filter is set; otherwise full wipe.

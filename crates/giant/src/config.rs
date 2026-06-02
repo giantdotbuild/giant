@@ -2,7 +2,9 @@
 //!
 //! See TDD-0001 for the schema, ADR-0007 for YAML-as-sugar policy.
 
-use crate::model::{TargetId, TargetSpec};
+use crate::model::{Input, TargetId, TargetSpec};
+use crate::paths::{OutputPath, WsRelPath};
+use crate::types::GlobPattern;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -34,6 +36,9 @@ pub struct Config {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
 
+    // Defaulted so a package config (targets only, no `workspace:`) parses;
+    // `validate_static` still requires a non-empty name on the root.
+    #[serde(default)]
     pub workspace: WorkspaceConfig,
 
     #[serde(default)]
@@ -151,11 +156,8 @@ pub fn load_dispatch(start_dir: &Path) -> DispatchConfig {
 fn find_config_upward(start_dir: &Path) -> Option<PathBuf> {
     let mut dir = Some(start_dir);
     while let Some(d) = dir {
-        for name in ["giant.yaml", "giant.yml", "giant.json"] {
-            let candidate = d.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+        if let Some(found) = find_config_in_dir(d) {
+            return Some(found);
         }
         dir = d.parent();
     }
@@ -328,27 +330,69 @@ pub struct TlsConfig {
 impl Config {
     /// Load a config from a file. Detects YAML vs JSON by extension.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let raw = std::fs::read_to_string(path)?;
-        let mut cfg: Config = match path.extension().and_then(|e| e.to_str()) {
-            Some("json") => serde_json::from_str(&raw)?,
-            _ => serde_yaml_ng::from_str(&raw)?,
-        };
-        // M1: a single root config → the root package (`""`). M2's scan
-        // derives the package per file from its directory.
-        cfg.finalize_labels("");
+        let mut cfg = Self::parse(path)?;
         cfg.validate_static()?;
+        // A single root config → the root package (`""`). The workspace
+        // scan (`scan`) derives the package per file from its directory.
+        cfg.finalize_package("")?;
         Ok(cfg)
     }
 
-    /// Assign each target its `//<package>:<name>` label and resolve its
-    /// dep references against `package` (TDD-0001 §Path resolution).
-    fn finalize_labels(&mut self, package: &str) {
+    /// Read + deserialize a config file (YAML or JSON by extension). No
+    /// validation or finalization - callers run those.
+    fn parse(path: &Path) -> Result<Self, ConfigError> {
+        let raw = std::fs::read_to_string(path)?;
+        let cfg = match path.extension().and_then(|e| e.to_str()) {
+            Some("json") => serde_json::from_str(&raw)?,
+            _ => serde_yaml_ng::from_str(&raw)?,
+        };
+        Ok(cfg)
+    }
+
+    /// Assign each target its `//<package>:<name>` label, resolve its dep
+    /// references, and rewrite its package-relative `inputs`/`outputs`/`cwd`
+    /// to workspace-relative form (TDD-0001 §Path resolution). `package` is
+    /// this file's directory, workspace-relative (`""` for the root).
+    fn finalize_package(&mut self, package: &str) -> Result<(), ConfigError> {
         for t in &mut self.targets {
-            t.id = TargetId::label(package, &t.name);
+            let name = t.name.clone();
+            t.id = TargetId::label(package, &name);
             for d in &mut t.deps {
                 *d = resolve_dep_label(package, d.as_str());
             }
+            for input in &mut t.inputs {
+                let Input::File { glob } = input;
+                let resolved = resolve_in_package(package, glob.as_str());
+                *glob = GlobPattern::new(&resolved).map_err(|e| {
+                    ConfigError::Validation(format!(
+                        "target '{name}': invalid input glob '{resolved}': {e}"
+                    ))
+                })?;
+            }
+            let mut outputs = Vec::with_capacity(t.outputs_raw.len());
+            for raw in &t.outputs_raw {
+                let resolved = resolve_in_package(package, raw);
+                outputs.push(OutputPath::new(&resolved).map_err(|e| {
+                    ConfigError::Validation(format!(
+                        "target '{name}': invalid output '{resolved}': {e}"
+                    ))
+                })?);
+            }
+            t.outputs = outputs;
+            // An unset (or empty) `cwd` defaults to the package directory.
+            let raw_cwd = t
+                .cwd_raw
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(".");
+            let resolved_cwd = resolve_in_package(package, raw_cwd);
+            t.cwd = WsRelPath::new(&resolved_cwd).map_err(|e| {
+                ConfigError::Validation(format!(
+                    "target '{name}': invalid cwd '{resolved_cwd}': {e}"
+                ))
+            })?;
         }
+        Ok(())
     }
 
     /// Static validation: things checkable on a single config file.
@@ -373,7 +417,13 @@ impl Config {
             )));
         }
 
-        // target label uniqueness (a duplicate name within a package)
+        self.validate_targets()
+    }
+
+    /// Per-file target checks (no workspace/schema). Shared by the root
+    /// `validate_static` and the per-package validation in `scan`.
+    fn validate_targets(&self) -> Result<(), ConfigError> {
+        // Name rules + uniqueness within this file (= within the package).
         let mut seen = HashSet::new();
         for t in &self.targets {
             if t.name.is_empty() {
@@ -385,29 +435,203 @@ impl Config {
                     t.name
                 )));
             }
-            if !seen.insert(t.id.clone()) {
+            if !seen.insert(t.name.clone()) {
                 return Err(ConfigError::Validation(format!(
-                    "duplicate target '{}'",
-                    t.id
+                    "duplicate target name '{}' in the same package",
+                    t.name
                 )));
             }
             if t.command.is_empty() {
                 return Err(ConfigError::Validation(format!(
                     "target '{}' has empty command",
-                    t.id
+                    t.name
                 )));
             }
             // Cacheable target with no outputs and no exists check is meaningless.
-            if t.is_cacheable() && t.outputs.is_empty() && t.exists.is_none() {
+            if t.is_cacheable() && t.outputs_raw.is_empty() && t.exists.is_none() {
                 return Err(ConfigError::Validation(format!(
                     "target '{}' is cacheable but has no outputs and no `exists:` check",
+                    t.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Scan the workspace rooted at `root_dir` and merge every package's
+    /// `giant.yaml` / `giant.json` into one config (TDD-0001 §scan and
+    /// merge). The root config supplies workspace-global settings and its
+    /// own root-package targets; each nested file contributes the targets
+    /// of its package (its directory, workspace-relative).
+    pub fn scan(root_dir: &Path) -> Result<Self, ConfigError> {
+        let root_path = find_config_in_dir(root_dir).ok_or(ConfigError::NotFound)?;
+
+        // Root config: full schema, root package `""`.
+        let mut cfg = Self::parse(&root_path)?;
+        cfg.validate_static()?;
+        cfg.finalize_package("")?;
+
+        // Nested package configs: targets only, package = their directory.
+        for path in scan_config_files(root_dir) {
+            if path == root_path {
+                continue;
+            }
+            let package = path
+                .parent()
+                .and_then(|d| d.strip_prefix(root_dir).ok())
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+
+            reject_root_only_sections(&path)?;
+            let mut pkg = Self::parse(&path)?;
+            pkg.validate_targets()
+                .map_err(|e| ConfigError::Validation(format!("{}: {e}", path.display())))?;
+            pkg.finalize_package(&package)?;
+            cfg.targets.append(&mut pkg.targets);
+        }
+
+        cfg.validate_merged()?;
+        Ok(cfg)
+    }
+
+    /// Locate the workspace root - the directory of an explicit config,
+    /// else the nearest ancestor whose `giant.yaml` declares `workspace:`
+    /// - then scan + merge the whole workspace. Returns the merged config
+    /// and the workspace root directory.
+    pub fn scan_workspace(explicit: Option<&Path>) -> Result<(Self, PathBuf), ConfigError> {
+        let root_dir = find_workspace_root(explicit)?;
+        let cfg = Self::scan(&root_dir)?;
+        Ok((cfg, root_dir))
+    }
+
+    /// Load only the workspace root config (no package scan). For
+    /// commands that need workspace-global settings (e.g. `cache.dir`)
+    /// without building the graph, and so a broken package config can't
+    /// stop them.
+    pub fn load_root(explicit: Option<&Path>) -> Result<(Self, PathBuf), ConfigError> {
+        let root_dir = find_workspace_root(explicit)?;
+        let path = find_config_in_dir(&root_dir).ok_or(ConfigError::NotFound)?;
+        Ok((Self::load(&path)?, root_dir))
+    }
+
+    /// Whole-graph check after the scan: target-label uniqueness across
+    /// every package (TDD-0001 §scan and merge conflict rules). Output
+    /// collisions are caught when the graph builds its inferred edges
+    /// (`graph::BuildGraph`, `GraphError::OutputCollision`).
+    fn validate_merged(&self) -> Result<(), ConfigError> {
+        let mut labels = HashSet::new();
+        for t in &self.targets {
+            if !labels.insert(&t.id) {
+                return Err(ConfigError::Validation(format!(
+                    "duplicate target label '{}'",
                     t.id
                 )));
             }
         }
-
         Ok(())
     }
+}
+
+/// Walk up from cwd (or use an explicit config's directory) to the
+/// workspace root: the nearest ancestor whose `giant.yaml` declares a
+/// non-empty `workspace.name`. Package configs (targets only) are passed
+/// over on the way up.
+fn find_workspace_root(explicit: Option<&Path>) -> Result<PathBuf, ConfigError> {
+    if let Some(p) = explicit {
+        let abs = std::fs::canonicalize(p)?;
+        return abs
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or(ConfigError::NotFound);
+    }
+    let cwd = std::env::current_dir()?;
+    let mut here: &Path = &cwd;
+    loop {
+        if let Some(cand) = find_config_in_dir(here)
+            && config_declares_workspace(&cand)
+        {
+            return Ok(here.to_path_buf());
+        }
+        match here.parent() {
+            Some(parent) => here = parent,
+            None => return Err(ConfigError::NotFound),
+        }
+    }
+}
+
+/// A package config may carry only `targets:` (plus the porcelain-reserved
+/// `tasks:`/`services:`, which the engine passes over). Reject any
+/// workspace-global section so a copied root config fails loudly instead
+/// of being silently ignored (TDD-0001 §Root config vs package config).
+fn reject_root_only_sections(path: &Path) -> Result<(), ConfigError> {
+    const ROOT_ONLY: &[&str] = &[
+        "workspace",
+        "cache",
+        "remote",
+        "dispatch",
+        "state",
+        "schema_version",
+    ];
+    let raw = std::fs::read_to_string(path)?;
+    let keys: std::collections::BTreeMap<String, serde::de::IgnoredAny> =
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("json") => serde_json::from_str(&raw)?,
+            _ => serde_yaml_ng::from_str(&raw)?,
+        };
+    if let Some(k) = keys.keys().find(|k| ROOT_ONLY.contains(&k.as_str())) {
+        return Err(ConfigError::Validation(format!(
+            "{}: '{k}:' is only valid in the workspace-root config, not a package config",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `path`'s config declares a non-empty `workspace.name` - the
+/// marker that identifies the workspace root vs a package config.
+fn config_declares_workspace(path: &Path) -> bool {
+    #[derive(Deserialize)]
+    struct Peek {
+        #[serde(default)]
+        workspace: WorkspaceConfig,
+    }
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let parsed: Option<Peek> = match path.extension().and_then(|e| e.to_str()) {
+        Some("json") => serde_json::from_str(&raw).ok(),
+        _ => serde_yaml_ng::from_str(&raw).ok(),
+    };
+    parsed.is_some_and(|p| !p.workspace.name.is_empty())
+}
+
+/// The `giant.yaml` / `giant.yml` / `giant.json` in `dir`, if any.
+fn find_config_in_dir(dir: &Path) -> Option<PathBuf> {
+    ["giant.yaml", "giant.yml", "giant.json"]
+        .into_iter()
+        .map(|n| dir.join(n))
+        .find(|p| p.is_file())
+}
+
+/// Every `giant.yaml` / `giant.yml` / `giant.json` under `root_dir`,
+/// respecting `.gitignore` and skipping the usual noise directories.
+fn scan_config_files(root_dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in ignore::WalkBuilder::new(root_dir)
+        .hidden(false)
+        .build()
+        .flatten()
+    {
+        if entry.file_type().is_some_and(|t| t.is_file())
+            && matches!(
+                entry.file_name().to_str(),
+                Some("giant.yaml" | "giant.yml" | "giant.json")
+            )
+        {
+            out.push(entry.into_path());
+        }
+    }
+    out
 }
 
 fn is_valid_workspace_name(s: &str) -> bool {
@@ -424,6 +648,28 @@ fn resolve_dep_label(package: &str, dep: &str) -> TargetId {
         TargetId::new(dep)
     } else {
         TargetId::label(package, dep.strip_prefix(':').unwrap_or(dep))
+    }
+}
+
+/// Resolve a package-relative or `//`-rooted config path (input glob,
+/// output, cwd) to its workspace-relative form (TDD-0001 §Path
+/// resolution). `package` is the target's package directory.
+///
+/// - `//x` → `x` (workspace root).
+/// - `.` → the package directory.
+/// - bare `x` → `<package>/x` (or `x` in the root package).
+///
+/// `..` is not handled here; the typed path constructors
+/// (`WsRelPath`/`OutputPath`) reject it after resolution.
+fn resolve_in_package(package: &str, raw: &str) -> String {
+    if let Some(rooted) = raw.strip_prefix("//") {
+        rooted.to_string()
+    } else if raw == "." {
+        package.to_string()
+    } else if package.is_empty() {
+        raw.to_string()
+    } else {
+        format!("{package}/{raw}")
     }
 }
 
@@ -664,5 +910,105 @@ dispatch:
         let bad = tempfile::tempdir().unwrap();
         std::fs::write(bad.path().join("giant.yaml"), "this: : : not yaml\n").unwrap();
         assert_eq!(load_dispatch(bad.path()).route("x"), Some("giant-task"));
+    }
+
+    // --- scan + merge + package-relative paths (TDD-0001, M2) ---
+
+    #[test]
+    fn resolve_in_package_rules() {
+        assert_eq!(resolve_in_package("", "x.go"), "x.go");
+        assert_eq!(resolve_in_package("src/go", "x.go"), "src/go/x.go");
+        assert_eq!(resolve_in_package("src/go", "sub/y"), "src/go/sub/y");
+        assert_eq!(resolve_in_package("src/go", "//proto/a.go"), "proto/a.go");
+        assert_eq!(resolve_in_package("src/go", "."), "src/go");
+        assert_eq!(resolve_in_package("", "."), "");
+    }
+
+    #[test]
+    fn scan_merges_packages_with_path_derived_labels_and_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("giant.yaml"), "workspace:\n  name: w\n").unwrap();
+        std::fs::create_dir_all(root.join("src/lib")).unwrap();
+        std::fs::write(
+            root.join("src/lib/giant.yaml"),
+            "targets:\n  - name: build\n    inputs: [\"a.go\"]\n    outputs: [\"out\"]\n    command: \"true\"\n",
+        )
+        .unwrap();
+
+        let cfg = Config::scan(root).unwrap();
+        let t = cfg
+            .targets
+            .iter()
+            .find(|t| t.id.as_str() == "//src/lib:build")
+            .expect("package label //src/lib:build");
+        // Output + cwd resolved package-relative.
+        assert_eq!(t.outputs[0].as_path().to_str().unwrap(), "src/lib/out");
+        assert_eq!(t.cwd.as_path().to_str().unwrap(), "src/lib");
+    }
+
+    #[test]
+    fn scan_disambiguates_same_name_across_packages() {
+        // The same target name in different packages is fine - the package
+        // path disambiguates the label, and package-relative outputs can't
+        // collide. (`//`-anchored outputs that could collide are M2b.)
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("giant.yaml"),
+            "workspace:\n  name: w\ntargets:\n  - name: build\n    outputs: [\"out\"]\n    command: \"true\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        std::fs::write(
+            root.join("pkg/giant.yaml"),
+            "targets:\n  - name: build\n    outputs: [\"out\"]\n    command: \"true\"\n",
+        )
+        .unwrap();
+        let cfg = Config::scan(root).unwrap();
+        let labels: std::collections::HashSet<&str> =
+            cfg.targets.iter().map(|t| t.id.as_str()).collect();
+        assert!(labels.contains("//:build"));
+        assert!(labels.contains("//pkg:build"));
+    }
+
+    #[test]
+    fn finalize_resolves_rooted_output_and_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("giant.yaml"), "workspace:\n  name: w\n").unwrap();
+        std::fs::create_dir_all(root.join("src/tool")).unwrap();
+        std::fs::write(
+            root.join("src/tool/giant.yaml"),
+            "targets:\n  - name: build\n    inputs: [\"m.txt\"]\n    outputs: [\"//bin/tool\"]\n    cwd: \"//\"\n    command: \"true\"\n",
+        )
+        .unwrap();
+        let cfg = Config::scan(root).unwrap();
+        let t = cfg
+            .targets
+            .iter()
+            .find(|t| t.id.as_str() == "//src/tool:build")
+            .unwrap();
+        // `//bin/tool` → workspace-root output; `//` cwd → workspace root.
+        assert_eq!(t.outputs[0].as_path().to_str().unwrap(), "bin/tool");
+        assert_eq!(t.cwd.as_path().to_str().unwrap(), "");
+    }
+
+    #[test]
+    fn scan_rejects_root_only_field_in_package_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("giant.yaml"), "workspace:\n  name: w\n").unwrap();
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        std::fs::write(
+            root.join("pkg/giant.yaml"),
+            "cache:\n  dir: ./c\ntargets:\n  - name: x\n    outputs: [\"o\"]\n    command: \"true\"\n",
+        )
+        .unwrap();
+        let msg = format!("{}", Config::scan(root).unwrap_err());
+        assert!(
+            msg.contains("cache") && msg.contains("workspace-root"),
+            "got: {msg}"
+        );
     }
 }

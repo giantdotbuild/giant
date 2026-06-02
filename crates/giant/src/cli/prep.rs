@@ -25,7 +25,7 @@ pub struct Prepared {
 /// Locate + load `giant.yaml`/`giant.json`, build the graph from the
 /// static `targets:`, and open the local cache.
 pub async fn prepare(config_path: Option<&Path>) -> anyhow::Result<Prepared> {
-    let (config, workspace_root) = load_config(config_path)?;
+    let (config, workspace_root) = Config::scan_workspace(config_path)?;
     let workspace_abs = AbsPath::new(workspace_root);
 
     let mut graph = BuildGraph::new();
@@ -44,33 +44,6 @@ pub async fn prepare(config_path: Option<&Path>) -> anyhow::Result<Prepared> {
         workspace_root: workspace_abs,
         config,
     })
-}
-
-/// Walk up from cwd looking for `giant.yaml` / `giant.json`.
-pub fn load_config(explicit: Option<&Path>) -> anyhow::Result<(Config, PathBuf)> {
-    if let Some(path) = explicit {
-        let abs = std::fs::canonicalize(path)?;
-        let dir = abs
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-        let cfg = Config::load(&abs)?;
-        return Ok((cfg, dir.to_path_buf()));
-    }
-    let cwd = std::env::current_dir()?;
-    let mut here: &Path = &cwd;
-    loop {
-        for name in ["giant.yaml", "giant.yml", "giant.json"] {
-            let candidate = here.join(name);
-            if candidate.is_file() {
-                let cfg = Config::load(&candidate)?;
-                return Ok((cfg, here.to_path_buf()));
-            }
-        }
-        match here.parent() {
-            Some(p) => here = p,
-            None => anyhow::bail!("no giant.yaml/giant.json found in cwd or any parent"),
-        }
-    }
 }
 
 pub fn resolve_cache_dir(raw: &str) -> anyhow::Result<PathBuf> {

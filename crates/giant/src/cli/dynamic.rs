@@ -1,20 +1,20 @@
 //! Dynamic completion providers - invoked by the shell at TAB time
 //! via `clap_complete::engine::ArgValueCompleter`.
 //!
-//! These have to be fast: shells block on them. We read `giant.yaml`
-//! statically and complete the target ids it declares - no build, no
-//! subprocess. Result: targets are completed for everything in the
-//! checked-in config.
+//! These have to be fast: shells block on them. We read only the
+//! workspace-root `giant.yaml` and complete the root package's target
+//! labels - no build, no subprocess, and no full-tree scan (that would
+//! parse every package config on each keystroke). Completing labels from
+//! nested packages is left to a future cached target-id list.
 
 use clap_complete::CompletionCandidate;
 use std::ffi::OsStr;
 
-/// All target ids declared in the nearest workspace config. Any error -
-/// no config up the tree, parse/validation failure - yields no
-/// candidates, because completion failing quietly beats erroring at TAB
-/// time.
+/// Root-package target labels. Any error - no workspace config up the
+/// tree, parse/validation failure - yields no candidates, because
+/// completion failing quietly beats erroring at TAB time.
 pub fn complete_target_ids(current: &OsStr) -> Vec<CompletionCandidate> {
-    let Ok((cfg, _root)) = super::prep::load_config(None) else {
+    let Ok((cfg, _root)) = crate::config::Config::load_root(None) else {
         return Vec::new();
     };
     let prefix = current.to_string_lossy();

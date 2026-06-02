@@ -1886,3 +1886,184 @@ targets:
         "expected a timeout message; got: {combined}"
     );
 }
+
+#[test]
+fn multi_package_scan_resolves_labels_and_package_relative_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    // Root config marks the workspace; it has no targets of its own.
+    std::fs::write(
+        ws.join("giant.yaml"),
+        "workspace:\n  name: multipkg\ncache:\n  dir: ./cache\n",
+    )
+    .unwrap();
+    // A package at src/lib with package-relative input + output.
+    std::fs::create_dir_all(ws.join("src/lib")).unwrap();
+    std::fs::write(ws.join("src/lib/in.txt"), "data\n").unwrap();
+    std::fs::write(
+        ws.join("src/lib/giant.yaml"),
+        r#"
+targets:
+  - name: build
+    inputs: ["in.txt"]
+    outputs: ["out.txt"]
+    command: "cat in.txt > out.txt"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    // Label is derived from the package directory.
+    assert!(
+        built(&s, "//src/lib:build"),
+        "expected //src/lib:build to build; got: {s}"
+    );
+    // Output resolved package-relative; cwd defaulted to the package dir,
+    // so `cat in.txt > out.txt` read and wrote inside src/lib.
+    assert_eq!(
+        std::fs::read_to_string(ws.join("src/lib/out.txt"))
+            .unwrap()
+            .trim(),
+        "data"
+    );
+
+    // Selecting by the path-derived label builds just that target.
+    let out2 = Command::new(giant_bin())
+        .arg("build")
+        .arg("//src/lib:build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out2.status.success());
+    let s2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(cached(&s2, "//src/lib:build"), "expected cache hit; got: {s2}");
+}
+
+#[test]
+fn cross_package_inference_via_root_anchored_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    // Root package has a target that consumes the lib package's output via
+    // a `//`-anchored input, which infers the cross-package dep.
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: xpkg
+cache:
+  dir: ./cache
+targets:
+  - name: bundle
+    inputs: ["//src/lib/out.txt"]
+    outputs: ["bundle.txt"]
+    command: "cat src/lib/out.txt > bundle.txt"
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(ws.join("src/lib")).unwrap();
+    std::fs::write(ws.join("src/lib/seed.txt"), "lib-data\n").unwrap();
+    std::fs::write(
+        ws.join("src/lib/giant.yaml"),
+        r#"
+targets:
+  - name: gen
+    inputs: ["seed.txt"]
+    outputs: ["out.txt"]
+    command: "cat seed.txt > out.txt"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The lib target produced out.txt and the root target consumed it.
+    assert_eq!(
+        std::fs::read_to_string(ws.join("bundle.txt")).unwrap().trim(),
+        "lib-data"
+    );
+
+    // `giant graph //:bundle` shows the inferred cross-package dep.
+    let g = Command::new(giant_bin())
+        .arg("graph")
+        .arg("//:bundle")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    let gs = String::from_utf8_lossy(&g.stdout);
+    assert!(
+        gs.contains("//src/lib:gen"),
+        "expected inferred dep on //src/lib:gen in graph; got: {gs}"
+    );
+}
+
+#[test]
+fn package_produces_root_artifact_via_rooted_output_and_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        "workspace:\n  name: rooted\ncache:\n  dir: ./cache\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(ws.join("src/tool")).unwrap();
+    std::fs::write(ws.join("src/tool/main.txt"), "tool-data\n").unwrap();
+    // Package-relative input, `//`-rooted output, and `//` cwd (run at the
+    // workspace root) - all three resolved by the loader.
+    std::fs::write(
+        ws.join("src/tool/giant.yaml"),
+        r#"
+targets:
+  - name: build
+    inputs: ["main.txt"]
+    outputs: ["//bin/tool"]
+    cwd: "//"
+    command: "mkdir -p bin && cat src/tool/main.txt > bin/tool"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(built(&s, "//src/tool:build"), "got: {s}");
+    // The root artifact landed at the workspace root, not under the package.
+    assert_eq!(
+        std::fs::read_to_string(ws.join("bin/tool")).unwrap().trim(),
+        "tool-data"
+    );
+
+    // Second build is a cache hit (the //-rooted output was captured).
+    let out2 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(out2.status.success());
+    assert!(cached(&String::from_utf8_lossy(&out2.stdout), "//src/tool:build"));
+}
