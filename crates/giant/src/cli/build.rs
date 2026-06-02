@@ -202,7 +202,25 @@ pub(super) async fn execute_with_mode(
         tags: args.tags.clone(),
         no_tags: args.no_tags.clone(),
     };
-    let pattern_selection: Vec<TargetId> =
+    // `failed-last`: re-select the targets that failed in the most recent
+    // build (TDD-0011), recorded under the state dir. Resolved here rather
+    // than in `resolve_patterns` (which is graph-pure) since it reads state.
+    let pattern_selection: Vec<TargetId> = if args.patterns.len() == 1
+        && args.patterns[0] == "failed-last"
+    {
+        let path =
+            prep::last_failures_path(prepared.workspace_root.as_path(), &prepared.config.state.dir);
+        let failed: Vec<TargetId> = prep::read_last_failures(&path)
+            .into_iter()
+            .filter(|id| prepared.graph.get(id).is_some())
+            .collect();
+        if failed.is_empty() {
+            drop(tx);
+            let _ = renderer_task.await;
+            anyhow::bail!("no recent failures recorded - run a build first, then `failed-last`");
+        }
+        failed
+    } else {
         match selection::resolve_patterns(&prepared.graph, &args.patterns, test_mode, &opts) {
             Ok(v) => v,
             Err(e) => {
@@ -210,7 +228,8 @@ pub(super) async fn execute_with_mode(
                 let _ = renderer_task.await;
                 return Err(e.into());
             }
-        };
+        }
+    };
 
     let selection = if args.affected {
         let changed = resolve_changed_files(&args, prepared.workspace_root.as_path())?;

@@ -2125,3 +2125,75 @@ targets:
         "parent glob crossed the subpackage boundary; got:\n{s}"
     );
 }
+
+#[test]
+fn failed_last_reselects_only_the_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: faillast
+cache:
+  dir: ./cache
+targets:
+  - name: ok
+    outputs: ["ok.txt"]
+    command: "echo ok > ok.txt"
+  - name: bad
+    outputs: ["bad.txt"]
+    command: "exit 1"
+"#,
+    )
+    .unwrap();
+
+    // First build: //:ok succeeds, //:bad fails (and never produces bad.txt).
+    let out1 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(
+        !out1.status.success(),
+        "a build with a failing target should exit non-zero"
+    );
+
+    // `failed-last` re-selects only the target that failed.
+    let out2 = Command::new(giant_bin())
+        .arg("build")
+        .arg("failed-last")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    let s2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(s2.contains("//:bad"), "failed-last should rebuild //:bad; got:\n{s2}");
+    assert!(
+        !s2.contains("//:ok"),
+        "failed-last should NOT touch the target that passed; got:\n{s2}"
+    );
+}
+
+#[test]
+fn failed_last_with_no_failures_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        "workspace:\n  name: nofail\ncache:\n  dir: ./cache\ntargets:\n  - name: ok\n    outputs: [\"ok.txt\"]\n    command: \"echo ok > ok.txt\"\n",
+    )
+    .unwrap();
+    // Clean build, then failed-last has nothing to do.
+    assert!(Command::new(giant_bin()).arg("build").current_dir(ws).output().unwrap().status.success());
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .arg("failed-last")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no recent failures"),
+        "expected a 'no recent failures' message"
+    );
+}

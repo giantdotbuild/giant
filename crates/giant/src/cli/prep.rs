@@ -8,8 +8,40 @@
 use crate::cache::LocalCache;
 use crate::config::Config;
 use crate::graph::BuildGraph;
+use crate::model::TargetId;
 use crate::paths::AbsPath;
 use std::path::{Path, PathBuf};
+
+/// Path of the file recording the most recent build's failed targets,
+/// under the workspace state directory (for the `failed-last` selector).
+pub fn last_failures_path(workspace_root: &Path, state_dir: &str) -> PathBuf {
+    workspace_root.join(state_dir).join("last-failures.json")
+}
+
+/// Record the failed target labels from a build so `failed-last` can
+/// re-select them. Empty on a clean build (which clears any prior set).
+/// Best-effort: a write failure never fails the build.
+pub fn write_last_failures(path: &Path, failed: &[TargetId]) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let labels: Vec<&str> = failed.iter().map(TargetId::as_str).collect();
+    if let Ok(json) = serde_json::to_vec(&labels) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// Read the failed labels recorded by the last build (empty if none).
+pub fn read_last_failures(path: &Path) -> Vec<TargetId> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    serde_json::from_slice::<Vec<String>>(&bytes)
+        .unwrap_or_default()
+        .into_iter()
+        .map(TargetId::new)
+        .collect()
+}
 
 /// Everything a subcommand needs to operate on the graph.
 pub struct Prepared {

@@ -747,17 +747,27 @@ impl SessionState {
         };
         let event_tx = self.event_tx.clone();
         let id_for_task = build_id.clone();
+        let failures_path = prep::last_failures_path(
+            self.workspace_root.as_path(),
+            &self.state_dir.to_string_lossy(),
+        );
         let handle = tokio::spawn(async move {
-            if let Err(e) = build(job).await {
-                // Engine itself failed (not target failure). Surface
-                // it; build.finished will already have fired with
-                // counts including failed targets if relevant.
-                let _ = event_tx
-                    .send(Event::CommandError {
-                        command_id: id_for_task,
-                        message: format!("executor error: {e:#}"),
-                    })
-                    .await;
+            match build(job).await {
+                Ok(summary) => {
+                    // Record the failed set (empty = clean) for `failed-last`.
+                    prep::write_last_failures(&failures_path, &summary.failed_targets);
+                }
+                Err(e) => {
+                    // Engine itself failed (not target failure). Surface
+                    // it; build.finished will already have fired with
+                    // counts including failed targets if relevant.
+                    let _ = event_tx
+                        .send(Event::CommandError {
+                            command_id: id_for_task,
+                            message: format!("executor error: {e:#}"),
+                        })
+                        .await;
+                }
             }
             let _ = build_done_tx.send(()).await;
         });

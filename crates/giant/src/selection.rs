@@ -27,9 +27,14 @@ pub enum SelectionError {
 
     /// Raised when a literal (non-glob) pattern matches no target -
     /// almost always a typo. Glob patterns that match nothing are
-    /// silently empty; only literals get this error.
-    #[error("no target matches {pattern:?}")]
-    NoMatch { pattern: String },
+    /// silently empty; only literals get this error. `suggestion` is the
+    /// closest existing label, when one is near enough to be a plausible
+    /// fix.
+    #[error("no target matches {pattern:?}{}", .suggestion.as_deref().map(|s| format!(" - did you mean {s}?")).unwrap_or_default())]
+    NoMatch {
+        pattern: String,
+        suggestion: Option<String>,
+    },
 }
 
 /// What to do with `test: true` targets when resolving a selection.
@@ -147,6 +152,7 @@ pub fn resolve_patterns(
         if !matched_any && !has_glob_chars(raw) {
             return Err(SelectionError::NoMatch {
                 pattern: (*raw).to_string(),
+                suggestion: closest_label(graph, raw),
             });
         }
     }
@@ -237,6 +243,34 @@ fn glob_pat(s: &str) -> Result<glob::Pattern, SelectionError> {
 /// the recursive `...`.
 pub fn has_glob_chars(s: &str) -> bool {
     s.contains('*') || s.contains('?') || s.contains('[') || s.contains("...")
+}
+
+/// The graph label closest to `pattern` by edit distance, when one is near
+/// enough to be a plausible typo (so a wild miss doesn't get a nonsense
+/// suggestion). Used to turn a literal miss into a "did you mean …?".
+fn closest_label(graph: &BuildGraph, pattern: &str) -> Option<String> {
+    let (dist, label) = graph
+        .iter()
+        .map(|(id, _)| (levenshtein(pattern, id.as_str()), id.as_str()))
+        .min_by_key(|(d, _)| *d)?;
+    // Within a third of the pattern length (or 2 edits) reads as a typo.
+    (dist <= 2 || dist * 3 <= pattern.len()).then(|| label.to_string())
+}
+
+/// Levenshtein edit distance, two-row DP.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
+    let mut curr = vec![0usize; b_chars.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b_chars.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b_chars.len()]
 }
 
 /// A compiled single-pattern matcher that porcelains can use to apply
@@ -466,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_label_typo_errors() {
+    fn exact_label_typo_errors_and_suggests_closest() {
         let g = sample_graph();
         let err = resolve_patterns(
             &g,
@@ -475,7 +509,28 @@ mod tests {
             &SelectionOpts::default(),
         )
         .unwrap_err();
-        assert!(matches!(err, SelectionError::NoMatch { .. }));
+        match err {
+            SelectionError::NoMatch { suggestion, .. } => {
+                assert_eq!(suggestion.as_deref(), Some("//go/bin:server"));
+            }
+            other => panic!("expected NoMatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wild_miss_gets_no_suggestion() {
+        let g = sample_graph();
+        let err = resolve_patterns(
+            &g,
+            &["//completely/different:thing".into()],
+            TestMode::Exclude,
+            &SelectionOpts::default(),
+        )
+        .unwrap_err();
+        match err {
+            SelectionError::NoMatch { suggestion, .. } => assert_eq!(suggestion, None),
+            other => panic!("expected NoMatch, got {other:?}"),
+        }
     }
 
     #[test]
