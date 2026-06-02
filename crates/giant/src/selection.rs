@@ -68,26 +68,26 @@ impl SelectionOpts {
     }
 }
 
-/// Resolve a list of user-supplied patterns against the graph into a
-/// concrete, sorted set of target ids.
+/// Resolve a list of user-supplied label patterns against the graph into
+/// a concrete, sorted set of target labels.
 ///
-/// Syntax (TDD-0011):
+/// Syntax (TDD-0011), matched against `//package:name` labels:
 /// - Empty patterns → all targets (subject to test mode + tag filter).
-/// - Exact id (no glob chars) → exact match. Missing literal id is
-///   an error.
-/// - Glob: `*` matches any chars except `:`; `**` matches any chars
-///   including `:`. (Implemented by swapping `:`↔`/` and delegating to
-///   the `glob` crate.)
+/// - Exact label (`//pkg:name`, or `//pkg/name` shorthand) → one target.
+///   A literal miss is an error.
+/// - Package `//pkg:*` → every target in that package; recursive
+///   `//pkg/...` (and `//...`) crosses into subpackages. `*` stops at a
+///   `/` boundary; `...` is the only construct that crosses packages.
 /// - `!pattern` excludes whatever the pattern matches.
 /// - Multiple positionals are unioned; exclusions apply after.
-/// - If only excludes are given, the implicit include is `**`.
+/// - If only excludes are given, the implicit include is `//...`.
 ///
 /// `test_mode` controls whether `test: true` targets are eligible.
 /// `opts` carries tag filters. Both apply *before* the pattern match,
 /// so the user sees consistent results regardless of how broad the
 /// pattern is.
 ///
-/// Output is sorted lexicographically by id, so the order is stable
+/// Output is sorted lexicographically by label, so the order is stable
 /// across runs and between CLI invocations and porcelain consumers.
 pub fn resolve_patterns(
     graph: &BuildGraph,
@@ -125,19 +125,19 @@ pub fn resolve_patterns(
     }
     // Excludes-only → start from everything.
     if includes.is_empty() {
-        includes.push("**");
+        includes.push("//...");
     }
 
     let mut selected: Vec<TargetId> = Vec::new();
     let mut seen: HashSet<TargetId> = HashSet::new();
     for raw in &includes {
-        let pat = compile(raw)?;
+        let pat = LabelPattern::parse(raw)?;
         let mut matched_any = false;
         for (id, spec) in graph.iter() {
             if !eligible(spec) {
                 continue;
             }
-            if pat.matches_with(&id_match_str(id), MATCH_OPTS) {
+            if pat.matches(id) {
                 matched_any = true;
                 if seen.insert(id.clone()) {
                     selected.push(id.clone());
@@ -152,73 +152,113 @@ pub fn resolve_patterns(
     }
 
     if !excludes.is_empty() {
-        let ex_pats: Vec<glob::Pattern> = excludes
+        let ex_pats: Vec<LabelPattern> = excludes
             .iter()
-            .map(|p| compile(p))
+            .map(|p| LabelPattern::parse(p))
             .collect::<Result<_, _>>()?;
-        selected.retain(|id| {
-            let s = id_match_str(id);
-            !ex_pats.iter().any(|p| p.matches_with(&s, MATCH_OPTS))
-        });
+        selected.retain(|id| !ex_pats.iter().any(|p| p.matches(id)));
     }
 
     selected.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     Ok(selected)
 }
 
-/// `require_literal_separator = true` makes `*` stop at `/` (which is
-/// our stand-in for `:` after substitution) - that's how `go:*` ends
-/// up matching only one segment while `go:**` crosses boundaries.
+/// `require_literal_separator = true` makes `*` stop at `/`, so a package
+/// glob like `//src/*:bin` matches one path segment, while `...` is the
+/// only construct that crosses package boundaries (TDD-0011).
 const MATCH_OPTS: glob::MatchOptions = glob::MatchOptions {
     case_sensitive: true,
     require_literal_separator: true,
     require_literal_leading_dot: false,
 };
 
-/// Translate `:`-separated giant patterns into `/`-separated globs so
-/// `glob::Pattern` treats `:` as a separator. `*` then naturally
-/// doesn't cross `:` boundaries; `**` does.
-fn compile(raw: &str) -> Result<glob::Pattern, SelectionError> {
-    let translated = raw.replace(':', "/");
-    glob::Pattern::new(&translated).map_err(|e| SelectionError::BadGlob {
-        pattern: raw.to_string(),
+/// A parsed label pattern (TDD-0011 §Pattern syntax). Matches against
+/// `//<package>:<name>` labels.
+#[derive(Debug, Clone)]
+enum LabelPattern {
+    /// `//prefix/...` (or `//...`): the package equals `prefix` or is a
+    /// subpackage of it. `prefix` empty = the whole workspace.
+    Recursive { prefix: String },
+    /// `//pkgpat:namepat`: glob the package and name segments. A bare
+    /// `//a/b/c` is shorthand for `//a/b/c:c` (name = last segment).
+    Exact {
+        pkg: glob::Pattern,
+        name: glob::Pattern,
+    },
+}
+
+impl LabelPattern {
+    fn parse(raw: &str) -> Result<Self, SelectionError> {
+        let body = raw.strip_prefix("//").unwrap_or(raw);
+        if let Some(prefix) = body.strip_suffix("...") {
+            let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
+            return Ok(LabelPattern::Recursive {
+                prefix: prefix.to_string(),
+            });
+        }
+        let (pkg, name) = match body.rsplit_once(':') {
+            Some((p, n)) => (p, n),
+            // `//a/b/c` shorthand → package `a/b/c`, name = last segment.
+            None => (body, body.rsplit_once('/').map_or(body, |(_, n)| n)),
+        };
+        Ok(LabelPattern::Exact {
+            pkg: glob_pat(pkg)?,
+            name: glob_pat(name)?,
+        })
+    }
+
+    fn matches(&self, id: &TargetId) -> bool {
+        let (lpkg, lname) = id.split();
+        match self {
+            // `prefix` empty = whole workspace; otherwise the package is
+            // `prefix` itself or a subpackage (`prefix` then `/`).
+            LabelPattern::Recursive { prefix } => {
+                prefix.is_empty()
+                    || lpkg
+                        .strip_prefix(prefix.as_str())
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+            }
+            LabelPattern::Exact { pkg, name } => {
+                pkg.matches_with(lpkg, MATCH_OPTS) && name.matches_with(lname, MATCH_OPTS)
+            }
+        }
+    }
+}
+
+fn glob_pat(s: &str) -> Result<glob::Pattern, SelectionError> {
+    glob::Pattern::new(s).map_err(|e| SelectionError::BadGlob {
+        pattern: s.to_string(),
         error: e,
     })
 }
 
-fn id_match_str(id: &TargetId) -> String {
-    id.as_str().replace(':', "/")
-}
-
-/// Whether a string contains any of the glob metacharacters Giant's
-/// selection language recognises (`*`, `?`, `[`). Porcelains that want
-/// to switch between literal and pattern matching can call this.
+/// Whether a pattern is a glob (a miss contributes zero) rather than a
+/// literal label (a miss is a typo → error). Recognises `*`/`?`/`[` and
+/// the recursive `...`.
 pub fn has_glob_chars(s: &str) -> bool {
-    s.contains('*') || s.contains('?') || s.contains('[')
+    s.contains('*') || s.contains('?') || s.contains('[') || s.contains("...")
 }
 
 /// A compiled single-pattern matcher that porcelains can use to apply
-/// the same selection rules as `giant build`. Same `:` segmentation
-/// (`*` stops at `:`, `**` crosses).
+/// the same label-selection rules as `giant build` (TDD-0011).
 #[derive(Debug, Clone)]
 pub struct PatternMatcher {
-    inner: glob::Pattern,
+    inner: LabelPattern,
 }
 
 impl PatternMatcher {
     pub fn compile(raw: &str) -> Result<Self, SelectionError> {
         Ok(Self {
-            inner: compile(raw)?,
+            inner: LabelPattern::parse(raw)?,
         })
     }
 
     pub fn matches(&self, id: &TargetId) -> bool {
-        self.inner.matches_with(&id_match_str(id), MATCH_OPTS)
+        self.inner.matches(id)
     }
 
     pub fn matches_str(&self, id: &str) -> bool {
-        let s = id.replace(':', "/");
-        self.inner.matches_with(&s, MATCH_OPTS)
+        self.inner.matches(&TargetId::new(id))
     }
 }
 
@@ -278,7 +318,12 @@ mod tests {
     use crate::types::GlobPattern;
 
     fn spec(id: &str, deps: &[&str], outputs: &[&str], inputs: &[&str]) -> TargetSpec {
+        // Accept a full `//pkg:name` label (take the name) or a bare id
+        // (use it as the name) - affected tests use bare ids, pattern
+        // tests use labels.
+        let name = id.rsplit_once(':').map_or(id, |(_, n)| n);
         TargetSpec {
+            name: name.to_string(),
             id: TargetId::new(id),
             inputs: inputs
                 .iter()
@@ -362,11 +407,11 @@ mod tests {
 
     fn sample_graph() -> BuildGraph {
         graph_with(vec![
-            spec("go:bin:server", &[], &["s"], &[]),
-            spec("go:bin:client", &[], &["c"], &[]),
-            spec("go:lib:util", &[], &["u"], &[]),
-            spec("go:test:auth", &[], &["t"], &[]),
-            spec("docker:api", &[], &["d"], &[]),
+            spec("//go/bin:server", &[], &["s"], &[]),
+            spec("//go/bin:client", &[], &["c"], &[]),
+            spec("//go/lib:util", &[], &["u"], &[]),
+            spec("//go/test:auth", &[], &["t"], &[]),
+            spec("//docker:api", &[], &["d"], &[]),
         ])
     }
 
@@ -378,52 +423,51 @@ mod tests {
     fn empty_patterns_returns_all_non_test_targets_sorted() {
         let g = sample_graph();
         let out = resolve_patterns(&g, &[], TestMode::Exclude, &SelectionOpts::default()).unwrap();
-        // go:test:auth has test=false in the fixture, so all 5 show.
+        // None are test targets in the fixture, so all 5 show.
         assert_eq!(
             ids(&out),
             vec![
-                "docker:api",
-                "go:bin:client",
-                "go:bin:server",
-                "go:lib:util",
-                "go:test:auth",
+                "//docker:api",
+                "//go/bin:client",
+                "//go/bin:server",
+                "//go/lib:util",
+                "//go/test:auth",
             ]
         );
     }
 
     #[test]
     fn empty_patterns_excludes_test_targets_when_requested() {
-        // Mark go:test:auth as a test target.
         let g = graph_with(vec![
-            spec("go:bin:server", &[], &["s"], &[]),
+            spec("//go/bin:server", &[], &["s"], &[]),
             TargetSpec {
                 test: true,
-                ..spec("go:test:auth", &[], &["t"], &[])
+                ..spec("//go/test:auth", &[], &["t"], &[])
             },
         ]);
         let out = resolve_patterns(&g, &[], TestMode::Exclude, &SelectionOpts::default()).unwrap();
-        assert_eq!(ids(&out), vec!["go:bin:server"]);
+        assert_eq!(ids(&out), vec!["//go/bin:server"]);
     }
 
     #[test]
-    fn exact_id_matches() {
+    fn exact_label_matches() {
         let g = sample_graph();
         let out = resolve_patterns(
             &g,
-            &["go:bin:server".into()],
+            &["//go/bin:server".into()],
             TestMode::Exclude,
             &SelectionOpts::default(),
         )
         .unwrap();
-        assert_eq!(ids(&out), vec!["go:bin:server"]);
+        assert_eq!(ids(&out), vec!["//go/bin:server"]);
     }
 
     #[test]
-    fn exact_id_typo_errors() {
+    fn exact_label_typo_errors() {
         let g = sample_graph();
         let err = resolve_patterns(
             &g,
-            &["go:bin:srvr".into()],
+            &["//go/bin:srvr".into()],
             TestMode::Exclude,
             &SelectionOpts::default(),
         )
@@ -432,14 +476,13 @@ mod tests {
     }
 
     #[test]
-    fn single_star_does_not_cross_colon() {
+    fn package_pattern_does_not_cross_into_subpackages() {
         let g = sample_graph();
-        // `go:*` should match go:bin / go:lib / go:test segments only,
-        // not the deeper `go:bin:server`. Result: nothing in this fixture,
-        // because we don't have a target literally named `go:bin`.
+        // `//go:*` is the `go` package exactly - but every target lives in
+        // a subpackage (go/bin, go/lib, go/test), so nothing matches.
         let out = resolve_patterns(
             &g,
-            &["go:*".into()],
+            &["//go:*".into()],
             TestMode::Exclude,
             &SelectionOpts::default(),
         )
@@ -448,25 +491,25 @@ mod tests {
     }
 
     #[test]
-    fn single_star_matches_one_segment() {
+    fn package_star_matches_one_package() {
         let g = sample_graph();
-        // `go:bin:*` matches go:bin:server and go:bin:client.
+        // `//go/bin:*` is every target in package go/bin.
         let out = resolve_patterns(
             &g,
-            &["go:bin:*".into()],
+            &["//go/bin:*".into()],
             TestMode::Exclude,
             &SelectionOpts::default(),
         )
         .unwrap();
-        assert_eq!(ids(&out), vec!["go:bin:client", "go:bin:server"]);
+        assert_eq!(ids(&out), vec!["//go/bin:client", "//go/bin:server"]);
     }
 
     #[test]
-    fn double_star_crosses_colons() {
+    fn recursive_crosses_package_boundaries() {
         let g = sample_graph();
         let out = resolve_patterns(
             &g,
-            &["go:**".into()],
+            &["//go/...".into()],
             TestMode::Exclude,
             &SelectionOpts::default(),
         )
@@ -474,10 +517,10 @@ mod tests {
         assert_eq!(
             ids(&out),
             vec![
-                "go:bin:client",
-                "go:bin:server",
-                "go:lib:util",
-                "go:test:auth"
+                "//go/bin:client",
+                "//go/bin:server",
+                "//go/lib:util",
+                "//go/test:auth"
             ]
         );
     }
@@ -489,7 +532,7 @@ mod tests {
         let g = sample_graph();
         let out = resolve_patterns(
             &g,
-            &["rust:**".into()],
+            &["//rust/...".into()],
             TestMode::Exclude,
             &SelectionOpts::default(),
         )
@@ -502,12 +545,12 @@ mod tests {
         let g = sample_graph();
         let out = resolve_patterns(
             &g,
-            &["go:bin:server".into(), "docker:**".into()],
+            &["//go/bin:server".into(), "//docker/...".into()],
             TestMode::Exclude,
             &SelectionOpts::default(),
         )
         .unwrap();
-        assert_eq!(ids(&out), vec!["docker:api", "go:bin:server"]);
+        assert_eq!(ids(&out), vec!["//docker:api", "//go/bin:server"]);
     }
 
     #[test]
@@ -515,19 +558,19 @@ mod tests {
         let g = sample_graph();
         let out = resolve_patterns(
             &g,
-            &["go:**".into(), "go:bin:server".into()],
+            &["//go/...".into(), "//go/bin:server".into()],
             TestMode::Exclude,
             &SelectionOpts::default(),
         )
         .unwrap();
-        // go:bin:server appears once even though both patterns match it.
+        // //go/bin:server appears once even though both patterns match it.
         assert_eq!(
             ids(&out),
             vec![
-                "go:bin:client",
-                "go:bin:server",
-                "go:lib:util",
-                "go:test:auth"
+                "//go/bin:client",
+                "//go/bin:server",
+                "//go/lib:util",
+                "//go/test:auth"
             ]
         );
     }
@@ -537,14 +580,14 @@ mod tests {
         let g = sample_graph();
         let out = resolve_patterns(
             &g,
-            &["go:**".into(), "!go:test:*".into()],
+            &["//go/...".into(), "!//go/test/...".into()],
             TestMode::Exclude,
             &SelectionOpts::default(),
         )
         .unwrap();
         assert_eq!(
             ids(&out),
-            vec!["go:bin:client", "go:bin:server", "go:lib:util"]
+            vec!["//go/bin:client", "//go/bin:server", "//go/lib:util"]
         );
     }
 
@@ -553,12 +596,12 @@ mod tests {
         let g = sample_graph();
         let out = resolve_patterns(
             &g,
-            &["!go:**".into()],
+            &["!//go/...".into()],
             TestMode::Exclude,
             &SelectionOpts::default(),
         )
         .unwrap();
-        assert_eq!(ids(&out), vec!["docker:api"]);
+        assert_eq!(ids(&out), vec!["//docker:api"]);
     }
 
     #[test]
@@ -566,26 +609,26 @@ mod tests {
         let g = sample_graph();
         let out = resolve_patterns(
             &g,
-            &["docker:**".into(), "!go:**".into()],
+            &["//docker/...".into(), "!//go/...".into()],
             TestMode::Exclude,
             &SelectionOpts::default(),
         )
         .unwrap();
-        assert_eq!(ids(&out), vec!["docker:api"]);
+        assert_eq!(ids(&out), vec!["//docker:api"]);
     }
 
     // -------- test_mode --------
 
     fn graph_with_test_targets() -> BuildGraph {
         graph_with(vec![
-            spec("go:bin:server", &[], &["s"], &[]),
+            spec("//go/bin:server", &[], &["s"], &[]),
             TargetSpec {
                 test: true,
-                ..spec("go:test:auth", &[], &["a"], &[])
+                ..spec("//go/test:auth", &[], &["a"], &[])
             },
             TargetSpec {
                 test: true,
-                ..spec("go:test:store", &[], &["s2"], &[])
+                ..spec("//go/test:store", &[], &["s2"], &[])
             },
         ])
     }
@@ -594,14 +637,14 @@ mod tests {
     fn test_mode_only_filters_to_tests() {
         let g = graph_with_test_targets();
         let out = resolve_patterns(&g, &[], TestMode::Only, &SelectionOpts::default()).unwrap();
-        assert_eq!(ids(&out), vec!["go:test:auth", "go:test:store"]);
+        assert_eq!(ids(&out), vec!["//go/test:auth", "//go/test:store"]);
     }
 
     #[test]
     fn test_mode_exclude_drops_tests() {
         let g = graph_with_test_targets();
         let out = resolve_patterns(&g, &[], TestMode::Exclude, &SelectionOpts::default()).unwrap();
-        assert_eq!(ids(&out), vec!["go:bin:server"]);
+        assert_eq!(ids(&out), vec!["//go/bin:server"]);
     }
 
     #[test]
@@ -610,18 +653,18 @@ mod tests {
         let out = resolve_patterns(&g, &[], TestMode::Include, &SelectionOpts::default()).unwrap();
         assert_eq!(
             ids(&out),
-            vec!["go:bin:server", "go:test:auth", "go:test:store"]
+            vec!["//go/bin:server", "//go/test:auth", "//go/test:store"]
         );
     }
 
     #[test]
-    fn test_mode_only_rejects_non_test_exact_id() {
-        // `giant test go:bin:server` - server isn't a test, so a
-        // literal-id miss errors. Catches "did you mean build?".
+    fn test_mode_only_rejects_non_test_exact_label() {
+        // `giant test //go/bin:server` - server isn't a test, so a
+        // literal-label miss errors. Catches "did you mean build?".
         let g = graph_with_test_targets();
         let err = resolve_patterns(
             &g,
-            &["go:bin:server".into()],
+            &["//go/bin:server".into()],
             TestMode::Only,
             &SelectionOpts::default(),
         )
@@ -636,19 +679,19 @@ mod tests {
         graph_with(vec![
             TargetSpec {
                 tags: mk(&["release", "linux"]),
-                ..spec("go:bin:server", &[], &["s"], &[])
+                ..spec("//go/bin:server", &[], &["s"], &[])
             },
             TargetSpec {
                 tags: mk(&["release", "macos"]),
-                ..spec("go:bin:client", &[], &["c"], &[])
+                ..spec("//go/bin:client", &[], &["c"], &[])
             },
             TargetSpec {
                 tags: mk(&["dev"]),
-                ..spec("go:bin:devtools", &[], &["d"], &[])
+                ..spec("//go/bin:devtools", &[], &["d"], &[])
             },
             TargetSpec {
                 tags: mk(&["release", "flaky"]),
-                ..spec("docker:api", &[], &["a"], &[])
+                ..spec("//docker:api", &[], &["a"], &[])
             },
         ])
     }
@@ -663,7 +706,7 @@ mod tests {
         let out = resolve_patterns(&g, &[], TestMode::Exclude, &opts).unwrap();
         assert_eq!(
             ids(&out),
-            vec!["docker:api", "go:bin:client", "go:bin:server"]
+            vec!["//docker:api", "//go/bin:client", "//go/bin:server"]
         );
     }
 
@@ -676,7 +719,7 @@ mod tests {
         };
         let out = resolve_patterns(&g, &[], TestMode::Exclude, &opts).unwrap();
         // dev → devtools; macos → client.
-        assert_eq!(ids(&out), vec!["go:bin:client", "go:bin:devtools"]);
+        assert_eq!(ids(&out), vec!["//go/bin:client", "//go/bin:devtools"]);
     }
 
     #[test]
@@ -689,7 +732,7 @@ mod tests {
         let out = resolve_patterns(&g, &[], TestMode::Exclude, &opts).unwrap();
         assert_eq!(
             ids(&out),
-            vec!["go:bin:client", "go:bin:devtools", "go:bin:server"]
+            vec!["//go/bin:client", "//go/bin:devtools", "//go/bin:server"]
         );
     }
 
@@ -701,7 +744,7 @@ mod tests {
             no_tags: vec!["flaky".into()],
         };
         let out = resolve_patterns(&g, &[], TestMode::Exclude, &opts).unwrap();
-        assert_eq!(ids(&out), vec!["go:bin:client", "go:bin:server"]);
+        assert_eq!(ids(&out), vec!["//go/bin:client", "//go/bin:server"]);
     }
 
     #[test]
@@ -711,8 +754,8 @@ mod tests {
             tags: vec!["release".into()],
             ..Default::default()
         };
-        let out = resolve_patterns(&g, &["go:**".into()], TestMode::Exclude, &opts).unwrap();
-        assert_eq!(ids(&out), vec!["go:bin:client", "go:bin:server"]);
+        let out = resolve_patterns(&g, &["//go/...".into()], TestMode::Exclude, &opts).unwrap();
+        assert_eq!(ids(&out), vec!["//go/bin:client", "//go/bin:server"]);
     }
 
     #[test]
@@ -722,7 +765,7 @@ mod tests {
             tags: vec!["release".into()],
             ..Default::default()
         };
-        let err = resolve_patterns(&g, &["go:bin:devtools".into()], TestMode::Exclude, &opts)
+        let err = resolve_patterns(&g, &["//go/bin:devtools".into()], TestMode::Exclude, &opts)
             .unwrap_err();
         assert!(matches!(err, SelectionError::NoMatch { .. }));
     }

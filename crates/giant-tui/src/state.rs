@@ -937,54 +937,55 @@ mod tests {
     #[test]
     fn search_filter_substring_case_insensitive_when_no_globs() {
         let mut s = State::default();
-        s.apply(described("go:bin:server", &[], false));
-        s.apply(described("docker:api", &[], false));
-        s.filters.search = "GO:".into();
+        s.apply(described("//go/bin:server", &[], false));
+        s.apply(described("//docker:api", &[], false));
+        s.filters.search = "SERVER".into();
         let ids: Vec<&str> = s
             .filtered_catalog()
             .iter()
             .map(|(id, _)| id.as_str())
             .collect();
-        assert_eq!(ids, vec!["go:bin:server"]);
+        assert_eq!(ids, vec!["//go/bin:server"]);
     }
 
     #[test]
     fn search_filter_uses_engine_globs_when_pattern_has_stars() {
         let mut s = State::default();
-        s.apply(described("bin:giant", &[], false));
-        s.apply(described("bin:giant-tui", &[], false));
-        s.apply(described("docker:bin:api", &[], false));
-        // `bin:*` should match only `bin:` segment 1, not `docker:bin:api`.
-        s.filters.search = "bin:*".into();
+        s.apply(described("//bin:giant", &[], false));
+        s.apply(described("//bin:giant-tui", &[], false));
+        s.apply(described("//docker/bin:api", &[], false));
+        // `//bin:*` is the `bin` package only, not the `docker/bin` one.
+        s.filters.search = "//bin:*".into();
         let ids: Vec<&str> = s
             .filtered_catalog()
             .iter()
             .map(|(id, _)| id.as_str())
             .collect();
-        assert_eq!(ids, vec!["bin:giant", "bin:giant-tui"]);
+        assert_eq!(ids, vec!["//bin:giant", "//bin:giant-tui"]);
     }
 
     #[test]
-    fn search_filter_double_star_crosses_segments() {
+    fn search_filter_recursive_crosses_packages() {
         let mut s = State::default();
-        s.apply(described("docker:api", &[], false));
-        s.apply(described("docker:foo:bar", &[], false));
-        // `docker:*` matches one segment after the prefix.
-        s.filters.search = "docker:*".into();
+        s.apply(described("//docker:api", &[], false));
+        s.apply(described("//docker/foo:bar", &[], false));
+        // `//docker:*` is the docker package only.
+        s.filters.search = "//docker:*".into();
         let ids: Vec<&str> = s
             .filtered_catalog()
             .iter()
             .map(|(id, _)| id.as_str())
             .collect();
-        assert_eq!(ids, vec!["docker:api"]);
-        // `docker:**` matches the rest of the id regardless of depth.
-        s.filters.search = "docker:**".into();
+        assert_eq!(ids, vec!["//docker:api"]);
+        // `//docker/...` crosses into subpackages. Sorted, `/` (0x2f)
+        // precedes `:` (0x3a), so the subpackage label comes first.
+        s.filters.search = "//docker/...".into();
         let ids: Vec<&str> = s
             .filtered_catalog()
             .iter()
             .map(|(id, _)| id.as_str())
             .collect();
-        assert_eq!(ids, vec!["docker:api", "docker:foo:bar"]);
+        assert_eq!(ids, vec!["//docker/foo:bar", "//docker:api"]);
     }
 
     #[test]

@@ -341,7 +341,7 @@ tasks:
             r#"
 workspace: { name: p }
 targets:
-  - id: "lib:foo"
+  - name: "foo"
     command: "true"
     outputs: []
     exists: "true"

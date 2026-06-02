@@ -363,14 +363,14 @@ workspace: { name: deps }
 cache:
   dir: ./cache
 targets:
-  - id: "make:input"
+  - name: "input"
     inputs: []
     outputs: ["input.txt"]
     command: "echo deps-output > input.txt"
 tasks:
   combine:
     command: "cat input.txt > result.txt && echo done >> result.txt"
-    deps: ["make:input"]
+    deps: ["//:input"]
 "#,
     );
 
@@ -633,7 +633,7 @@ workspace: { name: badfail }
 cache:
   dir: ./cache
 targets:
-  - id: "always:fail"
+  - name: "fail"
     inputs: []
     outputs: []
     cache: false
@@ -641,7 +641,7 @@ targets:
 tasks:
   use_it:
     command: "echo SHOULD_NOT_RUN > marker.txt"
-    deps: ["always:fail"]
+    deps: ["//:fail"]
 "#,
     );
     let out = Command::new(giant_task_bin())
@@ -883,13 +883,13 @@ fn watch_reruns_task_when_a_dep_source_changes() {
         r#"
 workspace: { name: w }
 targets:
-  - id: "lib"
+  - name: "lib"
     inputs: ["src/**/*.txt"]
     outputs: ["out/lib.txt"]
     command: "mkdir -p out && cp src/lib.txt out/lib.txt"
 tasks:
   app:
-    deps: ["lib"]
+    deps: ["//:lib"]
     command: "printf 'ran\n' >> runs.log"
 "#,
     );

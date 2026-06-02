@@ -54,7 +54,7 @@ fn config_reload_re_emits_catalog_with_new_target() {
         r#"
 workspace: { name: reload }
 targets:
-  - id: "a"
+  - name: "a"
     command: "true"
     cache: false
 "#,
@@ -74,11 +74,11 @@ targets:
     // Initial catalog, terminated by engine.ready.
     let before = read_catalog_until(&mut out, |e| matches!(e, Event::EngineReady));
     assert!(
-        before.contains(&"a".to_string()),
+        before.contains(&"//:a".to_string()),
         "initial catalog should list target a; got {before:?}"
     );
     assert!(
-        !before.contains(&"b".to_string()),
+        !before.contains(&"//:b".to_string()),
         "target b shouldn't exist yet"
     );
 
@@ -88,10 +88,10 @@ targets:
         r#"
 workspace: { name: reload }
 targets:
-  - id: "a"
+  - name: "a"
     command: "true"
     cache: false
-  - id: "b"
+  - name: "b"
     command: "true"
     cache: false
 "#,
@@ -103,7 +103,7 @@ targets:
     // catalog.ready and must now include b.
     let after = read_catalog_until(&mut out, |e| matches!(e, Event::CatalogReady));
     assert!(
-        after.contains(&"b".to_string()),
+        after.contains(&"//:b".to_string()),
         "reload must surface the newly-added target b; got {after:?}"
     );
 
@@ -119,7 +119,7 @@ fn editing_giant_yaml_auto_reloads_via_the_watcher() {
         r#"
 workspace: { name: reload }
 targets:
-  - id: "a"
+  - name: "a"
     command: "true"
     cache: false
 "#,
@@ -137,7 +137,7 @@ targets:
     let mut out = BufReader::new(child.stdout.take().unwrap());
 
     let before = read_catalog_until(&mut out, |e| matches!(e, Event::EngineReady));
-    assert!(before.contains(&"a".to_string()), "got {before:?}");
+    assert!(before.contains(&"//:a".to_string()), "got {before:?}");
 
     // Edit giant.yaml - no command. The always-on watcher should notice
     // and trigger a reload on its own.
@@ -146,10 +146,10 @@ targets:
         r#"
 workspace: { name: reload }
 targets:
-  - id: "a"
+  - name: "a"
     command: "true"
     cache: false
-  - id: "c"
+  - name: "c"
     command: "true"
     cache: false
 "#,
@@ -157,7 +157,7 @@ targets:
 
     let after = read_catalog_until(&mut out, |e| matches!(e, Event::CatalogReady));
     assert!(
-        after.contains(&"c".to_string()),
+        after.contains(&"//:c".to_string()),
         "the watcher should auto-reload and surface target c; got {after:?}"
     );
 

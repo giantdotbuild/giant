@@ -1355,7 +1355,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn spec(id: &str, deps: &[&str], outputs: &[&str], inputs: &[&str]) -> TargetSpec {
+        let name = id.rsplit([':', '/']).next().unwrap_or(id);
         TargetSpec {
+            name: name.to_string(),
             id: TargetId::new(id),
             inputs: inputs
                 .iter()

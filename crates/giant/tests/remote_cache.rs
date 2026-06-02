@@ -84,7 +84,7 @@ remote:
   auth:
     kind: none
 targets:
-  - id: "demo"
+  - name: "demo"
     inputs: ["in.txt"]
     outputs: ["out.txt"]
     command: "cp in.txt out.txt"

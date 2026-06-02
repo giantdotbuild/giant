@@ -30,7 +30,7 @@ cache:
 # dependencies, a separate axis from the toolchain.
 # -----------------------------------------------------------------------------
 targets:
-  - id: "//toolchain/devenv"
+  - name: "devenv"
     inputs:
       - "devenv.lock"
       - "devenv.nix"
@@ -38,7 +38,7 @@ targets:
     command: "readlink -f .devenv/profile > .giant/toolchains/devenv.id"
     tags: ["toolchain"]
 
-  - id: "bin:giant"
+  - name: "giant"
     inputs:
       - "crates/giant/src/**/*.rs"
       - "crates/giant/build.rs"
@@ -48,10 +48,10 @@ targets:
     outputs: ["bin/giant"]
     command: "cargo build --release -p giant --bin giant && install -m 0755 target/release/giant bin/giant"
     timeout: 600
-    deps: ["//toolchain/devenv"]
+    deps: [":devenv"]
     tags: ["bin", "rust"]
 
-  - id: "bin:giant-task"
+  - name: "giant-task"
     inputs:
       - "crates/giant-task/src/**/*.rs"
       - "crates/giant-task/Cargo.toml"
@@ -61,10 +61,10 @@ targets:
     # -p selects the workspace member; --bin disambiguates within it.
     command: "cargo build --release -p giant-task --bin giant-task && install -m 0755 target/release/giant-task bin/giant-task"
     timeout: 600
-    deps: ["//toolchain/devenv"]
+    deps: [":devenv"]
     tags: ["bin", "rust", "porcelain"]
 
-  - id: "bin:giant-tui"
+  - name: "giant-tui"
     inputs:
       - "crates/giant-tui/src/**/*.rs"
       - "crates/giant-tui/Cargo.toml"
@@ -73,10 +73,10 @@ targets:
     outputs: ["bin/giant-tui"]
     command: "cargo build --release -p giant-tui --bin giant-tui && install -m 0755 target/release/giant-tui bin/giant-tui"
     timeout: 600
-    deps: ["//toolchain/devenv"]
+    deps: [":devenv"]
     tags: ["bin", "rust", "porcelain"]
 
-  - id: "docs:install"
+  - name: "install"
     inputs:
       - "docs-site/package.json"
       - "docs-site/package-lock.json"
@@ -85,10 +85,10 @@ targets:
     cwd: "docs-site"
     command: "npm ci"
     timeout: 180
-    deps: ["//toolchain/devenv"]
+    deps: [":devenv"]
     tags: ["docs"]
 
-  - id: "docs:build"
+  - name: "build"
     # Explicit input list - input globs don't (yet) support `!exclude`,
     # so we list the source dirs + top-level files rather than `**/*`
     # which would pick up node_modules/, dist/, and .astro/.
@@ -108,7 +108,7 @@ targets:
     # Depends on the toolchain directly, not just via docs:install - astro
     # runs node here, and output-cutoff on docs:install could otherwise
     # hide a toolchain change from this target.
-    deps: ["docs:install", "//toolchain/devenv"]
+    deps: [":install", ":devenv"]
     tags: ["docs"]
 
 # -----------------------------------------------------------------------------
@@ -158,23 +158,23 @@ tasks:
   bin:
     command: "echo refreshed bin/giant, bin/giant-task, and bin/giant-tui"
     description: "build the binaries and install them into ./bin"
-    deps: ["bin:giant", "bin:giant-task", "bin:giant-tui"]
+    deps: ["//:giant", "//:giant-task", "//:giant-tui"]
 
   docs:
     command: "echo docs built to docs-site/dist/"
     description: "build the static docs site"
-    deps: ["docs:build"]
+    deps: ["//:build"]
 
   docs-dev:
     # "$@" forwards anything after `giant task docs-dev --` to astro,
     # so e.g. `giant task docs-dev -- --host` binds on all interfaces.
     command: 'npx astro dev "$@"'
     description: "serve the docs site at localhost:4321 (blocks)"
-    deps: ["docs:install"]
+    deps: ["//:install"]
     cwd: "docs-site"
 
   docs-preview:
     command: 'npx astro preview "$@"'
     description: "preview the production-built docs site"
-    deps: ["docs:build"]
+    deps: ["//:build"]
     cwd: "docs-site"

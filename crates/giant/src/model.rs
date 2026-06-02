@@ -97,17 +97,32 @@ impl CacheKey {
     }
 }
 
-/// Unique identifier for a target.
+/// Path-derived target label `//<package>:<name>` (TDD-0001, ADR-0024).
 ///
-/// Convention is `lang:kind:name` (e.g. `go:bin:server`) but the engine
-/// treats this as opaque.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// The package is the workspace-relative directory of the target's
+/// `giant.yaml`; the root package is empty, so a root target is
+/// `//:name`. The engine treats the whole string as opaque past
+/// construction.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TargetId(String);
 
 impl TargetId {
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
+    }
+
+    /// Build the label for `name` in `package` (a workspace-relative dir,
+    /// `""` for the root package): `//<package>:<name>`.
+    pub fn label(package: &str, name: &str) -> Self {
+        Self(format!("//{package}:{name}"))
+    }
+
+    /// Split a `//<package>:<name>` label into its package (may be empty
+    /// or contain `/`) and name parts. The inverse of `label`.
+    pub fn split(&self) -> (&str, &str) {
+        let body = self.0.strip_prefix("//").unwrap_or(&self.0);
+        body.rsplit_once(':').unwrap_or((body, ""))
     }
 
     pub fn as_str(&self) -> &str {
@@ -148,7 +163,16 @@ impl From<String> for TargetId {
 /// A target - the unit of work. Schema in TDD-0001.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetSpec {
+    /// Local name, unique within the package. The wire field a config
+    /// declares; the engine's identity is the derived `id` label below.
+    pub name: String,
+
+    /// Path-derived label `//<package>:<name>`. Computed by the loader
+    /// from the file's package and `name`; never serialized. This is the
+    /// engine's identity - graph keys, deps, selection all use it.
+    #[serde(skip)]
     pub id: TargetId,
+
     #[serde(default)]
     pub inputs: Vec<Input>,
     #[serde(default)]

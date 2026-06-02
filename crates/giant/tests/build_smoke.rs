@@ -36,7 +36,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "demo:hello"
+  - name: "hello"
     inputs: []
     outputs: ["hello.txt"]
     command: "echo 'hello from giant' > hello.txt"
@@ -100,7 +100,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "gen:many"
+  - name: "many"
     inputs: []
     outputs: ["gen/*.txt"]
     command: "mkdir -p gen && echo 1 > gen/a.txt && echo 2 > gen/b.txt && echo 3 > gen/c.txt"
@@ -157,7 +157,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "gen:none"
+  - name: "none"
     inputs: []
     outputs: ["gen/*.txt"]
     command: "mkdir -p gen"
@@ -198,7 +198,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "gen:mixed"
+  - name: "mixed"
     inputs: []
     outputs:
       - "gen/anchor.txt"
@@ -256,14 +256,14 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "a"
+  - name: "a"
     inputs: []
     outputs: ["a.txt"]
     command: "echo a > a.txt"
-  - id: "b"
+  - name: "b"
     inputs: ["a.txt"]
     outputs: ["b.txt"]
-    deps: ["a"]
+    deps: [":a"]
     command: "cat a.txt > b.txt && echo b >> b.txt"
 "#,
     )
@@ -296,7 +296,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "bad"
+  - name: "bad"
     inputs: []
     outputs: []
     cache: false
@@ -338,14 +338,14 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "a"
+  - name: "a"
     inputs: ["a.in"]
     outputs: ["a.out"]
     command: "echo constant > a.out"   # deterministic output regardless of a.in
-  - id: "b"
+  - name: "b"
     inputs: ["a.out"]
     outputs: ["b.out"]
-    deps: ["a"]
+    deps: [":a"]
     command: "cat a.out > b.out"
 "#,
     )
@@ -359,8 +359,8 @@ targets:
         .unwrap();
     assert!(out1.status.success(), "first build failed");
     let s1 = String::from_utf8_lossy(&out1.stdout);
-    assert!(built(&s1, "a"), "expected a built; got: {s1}");
-    assert!(built(&s1, "b"), "expected b built; got: {s1}");
+    assert!(built(&s1, "//:a"), "expected a built; got: {s1}");
+    assert!(built(&s1, "//:b"), "expected b built; got: {s1}");
 
     // Edit a.in. a's cache key will change (its input content changed)
     // and a will rebuild. But a's command is `echo constant > a.out`, so
@@ -376,11 +376,11 @@ targets:
     assert!(out2.status.success(), "second build failed");
     let s2 = String::from_utf8_lossy(&out2.stdout);
     assert!(
-        built(&s2, "a"),
+        built(&s2, "//:a"),
         "expected a to rebuild (its input changed); got: {s2}"
     );
     assert!(
-        cached(&s2, "b"),
+        cached(&s2, "//:b"),
         "expected b to cache-hit (a's output bytes unchanged); got: {s2}"
     );
 }
@@ -401,12 +401,12 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "a"
+  - name: "a"
     inputs: []
     outputs: ["a.txt"]
     cache: false
     command: "sleep 0.3 && echo a > a.txt"
-  - id: "b"
+  - name: "b"
     inputs: []
     outputs: ["b.txt"]
     cache: false
@@ -449,12 +449,12 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "a"
+  - name: "a"
     inputs: []
     outputs: ["a.txt"]
     cache: false
     command: "sleep 0.3 && echo a > a.txt"
-  - id: "b"
+  - name: "b"
     inputs: []
     outputs: ["b.txt"]
     cache: false
@@ -491,11 +491,11 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "a"
+  - name: "a"
     inputs: []
     outputs: ["gen.txt"]
     command: "echo from-a > gen.txt"
-  - id: "b"
+  - name: "b"
     inputs: ["gen.txt"]
     outputs: ["out.txt"]
     command: "cat gen.txt > out.txt"
@@ -513,8 +513,8 @@ targets:
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(built(&s, "a"), "a should build; got: {s}");
-    assert!(built(&s, "b"), "b should build; got: {s}");
+    assert!(built(&s, "//:a"), "a should build; got: {s}");
+    assert!(built(&s, "//:b"), "b should build; got: {s}");
     // Verify b ran after a - b's output depends on a's having run first.
     assert_eq!(
         std::fs::read_to_string(ws.join("out.txt")).unwrap().trim(),
@@ -537,7 +537,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "docker:img"
+  - name: "img"
     inputs: ["Dockerfile"]
     outputs: []
     cache: false
@@ -579,7 +579,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "docker:img"
+  - name: "img"
     inputs: ["Dockerfile"]
     outputs: ["receipt.txt"]
     command: "echo built > receipt.txt"
@@ -596,7 +596,7 @@ targets:
         .unwrap();
     assert!(out.status.success(), "build failed");
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(built(&s, "docker:img"), "expected build to run; got: {s}");
+    assert!(built(&s, "//:img"), "expected build to run; got: {s}");
     assert_eq!(
         std::fs::read_to_string(ws.join("receipt.txt"))
             .unwrap()
@@ -621,7 +621,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "docker:img"
+  - name: "img"
     inputs: []
     outputs: []
     cache: false
@@ -664,11 +664,11 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "a"
+  - name: "a"
     inputs: ["src/a/**/*"]
     outputs: ["a.out"]
     command: "echo a > a.out"
-  - id: "b"
+  - name: "b"
     inputs: ["src/b/**/*"]
     outputs: ["b.out"]
     command: "echo b > b.out"
@@ -687,8 +687,8 @@ targets:
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(built(&s, "a"), "a should build; got: {s}");
-    assert!(!s.contains(" b "), "b should not appear; got: {s}");
+    assert!(built(&s, "//:a"), "a should build; got: {s}");
+    assert!(!s.contains("//:b"), "b should not appear; got: {s}");
     assert!(!ws.join("b.out").exists(), "b.out should not exist");
 }
 
@@ -710,11 +710,11 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "a"
+  - name: "a"
     inputs: ["src/a/**/*"]
     outputs: ["a.out"]
     command: "echo a > a.out"
-  - id: "b"
+  - name: "b"
     inputs: ["src/b/**/*"]
     outputs: ["b.out"]
     command: "echo b > b.out"
@@ -760,8 +760,8 @@ targets:
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(built(&s, "a"), "a should rebuild; got: {s}");
-    assert!(!s.contains(" b "), "b should not appear; got: {s}");
+    assert!(built(&s, "//:a"), "a should rebuild; got: {s}");
+    assert!(!s.contains("//:b"), "b should not appear; got: {s}");
 }
 
 #[test]
@@ -780,7 +780,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "a"
+  - name: "a"
     inputs: ["src/**/*"]
     outputs: ["a.out"]
     command: "echo a > a.out"
@@ -837,11 +837,11 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "a"
+  - name: "a"
     inputs: ["src/a/**/*"]
     outputs: ["a.out"]
     command: "cp src/a/main.go a.out"
-  - id: "b"
+  - name: "b"
     inputs: ["a.out"]
     outputs: ["b.out"]
     command: "cp a.out b.out"
@@ -860,8 +860,11 @@ targets:
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(built(&s, "a"), "a should build; got: {s}");
-    assert!(built(&s, "b"), "b should also build (transitive); got: {s}");
+    assert!(built(&s, "//:a"), "a should build; got: {s}");
+    assert!(
+        built(&s, "//:b"),
+        "b should also build (transitive); got: {s}"
+    );
 }
 
 #[test]
@@ -882,15 +885,15 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "a"
+  - name: "a"
     inputs: ["src/a/**/*"]
     outputs: ["a.out"]
     command: "echo a > a.out"
-  - id: "b"
+  - name: "b"
     inputs: ["src/b/**/*"]
     outputs: ["b.out"]
     command: "echo b > b.out"
-  - id: "c"
+  - name: "c"
     inputs: ["a.out"]
     outputs: ["c.out"]
     command: "cp a.out c.out"
@@ -913,7 +916,7 @@ targets:
     // Sorted: a, c. (b isn't affected; b's input glob doesn't match src/a/**.)
     assert_eq!(
         lines,
-        vec!["a", "c"],
+        vec!["//:a", "//:c"],
         "expected just 'a' and 'c'; got: {stdout}"
     );
     // Nothing was built.
@@ -938,7 +941,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "a"
+  - name: "a"
     inputs: ["src/**/*"]
     outputs: ["a.out"]
     command: "echo a > a.out"
@@ -975,7 +978,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "demo"
+  - name: "demo"
     inputs: ["in.txt"]
     outputs: ["out.txt"]
     env:
@@ -988,7 +991,7 @@ targets:
 
     // Before any build: explain should report 'miss'.
     let out1 = Command::new(giant_bin())
-        .args(["explain", "demo"])
+        .args(["explain", "//:demo"])
         .current_dir(ws)
         .output()
         .unwrap();
@@ -999,7 +1002,7 @@ targets:
     );
     let s1 = String::from_utf8_lossy(&out1.stdout);
     assert!(
-        s1.contains("target:      demo"),
+        s1.contains("target:      //:demo"),
         "missing target header; got: {s1}"
     );
     assert!(
@@ -1029,7 +1032,7 @@ targets:
     assert!(build.status.success());
 
     let out2 = Command::new(giant_bin())
-        .args(["explain", "demo"])
+        .args(["explain", "//:demo"])
         .current_dir(ws)
         .output()
         .unwrap();
@@ -1059,7 +1062,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "real"
+  - name: "real"
     inputs: []
     outputs: ["x"]
     command: "true"
@@ -1067,7 +1070,7 @@ targets:
     )
     .unwrap();
     let out = Command::new(giant_bin())
-        .args(["explain", "ghost"])
+        .args(["explain", "//:ghost"])
         .current_dir(ws)
         .output()
         .unwrap();
@@ -1091,15 +1094,15 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "a"
+  - name: "a"
     inputs: []
     outputs: ["a.txt"]
     command: "echo a > a.txt"
-  - id: "b"
+  - name: "b"
     inputs: ["a.txt"]
     outputs: ["b.txt"]
     command: "cat a.txt > b.txt"
-  - id: "c"
+  - name: "c"
     inputs: []
     outputs: ["c.txt"]
     command: "echo c > c.txt"
@@ -1118,11 +1121,11 @@ targets:
     );
     let s = String::from_utf8_lossy(&out.stdout);
     // All three IDs present.
-    for id in ["a", "b", "c"] {
+    for id in ["//:a", "//:b", "//:c"] {
         assert!(s.contains(id), "expected target {id:?} in list; got: {s}");
     }
     // 'b' depends on 'a' (inferred via a.txt), so it should show the arrow.
-    assert!(s.contains("b") && s.contains("→") && s.contains("a"));
+    assert!(s.contains("//:b") && s.contains("→") && s.contains("//:a"));
     // Footer.
     assert!(s.contains("3 target(s)"), "expected count footer; got: {s}");
 }
@@ -1139,15 +1142,15 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "a"
+  - name: "a"
     inputs: []
     outputs: ["a.txt"]
     command: "echo a > a.txt"
-  - id: "b"
+  - name: "b"
     inputs: ["a.txt"]
     outputs: ["b.txt"]
     command: "cat a.txt > b.txt"
-  - id: "c"
+  - name: "c"
     inputs: ["b.txt"]
     outputs: ["c.txt"]
     command: "cat b.txt > c.txt"
@@ -1157,7 +1160,7 @@ targets:
 
     // Tree under 'c' should be c → b → a.
     let out = Command::new(giant_bin())
-        .args(["graph", "c"])
+        .args(["graph", "//:c"])
         .current_dir(ws)
         .output()
         .unwrap();
@@ -1165,9 +1168,9 @@ targets:
     let s = String::from_utf8_lossy(&out.stdout);
     // Order matters: first line is 'c', then indented 'b', then deeper-indented 'a'.
     let lines: Vec<&str> = s.lines().collect();
-    assert_eq!(lines[0].trim(), "c");
-    assert!(lines[1].starts_with("  ") && lines[1].contains("b"));
-    assert!(lines[2].starts_with("    ") && lines[2].contains("a"));
+    assert_eq!(lines[0].trim(), "//:c");
+    assert!(lines[1].starts_with("  ") && lines[1].contains("//:b"));
+    assert!(lines[2].starts_with("    ") && lines[2].contains("//:a"));
 }
 
 #[test]
@@ -1182,15 +1185,15 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "lib"
+  - name: "lib"
     inputs: []
     outputs: ["lib.o"]
     command: "echo lib > lib.o"
-  - id: "app"
+  - name: "app"
     inputs: ["lib.o"]
     outputs: ["app"]
     command: "cp lib.o app"
-  - id: "release"
+  - name: "release"
     inputs: ["app"]
     outputs: ["release.tag"]
     command: "echo r > release.tag"
@@ -1199,16 +1202,16 @@ targets:
     .unwrap();
 
     let out = Command::new(giant_bin())
-        .args(["graph", "lib", "--reverse"])
+        .args(["graph", "//:lib", "--reverse"])
         .current_dir(ws)
         .output()
         .unwrap();
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     // lib → app → release downstream
-    assert!(s.contains("lib"), "got: {s}");
-    assert!(s.contains("app"), "got: {s}");
-    assert!(s.contains("release"), "got: {s}");
+    assert!(s.contains("//:lib"), "got: {s}");
+    assert!(s.contains("//:app"), "got: {s}");
+    assert!(s.contains("//:release"), "got: {s}");
 }
 
 #[test]
@@ -1223,7 +1226,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "real"
+  - name: "real"
     inputs: []
     outputs: ["x"]
     command: "true"
@@ -1231,7 +1234,7 @@ targets:
     )
     .unwrap();
     let out = Command::new(giant_bin())
-        .args(["graph", "ghost"])
+        .args(["graph", "//:ghost"])
         .current_dir(ws)
         .output()
         .unwrap();
@@ -1252,7 +1255,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "demo"
+  - name: "demo"
     inputs: []
     outputs: ["out.txt"]
     command: "echo hello > out.txt"
@@ -1331,7 +1334,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "x"
+  - name: "x"
     inputs: []
     outputs: ["x"]
     command: "echo x > x"
@@ -1364,7 +1367,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "demo"
+  - name: "demo"
     inputs: []
     outputs: ["out.txt"]
     command: "echo hi > out.txt"
@@ -1419,7 +1422,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "demo"
+  - name: "demo"
     inputs: ["src/in.txt"]
     outputs: ["out.txt"]
     command: "cp src/in.txt out.txt"
@@ -1466,7 +1469,7 @@ targets:
     let mut buf = String::new();
     let _ = child.stdout.take().unwrap().read_to_string(&mut buf);
     assert!(
-        line_has(&buf, "BUILD", "demo"),
+        line_has(&buf, "BUILD", "//:demo"),
         "expected initial build of demo in watch output; got: {buf}"
     );
 }
@@ -1474,8 +1477,8 @@ targets:
 #[test]
 #[cfg(unix)]
 fn watch_respects_pattern_selection() {
-    // Spawn `giant watch go:bin:*` against a fixture with both
-    // `go:bin:server` (matches) and `go:lib:util` (excluded). Editing
+    // Spawn `giant watch //:server` against a fixture with both
+    // `//:server` (matches) and `//:util` (excluded). Editing
     // the lib's input should NOT trigger a rebuild of the lib; editing
     // the bin's input should rebuild the bin. Verifies the selection
     // language is the same one watch enforces per-cycle.
@@ -1496,11 +1499,11 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "go:bin:server"
+  - name: "server"
     inputs: ["src/bin.txt"]
     outputs: ["bin.out"]
     command: "cp src/bin.txt bin.out"
-  - id: "go:lib:util"
+  - name: "util"
     inputs: ["src/lib.txt"]
     outputs: ["lib.out"]
     command: "cp src/lib.txt lib.out"
@@ -1509,7 +1512,7 @@ targets:
     .unwrap();
 
     let mut child = Command::new(giant_bin())
-        .args(["build", "go:bin:*", "--watch"])
+        .args(["build", "//:server", "--watch"])
         .current_dir(ws)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1526,12 +1529,12 @@ targets:
     );
     assert!(
         !ws.join("lib.out").exists(),
-        "lib.out should not be built - go:lib:util is outside the selection"
+        "lib.out should not be built - //:util is outside the selection"
     );
 
     // Edit the lib's input. The watcher will see the change and run a
-    // cycle, but the pattern filter must drop go:lib:util from the
-    // selection, leaving no targets to build.
+    // cycle, but the pattern filter must drop //:util from the
+    // selection, leaving no targets to build (//:util is filtered out).
     std::fs::write(ws.join("src/lib.txt"), "l2\n").unwrap();
     std::thread::sleep(Duration::from_millis(1200));
     assert!(
@@ -1556,14 +1559,14 @@ targets:
     let mut buf = String::new();
     let _ = child.stdout.take().unwrap().read_to_string(&mut buf);
     // A `no targets affected` note proves the lib-edit cycle ran with
-    // the filter in place - otherwise we'd see a BUILD for go:lib:util.
+    // the filter in place - otherwise we'd see a BUILD for //:util.
     assert!(
         buf.contains("no targets affected"),
         "expected a 'no targets affected' cycle after editing the excluded lib input; got: {buf}"
     );
     assert!(
-        !line_has(&buf, "BUILD", "go:lib:util"),
-        "go:lib:util must never appear as built in watch output; got: {buf}"
+        !line_has(&buf, "BUILD", "//:util"),
+        "//:util must never appear as built in watch output; got: {buf}"
     );
 }
 
@@ -1583,7 +1586,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "demo:logs"
+  - name: "logs"
     inputs: []
     outputs: ["out.txt"]
     command: "echo captured-marker-42 && echo out > out.txt"
@@ -1615,7 +1618,7 @@ targets:
     assert!(out2.status.success(), "second build failed");
     let s2 = String::from_utf8_lossy(&out2.stdout);
     assert!(
-        cached(&s2, "demo:logs"),
+        cached(&s2, "//:logs"),
         "second build should cache-hit; got: {s2}"
     );
     assert!(
@@ -1640,7 +1643,7 @@ cache:
   dir: ./cache
   replay_logs: false
 targets:
-  - id: "demo:noreplay"
+  - name: "noreplay"
     inputs: []
     outputs: ["out.txt"]
     command: "echo no-replay-marker-99 && echo out > out.txt"
@@ -1665,7 +1668,7 @@ targets:
     assert!(out2.status.success());
     let s2 = String::from_utf8_lossy(&out2.stdout);
     assert!(
-        cached(&s2, "demo:noreplay"),
+        cached(&s2, "//:noreplay"),
         "second build should cache-hit; got: {s2}"
     );
     assert!(
@@ -1690,7 +1693,7 @@ cache:
   dir: ./cache
   capture_logs: false
 targets:
-  - id: "demo:nocapture"
+  - name: "nocapture"
     inputs: []
     outputs: ["out.txt"]
     command: "echo nocapture-marker-7 && echo out > out.txt"
@@ -1713,7 +1716,7 @@ targets:
         .unwrap();
     assert!(out2.status.success());
     let s2 = String::from_utf8_lossy(&out2.stdout);
-    assert!(cached(&s2, "demo:nocapture"), "got: {s2}");
+    assert!(cached(&s2, "//:nocapture"), "got: {s2}");
     assert!(
         !s2.contains("nocapture-marker-7"),
         "no capture should mean no replay; got: {s2}"
@@ -1733,7 +1736,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "demo"
+  - name: "demo"
     inputs: []
     outputs: ["out.txt"]
     command: "echo first > out.txt"
@@ -1757,7 +1760,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "demo"
+  - name: "demo"
     inputs: []
     outputs: ["out.txt"]
     command: "echo second > out.txt"
@@ -1797,7 +1800,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "lint"
+  - name: "lint"
     inputs: []
     outputs: []
     cache: false
@@ -1844,7 +1847,7 @@ workspace:
 cache:
   dir: ./cache
 targets:
-  - id: "slow"
+  - name: "slow"
     inputs: []
     outputs: ["out.txt"]
     timeout_secs: 1

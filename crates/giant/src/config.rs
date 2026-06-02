@@ -2,7 +2,7 @@
 //!
 //! See TDD-0001 for the schema, ADR-0007 for YAML-as-sugar policy.
 
-use crate::model::TargetSpec;
+use crate::model::{TargetId, TargetSpec};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -329,12 +329,26 @@ impl Config {
     /// Load a config from a file. Detects YAML vs JSON by extension.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let raw = std::fs::read_to_string(path)?;
-        let cfg: Config = match path.extension().and_then(|e| e.to_str()) {
+        let mut cfg: Config = match path.extension().and_then(|e| e.to_str()) {
             Some("json") => serde_json::from_str(&raw)?,
             _ => serde_yaml_ng::from_str(&raw)?,
         };
+        // M1: a single root config → the root package (`""`). M2's scan
+        // derives the package per file from its directory.
+        cfg.finalize_labels("");
         cfg.validate_static()?;
         Ok(cfg)
+    }
+
+    /// Assign each target its `//<package>:<name>` label and resolve its
+    /// dep references against `package` (TDD-0001 §Path resolution).
+    fn finalize_labels(&mut self, package: &str) {
+        for t in &mut self.targets {
+            t.id = TargetId::label(package, &t.name);
+            for d in &mut t.deps {
+                *d = resolve_dep_label(package, d.as_str());
+            }
+        }
     }
 
     /// Static validation: things checkable on a single config file.
@@ -359,12 +373,21 @@ impl Config {
             )));
         }
 
-        // target ID uniqueness
+        // target label uniqueness (a duplicate name within a package)
         let mut seen = HashSet::new();
         for t in &self.targets {
+            if t.name.is_empty() {
+                return Err(ConfigError::Validation("target has empty name".into()));
+            }
+            if t.name.contains('/') || t.name.contains(':') {
+                return Err(ConfigError::Validation(format!(
+                    "target name '{}' may not contain '/' or ':' (those are label separators)",
+                    t.name
+                )));
+            }
             if !seen.insert(t.id.clone()) {
                 return Err(ConfigError::Validation(format!(
-                    "duplicate target id '{}'",
+                    "duplicate target '{}'",
                     t.id
                 )));
             }
@@ -391,6 +414,17 @@ fn is_valid_workspace_name(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Resolve a `deps:` reference to a full `//pkg:name` label. `//pkg:name`
+/// is already absolute; `:name` (and a bare `name`) are same-package
+/// (TDD-0001 §Path resolution).
+fn resolve_dep_label(package: &str, dep: &str) -> TargetId {
+    if dep.starts_with("//") {
+        TargetId::new(dep)
+    } else {
+        TargetId::label(package, dep.strip_prefix(':').unwrap_or(dep))
+    }
 }
 
 #[cfg(test)]
@@ -427,7 +461,7 @@ workspace:
 workspace:
   name: myproject
 targets:
-  - id: "rust:build"
+  - name: "build"
     inputs: ["src/**/*.rs", "Cargo.toml"]
     outputs: ["bin/app"]
     command: "cargo build --release"
@@ -435,7 +469,7 @@ targets:
         );
         let cfg = Config::load(f.path()).unwrap();
         assert_eq!(cfg.targets.len(), 1);
-        assert_eq!(cfg.targets[0].id.as_str(), "rust:build");
+        assert_eq!(cfg.targets[0].id.as_str(), "//:build");
         assert_eq!(cfg.targets[0].inputs.len(), 2);
     }
 
@@ -463,18 +497,18 @@ workspace: { name: "has spaces" }
     }
 
     #[test]
-    fn reject_duplicate_target_id() {
+    fn reject_duplicate_target_name() {
         let f = write_yaml(
             r#"
 workspace: { name: p }
 targets:
-  - { id: "a", inputs: [], outputs: ["x"], command: "true" }
-  - { id: "a", inputs: [], outputs: ["y"], command: "true" }
+  - { name: "a", inputs: [], outputs: ["x"], command: "true" }
+  - { name: "a", inputs: [], outputs: ["y"], command: "true" }
 "#,
         );
         let err = Config::load(f.path()).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("duplicate target id"), "got: {msg}");
+        assert!(msg.contains("duplicate target"), "got: {msg}");
     }
 
     #[test]
@@ -483,7 +517,7 @@ targets:
             r#"
 workspace: { name: p }
 targets:
-  - { id: "a", inputs: [], outputs: [], command: "true" }
+  - { name: "a", inputs: [], outputs: [], command: "true" }
 "#,
         );
         let err = Config::load(f.path()).unwrap_err();
@@ -497,7 +531,7 @@ targets:
             r#"
 workspace: { name: p }
 targets:
-  - id: "docker:img"
+  - name: "img"
     inputs: ["Dockerfile"]
     outputs: []
     command: "docker push"
@@ -513,7 +547,7 @@ targets:
             r#"
 workspace: { name: p }
 targets:
-  - id: "lint"
+  - name: "lint"
     inputs: ["src/**/*.rs"]
     outputs: []
     cache: false
@@ -530,7 +564,7 @@ targets:
             r#"
 workspace: { name: p }
 targets:
-  - id: "rust:test"
+  - name: "test"
     inputs: ["src/**/*.rs"]
     outputs: []
     test: true
