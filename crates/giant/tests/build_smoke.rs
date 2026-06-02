@@ -2067,3 +2067,61 @@ targets:
     assert!(out2.status.success());
     assert!(cached(&String::from_utf8_lossy(&out2.stdout), "//src/tool:build"));
 }
+
+#[test]
+fn package_glob_stops_at_subpackage_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        "workspace:\n  name: boundary\ncache:\n  dir: ./cache\n",
+    )
+    .unwrap();
+    // Parent package //src with a recursive glob over its tree.
+    std::fs::create_dir_all(ws.join("src/sub")).unwrap();
+    std::fs::write(ws.join("src/a.txt"), "a\n").unwrap();
+    std::fs::write(ws.join("src/sub/b.txt"), "b\n").unwrap();
+    std::fs::write(
+        ws.join("src/giant.yaml"),
+        r#"
+targets:
+  - name: gen
+    inputs: ["**/*.txt"]
+    outputs: ["gen.out"]
+    command: "true"
+"#,
+    )
+    .unwrap();
+    // Child package //src/sub owns b.txt.
+    std::fs::write(
+        ws.join("src/sub/giant.yaml"),
+        r#"
+targets:
+  - name: leaf
+    inputs: ["b.txt"]
+    outputs: ["leaf.out"]
+    command: "true"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("explain")
+        .arg("//src:gen")
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "explain failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    // The parent's `**/*.txt` glob hashes its own file but stops at the
+    // nested package - it must not claim the child package's b.txt.
+    assert!(s.contains("src/a.txt"), "expected src/a.txt in inputs; got:\n{s}");
+    assert!(
+        !s.contains("src/sub/b.txt"),
+        "parent glob crossed the subpackage boundary; got:\n{s}"
+    );
+}

@@ -6,7 +6,7 @@
 use super::ExecutorError;
 use crate::cache::LocalCache;
 use crate::model::{CacheKey, ContentHash, Input, TargetId, TargetSpec};
-use crate::paths::AbsPath;
+use crate::paths::{AbsPath, WsRelPath};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -169,7 +169,8 @@ fn compose_cache_key_blocking(
         })
         .collect();
 
-    let file_items = compute_file_inputs(workspace_root, cache, &file_globs)?;
+    // Subpackage directories this target's globs must not cross into.
+    let file_items = compute_file_inputs(workspace_root, cache, &file_globs, &spec.prune_dirs)?;
 
     // Hash file_inputs section in deterministic order.
     for item in &file_items {
@@ -217,10 +218,11 @@ fn compute_file_inputs(
     workspace_root: &AbsPath,
     cache: &LocalCache,
     globs: &[&str],
+    prune: &[WsRelPath],
 ) -> Result<Vec<FileInputItem>, std::io::Error> {
     use rayon::prelude::*;
 
-    let mut paths = expand_globs_batched(workspace_root.as_path(), globs, cache)?;
+    let mut paths = expand_globs_batched(workspace_root.as_path(), globs, cache, prune)?;
     paths.sort();
     paths.dedup();
 
@@ -254,11 +256,14 @@ fn compute_file_inputs(
 ///     workspace walk (`walkdir`) that visits each directory once.
 ///
 /// The shared walk also prunes known noise (`.git`, `.giant`, the
-/// configured cache directory) to keep the visit budget bounded.
+/// configured cache directory) and any `prune` directory - a subpackage
+/// boundary the glob must not cross (TDD-0001 §Path resolution) - to keep
+/// the visit budget bounded and the file-ownership one-package-per-file.
 fn expand_globs_batched(
     workspace_root: &Path,
     globs: &[&str],
     cache: &LocalCache,
+    prune: &[WsRelPath],
 ) -> Result<Vec<PathBuf>, std::io::Error> {
     let mut out: Vec<PathBuf> = Vec::new();
     let mut recursive: Vec<String> = Vec::new();
@@ -273,7 +278,8 @@ fn expand_globs_batched(
             let entries = glob::glob(&full)
                 .map_err(|e| std::io::Error::other(format!("bad glob {g:?}: {e}")))?;
             for entry in entries.flatten() {
-                if entry.is_file() {
+                let rel = entry.strip_prefix(workspace_root).unwrap_or(&entry);
+                if entry.is_file() && !prune.iter().any(|d| rel.starts_with(d.as_path())) {
                     out.push(entry);
                 }
             }
@@ -331,6 +337,10 @@ fn expand_globs_batched(
     let matches: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let workspace_root_owned = workspace_root.to_path_buf();
+    // Owned copies for the `'static` filter closure: the subpackage dirs to
+    // prune, and the root to make entry paths workspace-relative.
+    let prune_owned: Vec<PathBuf> = prune.iter().map(|p| p.as_path().to_path_buf()).collect();
+    let ws_for_prune = workspace_root.to_path_buf();
 
     ignore::WalkBuilder::new(workspace_root)
         .standard_filters(false)
@@ -344,6 +354,15 @@ fn expand_globs_batched(
             if let Some(name) = entry.file_name().to_str()
                 && skip_names.contains(&name)
             {
+                return false;
+            }
+            // Stop at a subpackage boundary - its files belong to that
+            // package, not this glob's. Pruning the boundary directory
+            // skips its whole subtree, so the match callback below never
+            // sees a file under a subpackage. Same `starts_with` predicate
+            // as the shallow-glob branch.
+            let rel = path.strip_prefix(&ws_for_prune).unwrap_or(path);
+            if prune_owned.iter().any(|d| rel.starts_with(d)) {
                 return false;
             }
             true

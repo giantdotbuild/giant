@@ -220,6 +220,13 @@ pub struct TargetSpec {
     /// inference. Display metadata for `giant explain`; never serialized.
     #[serde(skip)]
     pub inferred_deps: HashSet<TargetId>,
+
+    /// Runtime-only: workspace-relative directories of subpackages (nested
+    /// `giant.yaml` files) that this target's globs must not cross into,
+    /// so no two packages claim the same file (TDD-0001 §Path resolution).
+    /// Computed by the loader from the full package set; never serialized.
+    #[serde(skip)]
+    pub prune_dirs: Vec<WsRelPath>,
 }
 
 fn default_true() -> bool {

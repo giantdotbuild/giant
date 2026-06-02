@@ -295,6 +295,7 @@ mod tests {
             tags: Default::default(),
             label: None,
             inferred_deps: Default::default(),
+            prune_dirs: Vec::new(),
         }
     }
 

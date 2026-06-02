@@ -471,6 +471,11 @@ impl Config {
         cfg.validate_static()?;
         cfg.finalize_package("")?;
 
+        // Every package directory (a `giant.yaml`'s dir), for boundary
+        // pruning; seed with the root package.
+        let mut package_dirs: HashSet<String> = HashSet::new();
+        package_dirs.insert(String::new());
+
         // Nested package configs: targets only, package = their directory.
         for path in scan_config_files(root_dir) {
             if path == root_path {
@@ -481,6 +486,7 @@ impl Config {
                 .and_then(|d| d.strip_prefix(root_dir).ok())
                 .map(|rel| rel.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
+            package_dirs.insert(package.clone());
 
             reject_root_only_sections(&path)?;
             let mut pkg = Self::parse(&path)?;
@@ -490,8 +496,26 @@ impl Config {
             cfg.targets.append(&mut pkg.targets);
         }
 
+        cfg.compute_prune_dirs(&package_dirs);
         cfg.validate_merged()?;
         Ok(cfg)
+    }
+
+    /// Record, per target, the subpackage directories its globs must not
+    /// cross into (TDD-0001 §Path resolution). A file belongs to exactly
+    /// one package - its deepest enclosing `giant.yaml` - so a parent
+    /// package's glob stops at any nested package. `package_dirs` is every
+    /// scanned package directory (a `giant.yaml`'s dir), even ones with no
+    /// targets, since they still own their files.
+    fn compute_prune_dirs(&mut self, package_dirs: &HashSet<String>) {
+        for t in &mut self.targets {
+            let pkg = t.id.split().0.to_string();
+            t.prune_dirs = package_dirs
+                .iter()
+                .filter(|q| is_subpackage(q, &pkg))
+                .filter_map(|q| WsRelPath::new(q).ok())
+                .collect();
+        }
     }
 
     /// Locate the workspace root - the directory of an explicit config,
@@ -648,6 +672,18 @@ fn resolve_dep_label(package: &str, dep: &str) -> TargetId {
         TargetId::new(dep)
     } else {
         TargetId::label(package, dep.strip_prefix(':').unwrap_or(dep))
+    }
+}
+
+/// Whether `pkg` is a strict subpackage of `of` (nested deeper). The root
+/// package (`""`) is an ancestor of every non-root package. This is the
+/// *strict* (excludes `pkg == of`) package-ancestor variant of the
+/// inclusive recursive-pattern match in `selection::LabelPattern`.
+fn is_subpackage(pkg: &str, of: &str) -> bool {
+    if of.is_empty() {
+        !pkg.is_empty()
+    } else {
+        pkg.strip_prefix(of).is_some_and(|rest| rest.starts_with('/'))
     }
 }
 
@@ -992,6 +1028,39 @@ dispatch:
         // `//bin/tool` → workspace-root output; `//` cwd → workspace root.
         assert_eq!(t.outputs[0].as_path().to_str().unwrap(), "bin/tool");
         assert_eq!(t.cwd.as_path().to_str().unwrap(), "");
+    }
+
+    #[test]
+    fn scan_computes_subpackage_prune_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("giant.yaml"), "workspace:\n  name: w\n").unwrap();
+        std::fs::create_dir_all(root.join("src/sub")).unwrap();
+        std::fs::write(
+            root.join("src/giant.yaml"),
+            "targets:\n  - name: gen\n    inputs: [\"**/*.txt\"]\n    outputs: [\"o\"]\n    command: \"true\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/sub/giant.yaml"),
+            "targets:\n  - name: leaf\n    outputs: [\"o\"]\n    command: \"true\"\n",
+        )
+        .unwrap();
+        let cfg = Config::scan(root).unwrap();
+
+        let prune = |label: &str| -> Vec<String> {
+            cfg.targets
+                .iter()
+                .find(|t| t.id.as_str() == label)
+                .unwrap()
+                .prune_dirs
+                .iter()
+                .map(|p| p.as_path().to_string_lossy().into_owned())
+                .collect()
+        };
+        // The parent package prunes the nested package; the leaf prunes nothing.
+        assert_eq!(prune("//src:gen"), vec!["src/sub"]);
+        assert!(prune("//src/sub:leaf").is_empty());
     }
 
     #[test]
