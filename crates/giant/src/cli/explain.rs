@@ -235,10 +235,6 @@ fn print_breakdown(
         if let Some(oh) = own_output_hash {
             let _ = writeln!(w);
             let _ = writeln!(w, "outputs_content_hash: {}", oh.to_hex());
-            let _ = writeln!(
-                w,
-                "  (downstream targets feed this into their cache keys - early cutoff)"
-            );
         }
     }
 
