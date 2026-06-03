@@ -108,6 +108,7 @@
         giant = mkBin { name = "giant"; };
         giant-task = mkBin { name = "giant-task"; };
         giant-tui = mkBin { name = "giant-tui"; };
+        giant-gen = mkBin { name = "giant-gen"; };
 
         # Meta-package: `nix profile install .` drops all three
         # binaries onto PATH at once. Implementation is a
@@ -119,9 +120,10 @@
             giant
             giant-task
             giant-tui
+            giant-gen
           ];
           meta = {
-            description = "Giant + every first-party porcelain (task, tui)";
+            description = "Giant + every first-party porcelain (task, tui, gen)";
             mainProgram = "giant";
           };
         };
@@ -132,6 +134,7 @@
             giant
             giant-task
             giant-tui
+            giant-gen
             giant-suite
             ;
           default = giant-suite;
@@ -141,6 +144,7 @@
           giant = flake-utils.lib.mkApp { drv = giant; };
           giant-task = flake-utils.lib.mkApp { drv = giant-task; };
           giant-tui = flake-utils.lib.mkApp { drv = giant-tui; };
+          giant-gen = flake-utils.lib.mkApp { drv = giant-gen; };
           default = flake-utils.lib.mkApp { drv = giant; };
         };
 
