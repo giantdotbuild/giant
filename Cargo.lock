@@ -825,6 +825,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "giant-gen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "giant",
+ "ignore",
+ "serde",
+ "serde_yaml_ng",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "giant-task"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,31 @@
+[package]
+name = "giant-gen"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Generator runner porcelain for Giant - dispatched via `giant gen`"
+
+[[bin]]
+name = "giant-gen"
+path = "src/main.rs"
+
+[dependencies]
+# The giant engine, used as a library only for the workspace-root walk and
+# config-root parse (Config::load_root). The runner never touches the
+# executor/cache - it runs generator commands and diffs their files.
+giant = { path = "../giant" }
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
+clap = { version = "4", features = ["derive"] }
+
+# The runner's own narrow schema for giant-gen.yaml (just `generators:`).
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+
+# gitignore-aware walk to enumerate committed giant.<name>.yaml files.
+ignore = "0.4"
+
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
