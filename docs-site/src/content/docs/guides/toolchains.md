@@ -11,9 +11,25 @@ can share a cache entry that isn't really interchangeable. A shared
 remote cache turns that into silent poisoning: upgrade `rustc` on one
 machine and every other machine pulls a stale artifact.
 
-Giant has no built-in notion of a toolchain. Instead, you model one as
-an ordinary target, and the targets that use it depend on it. The
-existing cache machinery does the rest.
+Giant has no built-in notion of a toolchain. Instead, you make the thing
+that pins your toolchain part of the cache key. There are two levels:
+
+- **Simplest** - add your toolchain lockfile to a target's `inputs`
+  (e.g. `inputs: ["//devenv.lock"]`). Updating the toolchain changes the
+  file, which re-keys the target. Coarse (a bump rebuilds everything that
+  lists it) but trivial, and what the config generators do by default.
+- **Finer** - model the toolchain as its own *target* that build targets
+  depend on, so a bump re-keys only the affected ecosystem. The rest of
+  this guide.
+
+Either way, giant is **agnostic to how you pin**. The lockfile or binary
+can come from anywhere your toolchain changes with:
+[devenv](https://devenv.sh) / Nix (used in the examples here), a checked-in
+or git-lfs binary, an `asdf` `.tool-versions`, or a target that downloads
+and caches a pinned binary. None of these are special to giant - they are
+just files and targets. A system-installed toolchain works too, but then
+reproducibility and cache correctness are on you (see
+[System-installed tools](#system-installed-tools)), so it is discouraged.
 
 ## A toolchain is a target
 
