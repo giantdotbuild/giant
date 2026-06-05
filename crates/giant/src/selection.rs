@@ -14,6 +14,12 @@ use crate::model::{Input, TargetId};
 use std::collections::HashSet;
 use std::path::Path;
 
+/// A target carrying this tag is excluded from wildcard selection (the empty
+/// default, `//...`, `//pkg:*`) but stays selectable by exact label and still
+/// builds as a dependency - for setup/side-effect targets that shouldn't run on
+/// a bare `giant build`. (Bazel's `tags = ["manual"]`.)
+const MANUAL_TAG: &str = "manual";
+
 #[derive(Debug, thiserror::Error)]
 pub enum SelectionError {
     #[error("no affected targets matched")]
@@ -100,11 +106,17 @@ pub fn resolve_patterns(
     test_mode: TestMode,
     opts: &SelectionOpts,
 ) -> Result<Vec<TargetId>, SelectionError> {
-    let eligible = |spec: &crate::model::TargetSpec| {
+    // `allow_manual` is true only for an exact, specific label - a `manual`
+    // target is skipped by wildcards (`//...`, `//pkg:*`, the empty default)
+    // but still selectable when named outright, and always buildable as a dep.
+    let eligible = |spec: &crate::model::TargetSpec, allow_manual: bool| {
         match test_mode {
             TestMode::Exclude if spec.test => return false,
             TestMode::Only if !spec.test => return false,
             _ => {}
+        }
+        if !allow_manual && spec.tags.contains(MANUAL_TAG) {
+            return false;
         }
         opts.passes_tags(spec)
     };
@@ -112,7 +124,7 @@ pub fn resolve_patterns(
     if patterns.is_empty() {
         let mut out: Vec<TargetId> = graph
             .iter()
-            .filter(|(_, s)| eligible(s))
+            .filter(|(_, s)| eligible(s, false))
             .map(|(id, _)| id.clone())
             .collect();
         out.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -137,9 +149,10 @@ pub fn resolve_patterns(
     let mut seen: HashSet<TargetId> = HashSet::new();
     for raw in &includes {
         let pat = LabelPattern::parse(raw)?;
+        let allow_manual = !has_glob_chars(raw);
         let mut matched_any = false;
         for (id, spec) in graph.iter() {
-            if !eligible(spec) {
+            if !eligible(spec, allow_manual) {
                 continue;
             }
             if pat.matches(id) {
@@ -401,6 +414,34 @@ mod tests {
         let g = graph_with(vec![spec("a", &[], &["a"], &["**/*.go"])]);
         let aff = affected_targets(&g, &[]);
         assert!(aff.is_empty());
+    }
+
+    #[test]
+    fn manual_targets_skip_wildcards_but_take_exact_labels() {
+        let mut m = spec("//svc:db-migrate", &[], &["o"], &[]);
+        m.tags.insert(MANUAL_TAG.to_string());
+        let g = graph_with(vec![spec("//svc:api", &[], &["a"], &[]), m]);
+        let opts = SelectionOpts::default();
+        let migrate = TargetId::new("//svc:db-migrate");
+
+        let by = |pats: &[&str]| {
+            resolve_patterns(
+                &g,
+                &pats.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                TestMode::Exclude,
+                &opts,
+            )
+            .unwrap()
+        };
+
+        // Wildcards (empty default, //..., //svc:*) skip the manual target.
+        assert!(!by(&[]).contains(&migrate), "default build skips manual");
+        assert!(!by(&["//..."]).contains(&migrate), "//... skips manual");
+        assert!(!by(&["//svc:*"]).contains(&migrate), "//svc:* skips manual");
+        // Non-manual sibling is still selected by the default.
+        assert!(by(&[]).contains(&TargetId::new("//svc:api")));
+        // An exact label selects the manual target.
+        assert_eq!(by(&["//svc:db-migrate"]), vec![migrate]);
     }
 
     #[test]
