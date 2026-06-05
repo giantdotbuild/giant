@@ -18,12 +18,24 @@ giant = { path = "../giant" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
 clap = { version = "4", features = ["derive"] }
 
+# Embedded Starlark host for the built-in generator (ADR-0029, TDD-0024). The
+# whole point of the porcelain's programmable path; single static binary, no
+# runtime to provision. allocative is required by the StarlarkValue derives.
+starlark = "0.14"
+allocative = "0.3"
+
+# The shared wire schema: target() builds and emits a WireTarget (ADR-0029 §5).
+giant-schema = { path = "../giant-schema" }
+
 # The runner's own narrow schema for giant-gen.yaml (just `generators:`).
 serde = { version = "1", features = ["derive"] }
 serde_yaml_ng = "0.10"
+serde_json = "1"
 
 # gitignore-aware walk to enumerate committed giant.<name>.yaml files.
 ignore = "0.4"
+# glob matching for the host's ws.glob primitive.
+glob = "0.3"
 
 anyhow = "1"
 

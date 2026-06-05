@@ -10,6 +10,11 @@
 mod check;
 mod config;
 mod run;
+// The embedded Starlark host (ADR-0029, TDD-0024). Wired into the runner in a
+// follow-up (the `generate:` config relocation, §A); exercised by its own tests
+// for now, so allow it to be unreferenced by `main` until then.
+#[allow(dead_code)]
+mod star;
 
 use anyhow::Result;
 use clap::Parser;

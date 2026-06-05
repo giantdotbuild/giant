@@ -13,7 +13,7 @@
 //! See TDD-0001 for the schema and ADR-0007 for the YAML-as-sugar input forms.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// A generator's output document, or any package config's `targets:` block:
@@ -32,53 +32,66 @@ pub struct Document {
 /// Schema in TDD-0001. Paths (`outputs`, `cwd`, input globs) are written
 /// package-relative or `//`-rooted; the engine resolves them against the
 /// declaring file's package on load.
+/// `env` and `tags` are sorted maps/sets, and empty/default fields are omitted
+/// on serialize, so a generator's emitted YAML is deterministic and clean -
+/// the property `giant gen --check` relies on (TDD-0024 §F).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireTarget {
     /// Local name, unique within the package.
     pub name: String,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<Input>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<String>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deps: Vec<String>,
 
     pub command: String,
 
     /// Working directory; `None` defaults to the package directory.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
 
-    #[serde(default)]
-    pub env: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<bool>,
 
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub remote_cache: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exists: Option<String>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub test: bool,
 
-    #[serde(default)]
-    pub tags: HashSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tags: BTreeSet<String>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde skip_serializing_if needs &T
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// One input declaration. Three forms per TDD-0001.
