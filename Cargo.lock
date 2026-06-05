@@ -796,6 +796,7 @@ dependencies = [
  "dirs",
  "filetime",
  "futures-util",
+ "giant-schema",
  "glob",
  "globset",
  "ignore",
@@ -836,6 +837,15 @@ dependencies = [
  "serde_yaml_ng",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "giant-schema"
+version = "0.1.0"
+dependencies = [
+ "glob",
+ "serde",
+ "serde_yaml_ng",
 ]
 
 [[package]]

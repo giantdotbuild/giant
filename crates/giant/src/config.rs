@@ -31,7 +31,7 @@ pub enum ConfigError {
 /// future giant-deploy, etc.) own their own top-level sections like
 /// `tasks:`. Core silently accepts them; the porcelain re-parses the
 /// same file with its own schema. (ADR-0010.)
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,

@@ -6,6 +6,9 @@ license = "MIT"
 description = "Build orchestration with content-addressed caching"
 
 [dependencies]
+# The shared wire schema: WireTarget and friends, defined once (ADR-0029 §5).
+giant-schema = { path = "../giant-schema" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"

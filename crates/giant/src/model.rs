@@ -4,12 +4,15 @@
 //! ADR-0007 for the YAML-as-sugar input forms.
 
 use crate::paths::{OutputPath, WsRelPath};
-use crate::types::GlobPattern;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
 use std::path::Path;
+
+/// The wire `Input` form lives in `giant-schema`; re-exported so existing
+/// `crate::model::Input` paths keep resolving.
+pub use giant_schema::Input;
 
 /// Content-addressed hash (sha256, 32 bytes). 64 hex chars when stringified.
 ///
@@ -161,76 +164,88 @@ impl From<String> for TargetId {
 }
 
 /// A target - the unit of work. Schema in TDD-0001.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The engine's *resolved* form. It is built from a
+/// [`giant_schema::WireTarget`] on load (the `From` impl below; that is the
+/// only way it is deserialized) and then finalized by the config loader, which
+/// fills `id` and resolves the package-relative paths into `outputs`/`cwd`.
+/// It is never serialized - the wire form is `WireTarget`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(from = "giant_schema::WireTarget")]
 pub struct TargetSpec {
-    /// Local name, unique within the package. The wire field a config
-    /// declares; the engine's identity is the derived `id` label below.
+    /// Local name, unique within the package.
     pub name: String,
 
-    /// Path-derived label `//<package>:<name>`. Computed by the loader
-    /// from the file's package and `name`; never serialized. This is the
+    /// Path-derived label `//<package>:<name>`, filled by the loader. The
     /// engine's identity - graph keys, deps, selection all use it.
-    #[serde(skip)]
     pub id: TargetId,
 
-    #[serde(default)]
     pub inputs: Vec<Input>,
 
-    /// Raw `outputs:` strings as written - package-relative or `//`-rooted.
-    /// The loader resolves these into `outputs`; this is the wire form.
-    #[serde(rename = "outputs", default)]
+    /// Package-relative output strings as written, awaiting resolution into
+    /// `outputs`. Two-phase-resolution scratch, consumed by the loader.
     pub(crate) outputs_raw: Vec<String>,
 
-    /// Workspace-relative outputs, resolved from `outputs_raw` by the
-    /// loader. Never deserialized; the rest of the engine reads this.
-    #[serde(skip)]
+    /// Workspace-relative outputs, resolved from `outputs_raw` by the loader.
     pub outputs: Vec<OutputPath>,
 
-    #[serde(default)]
     pub deps: Vec<TargetId>,
     pub command: String,
 
-    /// Raw `cwd:` string (package-relative or `//`-rooted); `None` = the
-    /// default (the package directory). The wire form.
-    #[serde(rename = "cwd", default)]
+    /// Raw `cwd` string awaiting resolution; `None` = the package directory.
+    /// Two-phase-resolution scratch, consumed by the loader.
     pub(crate) cwd_raw: Option<String>,
 
     /// Workspace-relative working directory, resolved by the loader.
-    #[serde(skip)]
     pub cwd: WsRelPath,
 
-    #[serde(default)]
     pub env: HashMap<String, String>,
-    #[serde(default)]
     pub cache: Option<bool>,
-    #[serde(default = "default_true")]
     pub remote_cache: bool,
-    #[serde(default)]
     pub exists: Option<String>,
-    #[serde(default)]
     pub timeout_secs: Option<u64>,
-    #[serde(default)]
     pub test: bool,
-    #[serde(default)]
     pub tags: HashSet<String>,
-    #[serde(default)]
     pub label: Option<String>,
 
     /// Runtime-only: the subset of `deps` populated by output-based
-    /// inference. Display metadata for `giant explain`; never serialized.
-    #[serde(skip)]
+    /// inference. Display metadata for `giant explain`.
     pub inferred_deps: HashSet<TargetId>,
 
     /// Runtime-only: workspace-relative directories of subpackages (nested
     /// `giant.yaml` files) that this target's globs must not cross into,
     /// so no two packages claim the same file (TDD-0001 §Path resolution).
-    /// Computed by the loader from the full package set; never serialized.
-    #[serde(skip)]
+    /// Computed by the loader from the full package set.
     pub prune_dirs: Vec<WsRelPath>,
 }
 
-fn default_true() -> bool {
-    true
+impl From<giant_schema::WireTarget> for TargetSpec {
+    /// Build the resolved spec from the wire form. Path resolution
+    /// (`id`, `outputs`, `cwd`, and package-prefixed `inputs`/`deps`) is left
+    /// to the loader, which runs once the declaring file's package is known.
+    fn from(w: giant_schema::WireTarget) -> Self {
+        Self {
+            name: w.name,
+            id: TargetId::default(),
+            inputs: w.inputs,
+            outputs_raw: w.outputs,
+            outputs: Vec::new(),
+            deps: w.deps.into_iter().map(TargetId::new).collect(),
+            command: w.command,
+            cwd_raw: w.cwd,
+            cwd: WsRelPath::default(),
+            env: w.env,
+            cache: w.cache,
+            remote_cache: w.remote_cache,
+            exists: w.exists,
+            timeout_secs: w.timeout_secs,
+            test: w.test,
+            tags: w.tags,
+            label: w.label,
+            inferred_deps: HashSet::new(),
+            prune_dirs: Vec::new(),
+        }
+    }
 }
 
 impl TargetSpec {
@@ -239,54 +254,6 @@ impl TargetSpec {
     /// explicit `cache:` overrides either way. See TDD-0009.
     pub fn is_cacheable(&self) -> bool {
         self.cache.unwrap_or(!self.test)
-    }
-}
-
-/// One input declaration. Three forms per TDD-0001.
-///
-/// In YAML/JSON config, a bare string is sugar for `{kind: file, glob: "..."}`.
-/// Deserialization handles both via the `try_from` attribute.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(try_from = "InputRaw", into = "InputRaw")]
-pub enum Input {
-    File { glob: GlobPattern },
-}
-
-/// Wire format for `Input` - accepts a bare string or a tagged object.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-enum InputRaw {
-    Bare(String),
-    Tagged(InputTagged),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum InputTagged {
-    File { glob: String },
-}
-
-impl TryFrom<InputRaw> for Input {
-    type Error = String;
-    fn try_from(raw: InputRaw) -> Result<Self, Self::Error> {
-        match raw {
-            InputRaw::Bare(s) => GlobPattern::new(s)
-                .map(|glob| Input::File { glob })
-                .map_err(|e| format!("invalid glob: {e}")),
-            InputRaw::Tagged(InputTagged::File { glob }) => GlobPattern::new(glob)
-                .map(|g| Input::File { glob: g })
-                .map_err(|e| format!("invalid glob: {e}")),
-        }
-    }
-}
-
-impl From<Input> for InputRaw {
-    fn from(i: Input) -> Self {
-        match i {
-            Input::File { glob } => InputRaw::Tagged(InputTagged::File {
-                glob: glob.as_str().to_string(),
-            }),
-        }
     }
 }
 
@@ -315,32 +282,16 @@ mod tests {
     }
 
     #[test]
-    fn input_deserializes_from_bare_string() {
-        let yaml = r#""src/**/*.go""#;
-        let input: Input = serde_yaml_ng::from_str(yaml).unwrap();
-        let Input::File { glob } = input;
-        assert_eq!(glob.as_str(), "src/**/*.go");
-    }
-
-    #[test]
-    fn input_deserializes_from_tagged_file() {
-        let yaml = r#"{ kind: file, glob: "src/**/*.go" }"#;
-        let input: Input = serde_yaml_ng::from_str(yaml).unwrap();
-        assert!(matches!(input, Input::File { .. }));
-    }
-
-    #[test]
-    fn input_rejects_unknown_kind() {
-        let yaml = r#"{ kind: bogus, glob: "x" }"#;
-        let result: Result<Input, _> = serde_yaml_ng::from_str(yaml);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn input_rejects_unknown_field_via_deny_unknown_fields() {
-        // The wire format uses #[serde(deny_unknown_fields)] on InputTagged.
-        let yaml = r#"{ kind: file, glob: "x", unexpected: 1 }"#;
-        let result: Result<Input, _> = serde_yaml_ng::from_str(yaml);
-        assert!(result.is_err());
+    fn target_spec_from_wire_resolves_later() {
+        // The wire→spec conversion copies fields and leaves path resolution
+        // (id, outputs, cwd) to the loader.
+        let w: giant_schema::WireTarget =
+            serde_yaml_ng::from_str("name: build\ncommand: \"go build\"\noutputs: [bin/x]\n")
+                .unwrap();
+        let spec = TargetSpec::from(w);
+        assert_eq!(spec.name, "build");
+        assert_eq!(spec.outputs_raw, vec!["bin/x".to_string()]);
+        assert!(spec.outputs.is_empty(), "outputs resolved by the loader");
+        assert!(spec.remote_cache);
     }
 }

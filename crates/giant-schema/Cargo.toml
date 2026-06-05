@@ -1,0 +1,13 @@
+[package]
+name = "giant-schema"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "The giant.yaml wire schema: the typed config contract shared by the engine and its generators"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+glob = "0.3"
+
+[dev-dependencies]
+serde_yaml_ng = "0.10"
