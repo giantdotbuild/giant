@@ -133,10 +133,11 @@ impl TryFrom<InputRaw> for Input {
 
 impl From<Input> for InputRaw {
     fn from(i: Input) -> Self {
+        // Serialize a file input as the bare-string sugar (ADR-0007), so
+        // generated configs read cleanly (`- "src/*.go"`, not a tagged map).
+        // The tagged form still deserializes, so the round-trip is preserved.
         match i {
-            Input::File { glob } => InputRaw::Tagged(InputTagged::File {
-                glob: glob.as_str().to_string(),
-            }),
+            Input::File { glob } => InputRaw::Bare(glob.as_str().to_string()),
         }
     }
 }
@@ -184,6 +185,15 @@ mod tests {
         let yaml = r#"{ kind: file, glob: "src/**/*.go" }"#;
         let input: Input = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(matches!(input, Input::File { .. }));
+    }
+
+    #[test]
+    fn input_serializes_as_bare_string() {
+        let input = Input::File {
+            glob: GlobPattern::new("src/**/*.go").unwrap(),
+        };
+        let yaml = serde_yaml_ng::to_string(&input).unwrap();
+        assert_eq!(yaml.trim(), "src/**/*.go");
     }
 
     #[test]
