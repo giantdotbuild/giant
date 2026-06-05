@@ -383,6 +383,14 @@ fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
 struct RemoteAcEntry {
     /// Bumped when we change the on-the-wire AC schema. Independent of
     /// the local AC schema. Servers don't validate this; we do.
+    ///
+    /// Named `remote_schema` on the wire: `AcEntry` (flattened below) has its
+    /// own `schema` field, so an unrenamed `schema` here would collide - both
+    /// would serialize to `"schema"`, and on read this outer field would
+    /// consume the key, leaving the flattened `AcEntry` without its required
+    /// `schema` and failing the whole parse (silently turning every remote
+    /// lookup into a miss). `default` keeps pre-rename entries readable.
+    #[serde(rename = "remote_schema", default)]
     schema: u32,
     #[serde(flatten)]
     entry: AcEntry,
@@ -438,4 +446,38 @@ pub fn spawn_uploader(
         }
     });
     (tx, handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::AcEntry;
+
+    #[test]
+    fn remote_ac_entry_round_trips_through_json() {
+        // Regression: the wire wrapper's schema field must not collide with the
+        // flattened AcEntry.schema, or `get_ac` parse fails and every remote
+        // lookup silently misses (uploads land, reads never hit).
+        let entry = AcEntry {
+            schema: 3,
+            target_id: "//pkg:demo".into(),
+            cache_key: "abc".into(),
+            command: "cp a b".into(),
+            cwd: String::new(),
+            outputs: vec![],
+            outputs_content_hash: "deadbeef".into(),
+            stdout_blob: None,
+            stderr_blob: None,
+            exit_code: 0,
+            duration_ms: 42,
+            built_at: "2026".into(),
+            built_by: None,
+        };
+        let bytes = serde_json::to_vec(&RemoteAcEntry::from_local(&entry)).unwrap();
+        let back: RemoteAcEntry = serde_json::from_slice(&bytes).unwrap();
+        let local = back.into_local();
+        assert_eq!(local.schema, 3, "flattened AcEntry.schema must survive");
+        assert_eq!(local.duration_ms, 42);
+        assert_eq!(local.target_id, "//pkg:demo");
+    }
 }

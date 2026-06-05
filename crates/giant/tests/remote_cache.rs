@@ -145,8 +145,8 @@ targets:
     );
     let stdout = String::from_utf8_lossy(&out2.stdout);
     assert!(
-        stdout.contains("remote"),
-        "expected RemoteCacheHit; got stdout: {stdout}"
+        stdout.contains("REMOTE"),
+        "expected a REMOTE cache hit; got stdout: {stdout}"
     );
     assert_eq!(
         std::fs::read_to_string(ws.join("out.txt")).unwrap().trim(),
