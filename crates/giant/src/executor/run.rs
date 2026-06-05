@@ -45,15 +45,22 @@ pub(super) async fn try_cache_hit(
             return Ok(None);
         }
     }
-    // Restore each output: write blob bytes into the workspace path.
+    // Restore each output: write blob bytes into the workspace path -
+    // unless the file already there is byte-identical (outputs are
+    // content-addressed, so a matching hash means it's current). Skipping
+    // the rewrite turns a no-op build over large artifacts (e.g. hundreds
+    // of MB of Go binaries) from a full re-copy into a few stats + hashes.
     for out in &entry.outputs {
         let Some(hash) = ContentHash::from_hex(&out.content_hash) else {
             continue;
         };
+        let path = workspace_root.as_path().join(&out.path);
+        if output_already_current(&path, hash).await {
+            continue;
+        }
         let Some(blob) = cache.get_cas(&hash).await? else {
             return Ok(None);
         };
-        let path = workspace_root.as_path().join(&out.path);
         // `atomic_write_output` does the create_dir_all + tmp-then-rename
         // dance so a target writing over its own running binary works
         // (Linux ETXTBSY blocks open-for-write but allows rename-over).
@@ -74,6 +81,16 @@ pub(super) async fn try_cache_hit(
     }
 
     Ok(Some((TargetResult::CacheHit { output_hash }, output_hash)))
+}
+
+/// Whether the workspace file at `path` already has content `hash`, so a
+/// cache-hit restore can skip rewriting it. Hashing runs on the blocking pool
+/// (artifacts can be large); a missing or unreadable file counts as not
+/// current, so the caller restores it.
+async fn output_already_current(path: &std::path::Path, hash: ContentHash) -> bool {
+    let path = path.to_path_buf();
+    let read = tokio::task::spawn_blocking(move || ContentHash::of_file(&path)).await;
+    matches!(read, Ok(Ok(h)) if h == hash)
 }
 
 /// Emit captured stdout/stderr from an AC entry as `TargetLog`
