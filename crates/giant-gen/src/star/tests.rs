@@ -167,6 +167,24 @@ def generate(ws):
 }
 
 #[test]
+fn ws_exec_honors_cwd() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/marker"), "in-src\n").unwrap();
+    let s = script(
+        root,
+        r#"
+def generate(ws):
+    out = ws.exec(["cat", "marker"], cwd = "src")
+    target(name = "n", command = out.stdout, outputs = ["o"])
+"#,
+    );
+    let out = super::generate(&s, root).unwrap();
+    assert_eq!(out[0].wire.command, "in-src\n");
+}
+
+#[test]
 fn ws_read_returns_contents() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();

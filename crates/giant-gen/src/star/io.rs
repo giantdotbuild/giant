@@ -33,15 +33,24 @@ pub(crate) struct ExecOut {
     pub(crate) code: i32,
 }
 
-/// Run `args` from `root`, capturing stdout/stderr. With `check`, a nonzero
-/// exit is an error carrying stderr.
-pub(crate) fn exec(root: &Path, args: &[String], check: bool) -> Result<ExecOut> {
+/// Run `args` from `root` (or `root/cwd` when given), capturing stdout/stderr.
+/// With `check`, a nonzero exit is an error carrying stderr.
+pub(crate) fn exec(
+    root: &Path,
+    args: &[String],
+    cwd: Option<&str>,
+    check: bool,
+) -> Result<ExecOut> {
     let Some((cmd, rest)) = args.split_first() else {
         bail!("ws.exec needs a non-empty command");
     };
+    let dir = match cwd {
+        Some(c) => root.join(c),
+        None => root.to_path_buf(),
+    };
     let output = Command::new(cmd)
         .args(rest)
-        .current_dir(root)
+        .current_dir(&dir)
         .output()
         .with_context(|| format!("running {cmd}"))?;
     let code = output.status.code().unwrap_or(-1);

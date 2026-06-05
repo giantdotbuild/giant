@@ -78,16 +78,19 @@ fn ws_methods(builder: &mut MethodsBuilder) {
         std::fs::read_to_string(ws.root().join(path)).map_err(|e| into_star(e.into()))
     }
 
-    /// Run a subprocess from the workspace root, capturing output. Returns a
+    /// Run a subprocess from the workspace root (or `cwd`, a workspace-relative
+    /// dir - e.g. a sub-module's `src/`), capturing output. Returns a
     /// `struct(stdout, stderr, code)`; raises on a nonzero exit when `check`.
     fn exec<'v>(
         this: Value<'v>,
         args: UnpackList<String>,
+        cwd: Option<String>,
         #[starlark(default = true)] check: bool,
         heap: Heap<'v>,
     ) -> starlark::Result<Value<'v>> {
         let ws = this_ws(this)?;
-        let out = crate::star::io::exec(ws.root(), &args.items, check).map_err(into_star)?;
+        let out = crate::star::io::exec(ws.root(), &args.items, cwd.as_deref(), check)
+            .map_err(into_star)?;
         Ok(heap.alloc(AllocStruct([
             ("stdout", heap.alloc(out.stdout)),
             ("stderr", heap.alloc(out.stderr)),
