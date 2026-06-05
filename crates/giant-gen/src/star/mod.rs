@@ -9,6 +9,7 @@
 mod emit;
 mod io;
 mod json;
+mod load;
 mod value;
 
 use std::path::{Path, PathBuf};
@@ -34,7 +35,9 @@ pub(crate) fn generate(script: &Path, root: &Path) -> Result<Vec<Emitted>> {
 
     Module::with_temp_heap(move |module| -> Result<Vec<Emitted>> {
         let collector = Collector::default();
+        let loader = load::Loader::new(&root, &globals);
         let mut eval = Evaluator::new(&module);
+        eval.set_loader(&loader);
         eval.extra = Some(&collector);
         eval.eval_module(ast, &globals).map_err(star_err)?;
 

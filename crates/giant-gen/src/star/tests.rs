@@ -167,6 +167,59 @@ def generate(ws):
 }
 
 #[test]
+fn loads_embedded_go_stdlib() {
+    // load("@giant//go.star", ...) resolves to the embedded stdlib; bin_name is
+    // a pure helper, so this needs no go toolchain.
+    let tmp = TempDir::new().unwrap();
+    let s = script(
+        tmp.path(),
+        r#"
+load("@giant//go.star", "bin_name")
+
+def generate(ws):
+    target(name = bin_name("cmd/backend"), command = "true", outputs = ["o"])
+    target(name = bin_name("internal/foo/cmd"), command = "true", outputs = ["o"], package = "x")
+"#,
+    );
+    let out = super::generate(&s, tmp.path()).unwrap();
+    let mut names: Vec<_> = out.iter().map(|e| e.wire.name.clone()).collect();
+    names.sort();
+    assert_eq!(names, vec!["backend".to_string(), "foo".to_string()]);
+}
+
+#[test]
+fn unknown_stdlib_module_is_an_error() {
+    let tmp = TempDir::new().unwrap();
+    let s = script(
+        tmp.path(),
+        "load(\"@giant//nope.star\", \"x\")\ndef generate(ws):\n    pass\n",
+    );
+    let err = super::generate(&s, tmp.path()).unwrap_err();
+    assert!(err.to_string().contains("nope.star"), "{err}");
+}
+
+#[test]
+fn loads_repo_local_star_file() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join("lib.star"),
+        "def mk(): return \"fromlib\"\n",
+    )
+    .unwrap();
+    let s = script(
+        tmp.path(),
+        r#"
+load("lib.star", "mk")
+
+def generate(ws):
+    target(name = mk(), command = "true", outputs = ["o"])
+"#,
+    );
+    let out = super::generate(&s, tmp.path()).unwrap();
+    assert_eq!(out[0].wire.name, "fromlib");
+}
+
+#[test]
 fn ws_exec_honors_cwd() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();

@@ -32,12 +32,17 @@
         rustToolchain = pkgs.rust-bin.stable.latest.default;
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        # Keep source pruning conservative: crane's `cleanCargoSource`
-        # already drops target/, .git/, etc. We additionally let
-        # tests/fixtures through so build.rs scripts that read repo
-        # state behave the same as in cargo. (Giant itself doesn't
-        # need fixtures at compile time, but it's cheap insurance.)
-        src = craneLib.cleanCargoSource ./.;
+        # crane's `cleanCargoSource` keeps only Rust/Cargo files, which would
+        # drop the embedded Starlark stdlib (`crates/giant-gen/src/star/stdlib/
+        # *.star`, pulled in via `include_str!`). Extend the filter to keep
+        # `.star` files so the giant-gen build can read them.
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          name = "giant-source";
+          filter =
+            path: type:
+            (craneLib.filterCargoSources path type) || (pkgs.lib.hasSuffix ".star" path);
+        };
 
         commonArgs = {
           inherit src;
