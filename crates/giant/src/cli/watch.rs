@@ -29,6 +29,11 @@ pub(crate) fn standard_excludes(
     state_dir: &Path,
     graph: &crate::graph::BuildGraph,
 ) -> Vec<PathBuf> {
+    // Semantic excludes the watcher should never react to: VCS internals, the
+    // state dir, and the cache. Heavy/noise trees (`.devenv`, `.direnv`,
+    // `node_modules`, `target`, …) are pruned for free by the watch's
+    // gitignore-aware walk (they're virtually always ignored or hidden), so
+    // they don't need listing here. Target outputs are added below.
     let mut excludes = vec![
         workspace_root.as_path().join(".git"),
         workspace_root.as_path().join(state_dir),

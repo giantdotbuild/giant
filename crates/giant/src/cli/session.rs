@@ -108,13 +108,7 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
     // must outlive the loop; dropping it stops the OS watch.
     let (reload_tx, mut reload_rx) = mpsc::channel::<()>(8);
     let _config_watch = spawn_config_watcher(
-        state.workspace_root.clone(),
-        super::watch::standard_excludes(
-            &state.workspace_root,
-            &state.cache_root,
-            &state.state_dir,
-            &state.graph,
-        ),
+        config_watch_dirs(&state.workspace_root, &state.graph),
         reload_tx,
     );
 
@@ -874,12 +868,29 @@ impl SessionState {
 /// Returns the watcher handle (keep it alive); `None` if it couldn't
 /// start - reload then works only via the explicit `config.reload`
 /// command.
+/// Directories to watch for config edits: the workspace root plus every
+/// package directory (where a `giant.<infix>.yaml` lives). A non-recursive
+/// watch over this small fixed set is all the config watcher needs - it only
+/// reacts to `giant.yaml`/`giant.json` changes - and it avoids recursively
+/// registering OS watches over the whole workspace (e.g. a multi-GB `.devenv`).
+fn config_watch_dirs(root: &AbsPath, graph: &BuildGraph) -> Vec<std::path::PathBuf> {
+    let mut dirs: std::collections::BTreeSet<std::path::PathBuf> =
+        std::collections::BTreeSet::new();
+    dirs.insert(root.as_path().to_path_buf());
+    for (id, _) in graph.iter() {
+        let pkg = id.split().0;
+        if !pkg.is_empty() {
+            dirs.insert(root.as_path().join(pkg));
+        }
+    }
+    dirs.into_iter().collect()
+}
+
 fn spawn_config_watcher(
-    workspace_root: AbsPath,
-    excludes: Vec<std::path::PathBuf>,
+    dirs: Vec<std::path::PathBuf>,
     reload_tx: mpsc::Sender<()>,
 ) -> Option<crate::watcher::WatcherHandle> {
-    let (handle, mut rx) = crate::watcher::spawn(workspace_root.as_path(), excludes).ok()?;
+    let (handle, mut rx) = crate::watcher::spawn_dirs(&dirs, false, Vec::new()).ok()?;
     tokio::spawn(async move {
         // Never-cancelled: the task ends when `rx` closes (handle dropped
         // at session shutdown).
