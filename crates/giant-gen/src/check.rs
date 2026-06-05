@@ -11,7 +11,6 @@ use crate::run;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Stdio;
 
 /// Run `--check` over the selected generators, printing a per-generator
 /// report. Returns the process exit code (0 = all clean).
@@ -77,7 +76,7 @@ impl Report {
 }
 
 async fn check_one(g: &Generator, root: &Path, state_dir: &str) -> Result<Report> {
-    let scratch = root.join(state_dir).join("gen-check").join(&g.name);
+    let scratch = root.join(state_dir).join("gen-check").join(g.name());
     if scratch.exists() {
         std::fs::remove_dir_all(&scratch)
             .with_context(|| format!("clearing scratch dir {}", scratch.display()))?;
@@ -85,34 +84,16 @@ async fn check_one(g: &Generator, root: &Path, state_dir: &str) -> Result<Report
     std::fs::create_dir_all(&scratch)
         .with_context(|| format!("creating scratch dir {}", scratch.display()))?;
 
-    // Run the generator into the scratch root, capturing output for the report.
-    let out = run::command(g, root, &scratch)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .await;
-    match out {
-        Ok(o) if !o.status.success() => {
-            return Ok(failed(
-                g,
-                String::from_utf8_lossy(&o.stderr).trim().to_string(),
-            ));
-        }
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(failed(
-                g,
-                format!("command '{}' not found on PATH", g.command),
-            ));
-        }
-        Err(e) => return Err(e.into()),
+    // Produce the generator's output into the scratch root for the diff.
+    if let run::Produced::Failed(msg) = run::produce_quiet(g, root, &scratch).await? {
+        return Ok(failed(g, msg));
     }
 
-    let committed = enumerate(root, &g.name, Some(state_dir))?;
+    let committed = enumerate(root, g.name(), Some(state_dir))?;
     let Scratch {
         owned: generated,
         violations,
-    } = enumerate_scratch(&scratch, &g.name)?;
+    } = enumerate_scratch(&scratch, g.name())?;
 
     let mut drift = Vec::new();
     for (rel, bytes) in &generated {
@@ -127,10 +108,10 @@ async fn check_one(g: &Generator, root: &Path, state_dir: &str) -> Result<Report
             drift.push(Drift::Removed(rel.clone()));
         }
     }
-    drift.sort_by_key(drift_path);
+    drift.sort_by(|a, b| drift_path(a).cmp(drift_path(b)));
 
     Ok(Report {
-        name: g.name.clone(),
+        name: g.name().to_string(),
         failed: None,
         empty_output: generated.is_empty() && !committed.is_empty(),
         drift,
@@ -140,7 +121,7 @@ async fn check_one(g: &Generator, root: &Path, state_dir: &str) -> Result<Report
 
 fn failed(g: &Generator, message: String) -> Report {
     Report {
-        name: g.name.clone(),
+        name: g.name().to_string(),
         failed: Some(message),
         drift: Vec::new(),
         violations: Vec::new(),
@@ -148,9 +129,9 @@ fn failed(g: &Generator, message: String) -> Report {
     }
 }
 
-fn drift_path(d: &Drift) -> String {
+fn drift_path(d: &Drift) -> &str {
     match d {
-        Drift::Added(p) | Drift::Removed(p) | Drift::Changed(p) => p.clone(),
+        Drift::Added(p) | Drift::Removed(p) | Drift::Changed(p) => p,
     }
 }
 

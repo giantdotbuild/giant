@@ -1,5 +1,6 @@
-//! End-to-end tests driving the `giant-gen` binary against a temp workspace
-//! with fake generators (shell scripts declared via `command:`).
+//! End-to-end tests driving the `giant-gen` binary against a temp workspace:
+//! external fake generators (shell scripts declared via `command:`) and the
+//! built-in Starlark host on a `giant.star`.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -46,12 +47,17 @@ YAML
 fn setup_good() -> tempfile::TempDir {
     let ws = workspace();
     write_exec(&ws.path().join("fake-gen.sh"), GOOD);
+    declare(&ws, "  - name: fake\n    command: ./fake-gen.sh\n");
+    ws
+}
+
+/// Rewrite the workspace `giant.yaml` with a `generate:` list (ADR-0029 §6).
+fn declare(ws: &tempfile::TempDir, generate_body: &str) {
     fs::write(
-        ws.path().join("giant-gen.yaml"),
-        "generators:\n  - name: fake\n    command: ./fake-gen.sh\n",
+        ws.path().join("giant.yaml"),
+        format!("workspace:\n  name: test\ngenerate:\n{generate_body}"),
     )
     .unwrap();
-    ws
 }
 
 #[test]
@@ -109,11 +115,7 @@ fn ownership_violation_is_rejected() {
         &ws.path().join("bad-gen.sh"),
         "#!/bin/sh\nset -e\ntouch \"$GIANT_GEN_OUT/oops.txt\"\n",
     );
-    fs::write(
-        ws.path().join("giant-gen.yaml"),
-        "generators:\n  - name: fake\n    command: ./bad-gen.sh\n",
-    )
-    .unwrap();
+    declare(&ws, "  - name: fake\n    command: ./bad-gen.sh\n");
     let out = run(ws.path(), &["--check"]);
     assert!(!out.status.success());
     assert!(
@@ -137,7 +139,7 @@ fn unknown_generator_name_errors() {
 
 #[test]
 fn no_generators_is_a_noop() {
-    let ws = workspace(); // no giant-gen.yaml
+    let ws = workspace(); // no generate:, no giant.star
     let out = run(ws.path(), &[]);
     assert!(out.status.success());
 }
@@ -149,11 +151,59 @@ fn failing_generator_fails_the_run() {
         &ws.path().join("boom.sh"),
         "#!/bin/sh\necho 'kaboom' >&2\nexit 3\n",
     );
+    declare(&ws, "  - name: fake\n    command: ./boom.sh\n");
+    let out = run(ws.path(), &[]);
+    assert!(!out.status.success());
+}
+
+/// A self-contained giant.star (no `generate:`) is picked up by convention and
+/// run by the built-in Starlark host.
+const STAR: &str = r#"
+def generate(ws):
+    target(name = "x", command = "true", outputs = ["out"], package = "pkg")
+"#;
+
+#[test]
+fn runs_builtin_starlark_host_by_convention() {
+    let ws = workspace(); // giant.yaml has no generate:; giant.star drives it
+    fs::write(ws.path().join("giant.star"), STAR).unwrap();
+    let out = run(ws.path(), &[]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let f = ws.path().join("pkg/giant.gen.yaml");
+    assert!(f.exists(), "expected giant.gen.yaml");
+    assert!(fs::read_to_string(&f).unwrap().contains("name: x"));
+}
+
+#[test]
+fn builtin_check_detects_drift() {
+    let ws = workspace();
+    fs::write(ws.path().join("giant.star"), STAR).unwrap();
+    run(ws.path(), &[]);
+    fs::write(ws.path().join("pkg/giant.gen.yaml"), "stale\n").unwrap();
+    let out = run(ws.path(), &["--check"]);
+    assert!(!out.status.success(), "drift should fail the check");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("gen\tDRIFT"),
+        "stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn builtin_starlark_error_fails_the_run() {
+    let ws = workspace();
     fs::write(
-        ws.path().join("giant-gen.yaml"),
-        "generators:\n  - name: fake\n    command: ./boom.sh\n",
+        ws.path().join("giant.star"),
+        "def generate(ws):\n    boom\n",
     )
     .unwrap();
     let out = run(ws.path(), &[]);
-    assert!(!out.status.success());
+    assert!(
+        !out.status.success(),
+        "a starlark error should fail the run"
+    );
 }

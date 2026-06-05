@@ -1,19 +1,16 @@
 //! giant-gen - the generator runner porcelain (TDD-0022).
 //!
 //! Reached as `giant gen` via core's PATH dispatch (ADR-0021), like
-//! `giant-task`. It reads the workspace's `giant-gen.yaml` `generators:` list,
-//! resolves each to a command, and runs them - writing in place, or with
-//! `--check` into a scratch dir to diff against the committed tree. It never
-//! inspects a generator's output beyond enforcing `giant.<name>.yaml`
+//! `giant-task`. It reads the workspace root `giant.yaml`'s `generate:` list
+//! (ADR-0029 §6) and runs each entry - the built-in Starlark host on a
+//! `giant.star` (ADR-0029), or an external generator command - writing in
+//! place, or with `--check` into a scratch dir to diff against the committed
+//! tree. It never inspects output beyond enforcing `giant.<name>.yaml`
 //! filename ownership. The engine has no part in any of this (ADR-0024).
 
 mod check;
 mod config;
 mod run;
-// The embedded Starlark host (ADR-0029, TDD-0024). Wired into the runner in a
-// follow-up (the `generate:` config relocation, §A); exercised by its own tests
-// for now, so allow it to be unreferenced by `main` until then.
-#[allow(dead_code)]
 mod star;
 
 use anyhow::Result;
@@ -24,7 +21,7 @@ use std::path::Path;
 #[derive(Parser, Debug)]
 #[command(name = "giant-gen", about = "Run a workspace's configured generators")]
 struct Cli {
-    /// Generators to run (default: every generator declared in giant-gen.yaml).
+    /// Generators to run (default: every entry in giant.yaml's generate:).
     names: Vec<String>,
 
     /// Check for staleness instead of writing: regenerate into a scratch dir
@@ -55,7 +52,9 @@ async fn real_main() -> Result<i32> {
     let selected = select(&declared, &cli.names)?;
 
     if selected.is_empty() {
-        eprintln!("giant gen: no generators declared in giant-gen.yaml");
+        eprintln!(
+            "giant gen: nothing to generate (add a `generate:` list to giant.yaml or a giant.star at the workspace root)"
+        );
         return Ok(0);
     }
 
@@ -75,9 +74,10 @@ fn select(all: &[Generator], names: &[String]) -> Result<Vec<Generator>> {
     names
         .iter()
         .map(|n| {
-            all.iter().find(|g| &g.name == n).cloned().ok_or_else(|| {
-                anyhow::anyhow!("no generator named '{n}' is declared in giant-gen.yaml")
-            })
+            all.iter()
+                .find(|g| g.name() == n)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no generator named '{n}' is declared in generate:"))
         })
         .collect()
 }
