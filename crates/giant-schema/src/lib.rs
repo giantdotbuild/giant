@@ -107,6 +107,18 @@ pub struct WireTarget {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub remote_cache: bool,
 
+    /// Network access when sandboxed (ADR-0030 §4a). Default `false` (denied);
+    /// `true` is the per-target escape for targets that genuinely fetch. Inert
+    /// unless `--sandbox` mode is on, and never a cache-key input.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub network: bool,
+
+    /// Sandbox eligibility (ADR-0030 §4a). Default `true`; set `false` to
+    /// exempt a target from `--sandbox` (it runs normally even in the mode).
+    /// There is no meaningful `true` opt-in. Never a cache-key input.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub sandbox: bool,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exists: Option<String>,
 
@@ -260,6 +272,8 @@ mod tests {
         assert!(t.outputs.is_empty());
         assert!(t.deps.is_empty());
         assert!(t.remote_cache, "remote_cache defaults to true");
+        assert!(!t.network, "network defaults to false (denied)");
+        assert!(t.sandbox, "sandbox defaults to true (eligible)");
         assert!(!t.test);
         assert!(t.cache.is_none());
     }

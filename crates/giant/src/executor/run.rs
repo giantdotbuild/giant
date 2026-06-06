@@ -321,10 +321,26 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
     let started = Instant::now();
 
     let cwd = ctx.workspace_root.as_path().join(spec.cwd.as_path());
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg(&spec.command)
-        .current_dir(&cwd)
+
+    // Under `--sandbox`, an eligible target (ADR-0030 §4a: `sandbox != false`)
+    // runs through the `giant-sandbox` wrapper instead of `sh` directly. An
+    // exempt target, or sandbox mode off, takes the plain path unchanged.
+    let mut cmd = match ctx.sandbox.as_ref().filter(|_| spec.sandbox) {
+        Some(policy) => match super::sandbox::wrapped_command(ctx, spec, &cwd, policy).await {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                return TargetResult::Failed {
+                    error: format!("sandbox setup failed: {e}"),
+                };
+            }
+        },
+        None => {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(&spec.command);
+            cmd
+        }
+    };
+    cmd.current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -645,7 +661,7 @@ fn glob_output_files(
 /// prefix before the first component containing a glob metacharacter
 /// (so `gen/**/*.go` yields `gen`, not a literal `gen/**`). Returns
 /// `None` when there's nothing above the workspace root to create.
-fn output_parent_to_create(pattern: &std::path::Path) -> Option<std::path::PathBuf> {
+pub(super) fn output_parent_to_create(pattern: &std::path::Path) -> Option<std::path::PathBuf> {
     use std::path::Component;
     let is_glob = |c: &std::ffi::OsStr| c.to_string_lossy().contains(['*', '?', '[']);
     let mut prefix = std::path::PathBuf::new();

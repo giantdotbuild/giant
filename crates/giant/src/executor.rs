@@ -8,10 +8,12 @@
 
 mod key;
 mod run;
+mod sandbox;
 
 use key::compute_cache_key;
 pub use key::{CacheKeyBreakdown, FileInputContribution, compute_cache_key_with_breakdown};
 use run::{result_output_hash, run_target, try_cache_hit, try_exists_check, try_remote_hit};
+pub use sandbox::SandboxPolicy;
 
 use crate::cache::LocalCache;
 use crate::events::{Event, EventSender, TargetCounts, TargetResultKind};
@@ -59,6 +61,9 @@ pub struct BuildJob {
     /// Log capture / replay policy. Default = capture both, replay on
     /// cache hits, 5 MiB per stream.
     pub log_capture: LogCapture,
+    /// Sandbox policy, set by the CLI when `--sandbox` is on. `None` = run
+    /// commands directly, exactly as today (ADR-0030).
+    pub sandbox: Option<SandboxPolicy>,
     /// Optional remote cache. Inserted by the CLI when configured;
     /// always `None` when the `remote` feature is off.
     #[cfg(feature = "remote")]
@@ -177,6 +182,8 @@ struct TargetCtx {
     cancel: CancellationToken,
     build_id: String,
     log_capture: LogCapture,
+    /// Sandbox policy; `None` runs commands directly (ADR-0030).
+    sandbox: Option<SandboxPolicy>,
     /// Optional remote cache. `None` when the binary is built without
     /// the `remote` feature or when the user has it disabled. Lookup
     /// chain consults it between local AC and the `exists:` check.
@@ -268,6 +275,7 @@ pub async fn build(job: BuildJob) -> Result<BuildSummary, ExecutorError> {
         cancel: job.cancel.clone(),
         build_id: job.build_id.clone(),
         log_capture: job.log_capture,
+        sandbox: job.sandbox.clone(),
         #[cfg(feature = "remote")]
         remote: job.remote.clone(),
         #[cfg(feature = "remote")]

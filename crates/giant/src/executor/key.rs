@@ -202,6 +202,26 @@ fn compose_cache_key_blocking(
     Ok(h.finalize())
 }
 
+/// Absolute paths of a target's declared file inputs, expanded from its
+/// globs using the exact same walk as `file_inputs_hash`. The sandbox `ro`
+/// set is built from this (TDD-0025) so what the sandbox permits and what the
+/// cache key hashes come from one source - a complete key implies a complete
+/// sandbox.
+pub(super) fn resolve_input_paths(
+    spec: &TargetSpec,
+    workspace_root: &AbsPath,
+    cache: &LocalCache,
+) -> Result<Vec<PathBuf>, std::io::Error> {
+    let globs: Vec<&str> = spec
+        .inputs
+        .iter()
+        .map(|input| match input {
+            Input::File { glob } => glob.as_str(),
+        })
+        .collect();
+    expand_globs_batched(workspace_root.as_path(), &globs, cache, &spec.prune_dirs)
+}
+
 /// One hashed file input ready to be folded into the cache-key hash.
 /// Order is fixed by `compute_file_inputs` (sorted by `rel_path`).
 struct FileInputItem {

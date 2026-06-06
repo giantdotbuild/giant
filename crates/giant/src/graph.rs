@@ -289,6 +289,8 @@ mod tests {
             env: Default::default(),
             cache: Some(true),
             remote_cache: true,
+            network: false,
+            sandbox: true,
             exists: None,
             timeout_secs: None,
             test: false,

@@ -61,7 +61,7 @@ pub fn dispatch(args: Vec<OsString>) -> anyhow::Result<()> {
 /// Look up `name` in each `PATH` entry. Returns the first executable
 /// match. Doesn't follow symlinks specially; trusts the OS to handle
 /// them at exec time.
-fn find_on_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(name);

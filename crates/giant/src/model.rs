@@ -202,6 +202,15 @@ pub struct TargetSpec {
     pub env: HashMap<String, String>,
     pub cache: Option<bool>,
     pub remote_cache: bool,
+
+    /// Network allowed when sandboxed (ADR-0030 §4a). Inert unless `--sandbox`
+    /// mode is on; never contributes to the cache key.
+    pub network: bool,
+
+    /// Sandbox eligibility (ADR-0030 §4a); `false` exempts the target from
+    /// `--sandbox`. Never contributes to the cache key.
+    pub sandbox: bool,
+
     pub exists: Option<String>,
     pub timeout_secs: Option<u64>,
     pub test: bool,
@@ -237,6 +246,8 @@ impl From<giant_schema::WireTarget> for TargetSpec {
             env: w.env.into_iter().collect(),
             cache: w.cache,
             remote_cache: w.remote_cache,
+            network: w.network,
+            sandbox: w.sandbox,
             exists: w.exists,
             timeout_secs: w.timeout_secs,
             test: w.test,

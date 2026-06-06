@@ -21,6 +21,7 @@ mod logs;
 pub(crate) mod prep;
 mod session;
 mod test;
+mod verify;
 mod watch;
 
 #[derive(Parser, Debug)]
@@ -47,6 +48,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub fresh: bool,
 
+    /// Enforce declared inputs/outputs by running each eligible target through
+    /// the `giant-sandbox` helper (Linux only; ADR-0030). Off by default.
+    #[arg(long, global = true)]
+    pub sandbox: bool,
+
     /// Log filter (RUST_LOG syntax). Defaults to errors only - pass
     /// `--log warn` (or set `RUST_LOG=giant=warn`) when debugging.
     #[arg(long, global = true, default_value = "error")]
@@ -61,6 +67,11 @@ pub enum Commands {
     /// Run test targets. Same flags as `build`, but the selection is
     /// restricted to targets with `test: true`.
     Test(test::TestArgs),
+
+    /// Audit hermeticity: build every target sandboxed with the cache
+    /// bypassed, so any undeclared input/output/network use fails. This is
+    /// `build --sandbox --fresh` over all targets (Linux only; ADR-0030).
+    Verify(verify::VerifyArgs),
 
     /// List targets that would rebuild given a set of changed files.
     /// Doesn't actually run anything.
@@ -164,11 +175,13 @@ pub async fn run() -> anyhow::Result<()> {
     let global = GlobalFlags {
         config: cli.config.clone(),
         fresh: cli.fresh,
+        sandbox: cli.sandbox,
     };
 
     match cli.command {
         Commands::Build(args) => build::execute(args, &global).await,
         Commands::Test(args) => test::execute(args, &global).await,
+        Commands::Verify(args) => verify::execute(args, &global).await,
         Commands::Affected(args) => affected::execute(args, &global).await,
         Commands::Explain(args) => explain::execute(args, &global).await,
         Commands::Logs(args) => logs::execute(args, &global).await,
@@ -185,6 +198,45 @@ pub async fn run() -> anyhow::Result<()> {
 pub struct GlobalFlags {
     pub config: Option<std::path::PathBuf>,
     pub fresh: bool,
+    pub sandbox: bool,
+}
+
+/// Resolve the `--sandbox` flag into a policy (ADR-0030, TDD-0025). Returns
+/// `None` when the flag is off (run normally). When on, finds the
+/// `giant-sandbox` helper on PATH and errors loudly if it is absent or the
+/// host is not Linux - never silently degrades to an unsandboxed run.
+pub(crate) fn resolve_sandbox(
+    enabled: bool,
+) -> anyhow::Result<Option<crate::executor::SandboxPolicy>> {
+    if !enabled {
+        return Ok(None);
+    }
+    if !cfg!(target_os = "linux") {
+        anyhow::bail!("--sandbox is only supported on Linux");
+    }
+    let helper = external::find_on_path("giant-sandbox").ok_or_else(|| {
+        anyhow::anyhow!("--sandbox needs the `giant-sandbox` helper on PATH, but it was not found")
+    })?;
+    // v1 toolchain (ADR-0030 §3): the Nix store plus the standard system roots
+    // that hold interpreters, shared libraries, and PATH binaries, read-only +
+    // executable, filtered to those that exist. This keeps `--sandbox` usable
+    // outside a devenv shell (where PATH points at /run/current-system/sw or
+    // /usr) while enforcement still bites on the *workspace* - only declared
+    // inputs are readable there. The toolchain-declared model lands later.
+    let toolchain = [
+        "/nix/store",
+        "/run/current-system/sw",
+        "/usr",
+        "/bin",
+        "/lib",
+        "/lib64",
+        "/etc",
+    ]
+    .into_iter()
+    .map(std::path::PathBuf::from)
+    .filter(|p| p.exists())
+    .collect();
+    Ok(Some(crate::executor::SandboxPolicy { helper, toolchain }))
 }
 
 /// Returned by a subcommand to exit non-zero without `main` printing

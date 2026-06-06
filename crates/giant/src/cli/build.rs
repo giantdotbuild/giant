@@ -259,6 +259,10 @@ pub(super) async fn execute_with_mode(
         return Ok(());
     }
 
+    // Resolve `--sandbox` once: errors here (no helper / non-Linux) fail the
+    // build before any target runs, never a silent unsandboxed fallback.
+    let sandbox = super::resolve_sandbox(global.sandbox)?;
+
     // Watch: rebuild the affected subset on change, through the engine's
     // `watch.start` - the same loop the stdio session runs (TDD-0021).
     // Runs until Ctrl-C. The renderer turns `watch.affected` events into
@@ -275,6 +279,7 @@ pub(super) async fn execute_with_mode(
             parallelism,
             selection,
             global.fresh,
+            sandbox,
         )
         .await?;
         let _ = renderer_task.await;
@@ -298,6 +303,7 @@ pub(super) async fn execute_with_mode(
         parallelism,
         selection,
         global.fresh,
+        sandbox,
     )
     .await?;
 

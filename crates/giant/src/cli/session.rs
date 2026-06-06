@@ -168,11 +168,13 @@ pub(super) async fn run_one_build(
     parallelism: usize,
     selection: Vec<TargetId>,
     fresh: bool,
+    sandbox: Option<crate::executor::SandboxPolicy>,
 ) -> anyhow::Result<()> {
     // No-op without the `remote` feature (returns all-None).
     let (remote, upload_tx, upload_handle) = prep::open_remote(&prepared.config)?;
 
-    let state = SessionState::new(prepared, event_tx, fresh, config_path, parallelism);
+    let state = SessionState::new(prepared, event_tx, fresh, config_path, parallelism)
+        .with_sandbox(sandbox);
     #[cfg(feature = "remote")]
     let mut state = state.with_remote(remote, upload_tx.clone());
     #[cfg(not(feature = "remote"))]
@@ -222,8 +224,10 @@ pub(super) async fn run_watch_command(
     parallelism: usize,
     selection: Vec<TargetId>,
     fresh: bool,
+    sandbox: Option<crate::executor::SandboxPolicy>,
 ) -> anyhow::Result<()> {
-    let mut state = SessionState::new(prepared, event_tx, fresh, config_path, parallelism);
+    let mut state = SessionState::new(prepared, event_tx, fresh, config_path, parallelism)
+        .with_sandbox(sandbox);
 
     // Ctrl-C → cancel the watch.
     let cancel = CancellationToken::new();
@@ -291,6 +295,9 @@ struct SessionState {
     /// `prep::prepare` exactly as session startup did.
     config_path: Option<std::path::PathBuf>,
     parallelism: usize,
+    /// Sandbox policy for the build path. `None` unless `--sandbox` is on;
+    /// set by the one-shot CLI helpers via `with_sandbox` (ADR-0030).
+    sandbox: Option<crate::executor::SandboxPolicy>,
     /// Remote-cache handles for the build path. The stdio session leaves
     /// these `None` today; the in-process CLI adapter sets them so
     /// `giant build` keeps using the remote cache (TDD-0021).
@@ -366,6 +373,7 @@ impl SessionState {
             next_build_seq: 0,
             config_path,
             parallelism,
+            sandbox: None,
             #[cfg(feature = "remote")]
             remote: None,
             #[cfg(feature = "remote")]
@@ -383,6 +391,13 @@ impl SessionState {
     ) -> Self {
         self.remote = remote;
         self.upload_tx = upload_tx;
+        self
+    }
+
+    /// Attach a sandbox policy to the build path (one-shot `giant build` /
+    /// `giant test --sandbox`). Unset = run commands directly (ADR-0030).
+    fn with_sandbox(mut self, sandbox: Option<crate::executor::SandboxPolicy>) -> Self {
+        self.sandbox = sandbox;
         self
     }
 
@@ -590,6 +605,7 @@ impl SessionState {
             parallelism: self.parallelism,
             log_capture: self.log_capture,
             fresh: self.fresh_default,
+            sandbox: self.sandbox.clone(),
             event_tx: self.event_tx.clone(),
         };
         let cancel_for_task = cancel.clone();
@@ -734,6 +750,7 @@ impl SessionState {
             cancel: cancel.clone(),
             build_id: build_id.clone(),
             log_capture: self.log_capture,
+            sandbox: self.sandbox.clone(),
             #[cfg(feature = "remote")]
             remote: self.remote.clone(),
             #[cfg(feature = "remote")]
@@ -1015,6 +1032,7 @@ struct WatchCtx {
     parallelism: usize,
     log_capture: crate::executor::LogCapture,
     fresh: bool,
+    sandbox: Option<crate::executor::SandboxPolicy>,
     event_tx: EventSender,
 }
 
@@ -1033,6 +1051,7 @@ async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: Cancellatio
         parallelism,
         log_capture,
         fresh,
+        sandbox,
         event_tx,
     } = ctx;
     // One build per change cycle. Watch rebuilds pass no remote handles -
@@ -1050,6 +1069,7 @@ async fn watch_loop(ctx: WatchCtx, selection: Vec<TargetId>, cancel: Cancellatio
         cancel: cancel.clone(),
         build_id,
         log_capture,
+        sandbox: sandbox.clone(),
         #[cfg(feature = "remote")]
         remote: None,
         #[cfg(feature = "remote")]
@@ -1398,6 +1418,8 @@ mod tests {
             env: Default::default(),
             cache: Some(true),
             remote_cache: true,
+            network: false,
+            sandbox: true,
             exists: None,
             timeout_secs: None,
             test: false,
