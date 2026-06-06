@@ -1,9 +1,11 @@
-# @giant//go.star - Go target generation over the host primitives.
+# go.star - Go target generation over the host primitives.
 #
-# Embedded in the giant-gen binary and reached with
-# `load("@giant//go.star", ...)`; nothing to install. Built entirely on the
-# generic host capabilities (ws.exec + parse_json_stream + target()), so the
-# Go-specific opinion lives here in editable Starlark, not in the host.
+# Part of giant's official Starlark std collection (ADR-0031). Shipped as a file
+# alongside the binary, not embedded: reach it with `load("@std//go.star", ...)`,
+# or `giant gen vendor go.star` to copy it into your repo's `star/` for editing
+# and load("star/go.star"). Built entirely on the generic host capabilities
+# (ws.exec + parse_json_stream + target()), so the Go-specific opinion lives here
+# in editable Starlark, not in the host.
 
 # Raw `go list -json -deps ./...` for the module under `dir` (the dir holding
 # go.mod, workspace-relative; "." for a root module). Returns every package in

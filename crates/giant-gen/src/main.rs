@@ -13,7 +13,7 @@ mod config;
 mod run;
 mod star;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use config::Generator;
 use std::path::Path;
@@ -46,6 +46,13 @@ async fn main() {
 }
 
 async fn real_main() -> Result<i32> {
+    // `vendor` is a sub-verb, not a generator name; dispatch before clap so the
+    // positional generator list keeps its plain shape (`giant gen [names...]`).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("vendor") {
+        return vendor(&args[1..]);
+    }
+
     let cli = Cli::parse();
     let (cfg, root) = giant::Config::load_root(cli.config.as_deref())?;
     let declared = config::load(&root)?;
@@ -63,6 +70,29 @@ async fn real_main() -> Result<i32> {
     } else {
         run_all(&selected, &root).await
     }
+}
+
+/// Copy stdlib modules from giant's std collection into the workspace's `star/`
+/// dir so they can be edited and pinned in-repo, then loaded with
+/// `load("star/<name>")` (ADR-0031).
+fn vendor(names: &[String]) -> Result<i32> {
+    if names.is_empty() {
+        anyhow::bail!("giant gen vendor: name a module, e.g. `giant gen vendor go.star`");
+    }
+    let (_, root) = giant::Config::load_root(None)?;
+    let dir = star::std_dir().ok_or_else(|| {
+        anyhow::anyhow!("no giant std collection found; set GIANT_STD to its path")
+    })?;
+    let dest = root.join("star");
+    std::fs::create_dir_all(&dest)?;
+    for name in names {
+        let from = dir.join(name);
+        let to = dest.join(name);
+        std::fs::copy(&from, &to)
+            .with_context(|| format!("vendoring {name} from {}", from.display()))?;
+        eprintln!("vendored {name} -> star/{name}");
+    }
+    Ok(0)
 }
 
 /// Resolve the requested names to declared generators. Empty selection means

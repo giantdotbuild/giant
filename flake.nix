@@ -33,15 +33,12 @@
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
         # crane's `cleanCargoSource` keeps only Rust/Cargo files, which would
-        # drop the embedded Starlark stdlib (`crates/giant-gen/src/star/stdlib/
-        # *.star`, pulled in via `include_str!`). Extend the filter to keep
-        # `.star` files so the giant-gen build can read them.
+        # drop the Starlark std collection (`std/*.star`) that giant-gen ships
+        # (ADR-0031) and the `.star` fixtures its tests read. Keep `.star` files.
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           name = "giant-source";
-          filter =
-            path: type:
-            (craneLib.filterCargoSources path type) || (pkgs.lib.hasSuffix ".star" path);
+          filter = path: type: (craneLib.filterCargoSources path type) || (pkgs.lib.hasSuffix ".star" path);
         };
 
         commonArgs = {
@@ -113,8 +110,45 @@
         giant = mkBin { name = "giant"; };
         giant-task = mkBin { name = "giant-task"; };
         giant-tui = mkBin { name = "giant-tui"; };
-        giant-gen = mkBin { name = "giant-gen"; };
         giant-sandbox = mkBin { name = "giant-sandbox"; };
+
+        # giant-gen ships the official Starlark std collection as files (not
+        # embedded in the binary; ADR-0031). The library lands in
+        # share/giant/std and GIANT_STD points the `@std//` loader and
+        # `giant gen vendor` at it.
+        giant-gen =
+          let
+            pkg = craneLib.buildPackage (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                pname = "giant-gen";
+                cargoExtraArgs = "--locked -p giant-gen";
+                doCheck = false;
+                postInstall = ''
+                  mkdir -p $out/share/giant
+                  cp -r std $out/share/giant/std
+                '';
+                meta = {
+                  description = "Part of the Giant build-orchestration suite";
+                  homepage = "https://github.com/johnae/giant";
+                  license = pkgs.lib.licenses.mit;
+                  mainProgram = "giant-gen";
+                };
+              }
+            );
+          in
+          pkgs.symlinkJoin {
+            name = "giant-gen-with-std";
+            paths = [ pkg ];
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            postBuild = ''
+              wrapProgram $out/bin/giant-gen --set GIANT_STD ${pkg}/share/giant/std
+            '';
+            meta = pkg.meta // {
+              mainProgram = "giant-gen";
+            };
+          };
 
         # Meta-package: `nix profile install .` drops all three
         # binaries onto PATH at once. Implementation is a

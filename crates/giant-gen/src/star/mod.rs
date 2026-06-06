@@ -19,6 +19,7 @@ use starlark::environment::{GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
 use starlark::syntax::{AstModule, Dialect};
 
+pub(crate) use load::std_dir;
 pub(crate) use value::Emitted;
 use value::{Collector, Ws, host_globals};
 
@@ -26,6 +27,16 @@ use value::{Collector, Ws, host_globals};
 /// registers. `target()` records into a side collector as it runs, so the
 /// return value of `generate` is not used (a target is emitted when built).
 pub(crate) fn generate(script: &Path, root: &Path) -> Result<Vec<Emitted>> {
+    generate_with_std(script, root, load::std_dir())
+}
+
+/// `generate` with an explicit std collection dir (the production path resolves
+/// it from `GIANT_STD` / install layout; tests point it at the in-repo `std/`).
+pub(crate) fn generate_with_std(
+    script: &Path,
+    root: &Path,
+    std_dir: Option<PathBuf>,
+) -> Result<Vec<Emitted>> {
     let src =
         std::fs::read_to_string(script).with_context(|| format!("reading {}", script.display()))?;
     let disp = script.display().to_string();
@@ -35,7 +46,7 @@ pub(crate) fn generate(script: &Path, root: &Path) -> Result<Vec<Emitted>> {
 
     Module::with_temp_heap(move |module| -> Result<Vec<Emitted>> {
         let collector = Collector::default();
-        let loader = load::Loader::new(&root, &globals);
+        let loader = load::Loader::new(&root, &globals, std_dir);
         let mut eval = Evaluator::new(&module);
         eval.set_loader(&loader);
         eval.extra = Some(&collector);

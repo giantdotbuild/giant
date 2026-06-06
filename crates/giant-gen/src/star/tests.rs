@@ -166,25 +166,43 @@ def generate(ws):
     assert_eq!(tags, vec!["pkg/a.go".to_string(), "pkg/b.go".to_string()]);
 }
 
+/// The in-repo std collection (`std/`), for `@std//` resolution in tests
+/// without touching the process-global `GIANT_STD`.
+fn std_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std")
+}
+
 #[test]
-fn loads_embedded_go_stdlib() {
-    // load("@giant//go.star", ...) resolves to the embedded stdlib; bin_name is
-    // a pure helper, so this needs no go toolchain.
+fn loads_go_stdlib_from_collection() {
+    // load("@std//go.star", ...) resolves to the shipped std collection;
+    // bin_name is a pure helper, so this needs no go toolchain.
     let tmp = TempDir::new().unwrap();
     let s = script(
         tmp.path(),
         r#"
-load("@giant//go.star", "bin_name")
+load("@std//go.star", "bin_name")
 
 def generate(ws):
     target(name = bin_name("cmd/backend"), command = "true", outputs = ["o"])
     target(name = bin_name("internal/foo/cmd"), command = "true", outputs = ["o"], package = "x")
 "#,
     );
-    let out = super::generate(&s, tmp.path()).unwrap();
+    let out = super::generate_with_std(&s, tmp.path(), Some(std_dir())).unwrap();
     let mut names: Vec<_> = out.iter().map(|e| e.wire.name.clone()).collect();
     names.sort();
     assert_eq!(names, vec!["backend".to_string(), "foo".to_string()]);
+}
+
+#[test]
+fn legacy_giant_alias_still_resolves() {
+    // `@giant//` stays a deprecated alias for `@std//` (ADR-0031).
+    let tmp = TempDir::new().unwrap();
+    let s = script(
+        tmp.path(),
+        "load(\"@giant//go.star\", \"bin_name\")\ndef generate(ws):\n    target(name = bin_name(\"cmd/x\"), command = \"true\", outputs = [\"o\"])\n",
+    );
+    let out = super::generate_with_std(&s, tmp.path(), Some(std_dir())).unwrap();
+    assert_eq!(out[0].wire.name, "x");
 }
 
 #[test]
@@ -192,10 +210,22 @@ fn unknown_stdlib_module_is_an_error() {
     let tmp = TempDir::new().unwrap();
     let s = script(
         tmp.path(),
-        "load(\"@giant//nope.star\", \"x\")\ndef generate(ws):\n    pass\n",
+        "load(\"@std//nope.star\", \"x\")\ndef generate(ws):\n    pass\n",
     );
-    let err = super::generate(&s, tmp.path()).unwrap_err();
+    let err = super::generate_with_std(&s, tmp.path(), Some(std_dir())).unwrap_err();
     assert!(err.to_string().contains("nope.star"), "{err}");
+}
+
+#[test]
+fn std_load_without_collection_hints_vendoring() {
+    // No std collection available -> a clear error that points at `vendor`.
+    let tmp = TempDir::new().unwrap();
+    let s = script(
+        tmp.path(),
+        "load(\"@std//go.star\", \"bin_name\")\ndef generate(ws):\n    pass\n",
+    );
+    let err = super::generate_with_std(&s, tmp.path(), None).unwrap_err();
+    assert!(err.to_string().contains("vendor"), "{err}");
 }
 
 #[test]
