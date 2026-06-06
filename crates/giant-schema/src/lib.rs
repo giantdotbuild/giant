@@ -15,6 +15,49 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::path::PathBuf;
+
+/// The current `SandboxSpec` wire version. Bump on any field change (TDD-0025).
+pub const SANDBOX_SPEC_SCHEMA: u32 = 1;
+
+/// The bind set the engine resolves for a sandboxed target and hands to the
+/// `giant-sandbox` porcelain (TDD-0025). Written as JSON to
+/// `<state_dir>/sandbox/<target>.json`; the command and its args are passed on
+/// the porcelain's command line after `--`, never in this struct.
+///
+/// All paths are absolute: the engine resolves them against the workspace root
+/// before writing, so the porcelain never resolves paths itself. The contract
+/// is mechanism-agnostic (ADR-0030 §2a) - the porcelain decides how to enforce
+/// it (v1: birdcage).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxSpec {
+    /// Wire version; see [`SANDBOX_SPEC_SCHEMA`].
+    pub schema: u32,
+
+    /// Absolute working directory the command runs in.
+    pub cwd: PathBuf,
+
+    /// Absolute paths granted read access: declared file inputs plus the
+    /// output paths of the target's dependencies.
+    #[serde(default)]
+    pub ro: Vec<PathBuf>,
+
+    /// Absolute paths granted read-write access: the target's declared output
+    /// directories plus a writable scratch dir.
+    #[serde(default)]
+    pub rw: Vec<PathBuf>,
+
+    /// Absolute paths the toolchain needs, read-only and executable (e.g.
+    /// `/nix/store`). Kept separate from `ro` so the porcelain can grant
+    /// execute rights here without inferring intent.
+    #[serde(default)]
+    pub toolchain: Vec<PathBuf>,
+
+    /// `false` (default) denies network; `true` is the per-target `network:`
+    /// escape.
+    #[serde(default)]
+    pub network: bool,
+}
 
 /// A generator's output document, or any package config's `targets:` block:
 /// `{ targets: [ ... ] }`. The unit a generator emits and the engine scans.
@@ -219,6 +262,31 @@ mod tests {
         assert!(t.remote_cache, "remote_cache defaults to true");
         assert!(!t.test);
         assert!(t.cache.is_none());
+    }
+
+    #[test]
+    fn sandbox_spec_round_trips_through_json() {
+        let spec = SandboxSpec {
+            schema: SANDBOX_SPEC_SCHEMA,
+            cwd: PathBuf::from("/ws/pkg"),
+            ro: vec![PathBuf::from("/ws/pkg/src/main.go")],
+            rw: vec![PathBuf::from("/ws/pkg/out")],
+            toolchain: vec![PathBuf::from("/nix/store")],
+            network: false,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        let back: SandboxSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn sandbox_spec_defaults_empty_vecs_and_no_network() {
+        let json = r#"{"schema":1,"cwd":"/ws"}"#;
+        let spec: SandboxSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.schema, 1);
+        assert_eq!(spec.cwd, PathBuf::from("/ws"));
+        assert!(spec.ro.is_empty() && spec.rw.is_empty() && spec.toolchain.is_empty());
+        assert!(!spec.network);
     }
 
     #[test]

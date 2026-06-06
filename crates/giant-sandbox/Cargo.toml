@@ -1,0 +1,27 @@
+[package]
+name = "giant-sandbox"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Sandbox exec-wrapper porcelain for Giant - enforces a target's declared inputs/outputs (TDD-0025)"
+
+[[bin]]
+name = "giant-sandbox"
+path = "src/main.rs"
+
+[dependencies]
+# The wire contract with the engine: the SandboxSpec the executor writes.
+giant-schema = { path = "../giant-schema" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+# The sandbox mechanism is Linux-only for v1 (ADR-0030). On other platforms
+# the binary still builds but refuses to run, so the engine's error path is
+# the same everywhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+birdcage = "0.8"
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"

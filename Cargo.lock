@@ -250,6 +250,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a8241f3ebb85c056b509d4327ad0358fbbba6ffb340bf388f26350aeda225b1"
 
 [[package]]
+name = "birdcage"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "848df95320021558dd6bb4c26de3fe66724cdcbdbbf3fa720150b52b086ae568"
+dependencies = [
+ "bitflags 2.11.1",
+ "libc",
+ "log",
+ "rustix 0.38.44",
+ "seccompiler",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1256,11 +1269,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "giant-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "birdcage",
+ "clap",
+ "giant-schema",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "giant-schema"
 version = "0.1.0"
 dependencies = [
  "glob",
  "serde",
+ "serde_json",
  "serde_yaml_ng",
 ]
 
@@ -2921,6 +2947,15 @@ name = "sdd"
 version = "3.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "490dcfcbfef26be6800d11870ff2df8774fa6e86d047e3e8c8a76b25655e41ca"
+
+[[package]]
+name = "seccompiler"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f6575e3c2b3a0fe2ef3e53855b6a8dead7c29f783da5e123d378c8c6a89017e"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "semver"
