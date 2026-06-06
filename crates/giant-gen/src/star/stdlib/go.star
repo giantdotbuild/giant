@@ -5,13 +5,19 @@
 # generic host capabilities (ws.exec + parse_json_stream + target()), so the
 # Go-specific opinion lives here in editable Starlark, not in the host.
 
-# Discover the first-party Go packages under `dir` (the directory holding the
-# module's go.mod, workspace-relative; "." for a root module). First-party =
-# part of the main module, per `go list`'s Module.Main.
-def go_packages(ws, dir = "."):
+# Raw `go list -json -deps ./...` for the module under `dir` (the dir holding
+# go.mod, workspace-relative; "." for a root module). Returns every package in
+# the build graph, vendor included. Run this ONCE and feed the result to
+# `packages_of` / `cgo_index_of` to avoid re-listing.
+def go_list(ws, dir = "."):
     out = ws.exec(["go", "list", "-json", "-deps", "./..."], cwd = dir)
+    return parse_json_stream(out.stdout)
+
+# First-party packages (part of the main module, per `go list`'s Module.Main)
+# from a raw `go_list`.
+def packages_of(ws, raw):
     pkgs = []
-    for p in parse_json_stream(out.stdout):
+    for p in raw:
         mod = p.get("Module")
         if not mod or not mod.get("Main", False):
             continue
@@ -25,6 +31,28 @@ def go_packages(ws, dir = "."):
             "embeds": p.get("EmbedFiles", []),
         })
     return pkgs
+
+# Map import-path -> cgo link libs (the `-l<lib>` from each package's
+# `#cgo LDFLAGS`) for every cgo package in a raw `go_list`, vendored C bindings
+# included. Lets a generator detect cgo binaries and their native libs from
+# `go list` alone, with no per-package sidecar config.
+def cgo_index_of(raw):
+    idx = {}
+    for p in raw:
+        if not p.get("CgoFiles"):
+            continue
+        libs = [f[2:] for f in p.get("CgoLDFLAGS", []) if f.startswith("-l")]
+        if libs:
+            idx[p["ImportPath"]] = libs
+    return idx
+
+# Convenience one-shot wrappers (each runs `go list` once). Prefer `go_list` +
+# `packages_of`/`cgo_index_of` when you need both, to list only once.
+def go_packages(ws, dir = "."):
+    return packages_of(ws, go_list(ws, dir))
+
+def go_cgo_index(ws, dir = "."):
+    return cgo_index_of(go_list(ws, dir))
 
 # Index packages by import path, for input derivation.
 def go_index(pkgs):
