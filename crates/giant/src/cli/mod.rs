@@ -208,6 +208,7 @@ pub struct GlobalFlags {
 pub(crate) fn resolve_sandbox(
     enabled: bool,
     cfg: &crate::config::SandboxConfig,
+    workspace_root: &std::path::Path,
 ) -> anyhow::Result<Option<crate::executor::SandboxPolicy>> {
     if !enabled {
         return Ok(None);
@@ -228,7 +229,7 @@ pub(crate) fn resolve_sandbox(
         .iter()
         .map(|s| (*s).to_string())
         .chain(cfg.roots.iter().cloned())
-        .map(|s| expand_tilde(&s))
+        .map(|s| resolve_sb_path(&s, workspace_root))
         .filter(|p| p.exists())
         .collect();
 
@@ -252,7 +253,7 @@ pub(crate) fn resolve_sandbox(
         .iter()
         .map(|s| (*s).to_string())
         .chain(cfg.rw.iter().cloned())
-        .map(|s| expand_tilde(&s))
+        .map(|s| resolve_sb_path(&s, workspace_root))
         .filter(|p| p.exists())
         .collect();
 
@@ -290,14 +291,21 @@ pub(crate) fn resolve_sandbox(
     }))
 }
 
-/// Expand a leading `~/` against `$HOME`; otherwise return the path as-is.
-fn expand_tilde(p: &str) -> std::path::PathBuf {
-    match p.strip_prefix("~/") {
-        Some(rest) => match std::env::var_os("HOME") {
+/// Resolve a sandbox path entry: `~/...` against `$HOME`, an absolute path
+/// as-is, and anything else (a workspace-relative entry like `.devenv/state/go`)
+/// against the workspace root - so configs stay portable across machines.
+fn resolve_sb_path(p: &str, workspace_root: &std::path::Path) -> std::path::PathBuf {
+    if let Some(rest) = p.strip_prefix("~/") {
+        return match std::env::var_os("HOME") {
             Some(home) => std::path::PathBuf::from(home).join(rest),
             None => std::path::PathBuf::from(p),
-        },
-        None => std::path::PathBuf::from(p),
+        };
+    }
+    let path = std::path::Path::new(p);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
     }
 }
 
@@ -453,4 +461,36 @@ fn is_executable(path: &std::path::Path) -> bool {
     std::fs::metadata(path)
         .map(|m| m.is_file())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_sb_path;
+    use std::path::Path;
+
+    #[test]
+    fn sb_path_absolute_is_unchanged() {
+        let ws = Path::new("/ws");
+        assert_eq!(resolve_sb_path("/nix/store", ws), Path::new("/nix/store"));
+    }
+
+    #[test]
+    fn sb_path_relative_resolves_against_workspace() {
+        let ws = Path::new("/ws/proj");
+        assert_eq!(
+            resolve_sb_path(".devenv/state/go", ws),
+            Path::new("/ws/proj/.devenv/state/go")
+        );
+    }
+
+    #[test]
+    fn sb_path_tilde_resolves_against_home() {
+        // SAFETY: single-threaded test; we set HOME for the duration.
+        unsafe { std::env::set_var("HOME", "/home/u") };
+        let ws = Path::new("/ws");
+        assert_eq!(
+            resolve_sb_path("~/.cache/go", ws),
+            Path::new("/home/u/.cache/go")
+        );
+    }
 }

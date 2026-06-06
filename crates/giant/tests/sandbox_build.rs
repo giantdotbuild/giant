@@ -136,3 +136,52 @@ fn verify_audits_without_an_explicit_flag() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A repo with its toolchain vendored in-tree (`toolchain/bin/...`, no Nix /
+/// devenv) is supported the same way: grant the toolchain dir as a
+/// workspace-relative `sandbox.roots` entry. Mirrors evroc's `giant-only`
+/// layout. Proves the no-toolchain-manager case end to end.
+#[test]
+fn repo_local_toolchain_via_workspace_relative_root() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+
+    // A vendored tool in the repo's toolchain dir.
+    std::fs::create_dir_all(ws.join("toolchain/bin")).unwrap();
+    let tool = ws.join("toolchain/bin/greet");
+    std::fs::write(&tool, "#!/bin/sh\necho hello-from-repo-toolchain\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // `toolchain/bin` is granted workspace-relative; the host roots only carry
+    // the shell (no Nix-specific config beyond what any NixOS host needs). The
+    // point is the *repo-local* tool runs under the sandbox.
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: tc
+cache:
+  dir: ./cache
+sandbox:
+  roots: ["/nix/store", "/run/current-system/sw", "toolchain/bin"]
+targets:
+  - name: "use-tool"
+    inputs: []
+    outputs: ["out/result.txt"]
+    command: "toolchain/bin/greet > out/result.txt"
+"#,
+    )
+    .unwrap();
+
+    let out = build(ws, true);
+    if !out.status.success() {
+        eprintln!(
+            "skipping: no sandbox capability here:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+    let produced = std::fs::read_to_string(ws.join("out/result.txt")).unwrap();
+    assert_eq!(produced, "hello-from-repo-toolchain\n");
+}

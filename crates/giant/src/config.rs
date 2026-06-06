@@ -202,13 +202,16 @@ fn default_state_dir() -> String {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxConfig {
-    /// Extra read-and-execute roots, e.g. `/nix/store` or `~/.asdf`.
+    /// Extra read-and-execute roots, e.g. `/nix/store` or `~/.asdf`. Paths are
+    /// absolute, `~/`-relative (against `$HOME`), or workspace-relative
+    /// (anything else, e.g. `vendor/bin`) - so configs stay portable.
     #[serde(default)]
     pub roots: Vec<String>,
 
-    /// Extra writable paths outside the workspace, e.g. a build cache like
-    /// `~/.cache/go-build`. Must already exist (a sandbox rule needs a real
-    /// path); missing entries are skipped.
+    /// Extra writable paths, e.g. a build cache like `~/.cache/go-build` or a
+    /// workspace-relative `.devenv/state/go`. Same path forms as `roots`. Must
+    /// already exist (a sandbox rule needs a real path); missing entries are
+    /// skipped.
     #[serde(default)]
     pub rw: Vec<String>,
 
