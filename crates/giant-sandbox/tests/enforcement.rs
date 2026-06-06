@@ -136,3 +136,47 @@ fn undeclared_read_is_denied_declared_read_is_allowed() {
     );
     assert_eq!(out.stdout, b"classified\n");
 }
+
+#[test]
+fn env_allowlist_scrubs_undeclared_vars() {
+    let dir = tempfile::tempdir().unwrap();
+    if !sandbox_available(dir.path()) {
+        eprintln!("skipping: no working sandbox on this host");
+        return;
+    }
+    let Some(sh) = which("sh") else {
+        eprintln!("skipping: no `sh` on PATH");
+        return;
+    };
+
+    // PATH is allowed (sh needs it); FOO is set in the parent but not listed,
+    // so the child must not see it.
+    let spec = serde_json::json!({
+        "schema": 1, "cwd": "/", "ro": [], "rw": [],
+        "toolchain": toolchain(), "env": ["PATH"], "network": false,
+    });
+    let spec_path = dir.path().join("spec.json");
+    std::fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
+
+    let out = Command::new(BIN)
+        .arg("run")
+        .arg("--spec")
+        .arg(&spec_path)
+        .arg("--")
+        .arg(&sh)
+        .arg("-c")
+        .arg(r#"printf %s "${FOO:-MISSING}""#)
+        .env("FOO", "secret")
+        .output()
+        .expect("spawn giant-sandbox");
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.stdout, b"MISSING",
+        "an env var outside the allowlist must be scrubbed"
+    );
+}

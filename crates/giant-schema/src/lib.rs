@@ -53,6 +53,13 @@ pub struct SandboxSpec {
     #[serde(default)]
     pub toolchain: Vec<PathBuf>,
 
+    /// Names of environment variables the command may read. Empty means "pass
+    /// the whole ambient environment" (back-compat); a non-empty list scrubs to
+    /// exactly these. The engine fills it with `PATH` plus the toolchain/locale
+    /// essentials and the target's declared `env:` (ADR-0030 §4).
+    #[serde(default)]
+    pub env: Vec<String>,
+
     /// `false` (default) denies network; `true` is the per-target `network:`
     /// escape.
     #[serde(default)]
@@ -286,6 +293,7 @@ mod tests {
             ro: vec![PathBuf::from("/ws/pkg/src/main.go")],
             rw: vec![PathBuf::from("/ws/pkg/out")],
             toolchain: vec![PathBuf::from("/nix/store")],
+            env: vec!["PATH".to_string(), "HOME".to_string()],
             network: false,
         };
         let json = serde_json::to_string(&spec).unwrap();

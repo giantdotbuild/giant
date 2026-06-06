@@ -112,8 +112,46 @@ fn resolve_spec(
         ro,
         rw,
         toolchain,
+        env: env_allowlist(spec),
         network: spec.network,
     })
+}
+
+/// The environment a sandboxed command may read (ADR-0030 §4). Unlike Bazel's
+/// fixed `PATH`, giant runs inside devenv where `PATH` and a handful of vars
+/// *are* the toolchain, so we keep those plus the target's declared `env:` and
+/// drop everything else (random user/CI vars - the non-hermetic part).
+fn env_allowlist(spec: &TargetSpec) -> Vec<String> {
+    // Always-keep names: the shell/runtime basics plus the Nix/locale/TLS vars
+    // a devenv toolchain relies on. TMPDIR is set by the wrapper to the scratch
+    // dir, so the child must be allowed to read it.
+    const BASE: &[&str] = &[
+        "PATH",
+        "HOME",
+        "USER",
+        "SHELL",
+        "TERM",
+        "TZ",
+        "TMPDIR",
+        "LANG",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "LOCALE_ARCHIVE",
+        "PKG_CONFIG_PATH",
+        "LD_LIBRARY_PATH",
+    ];
+    // Whole families a Nix/devenv environment populates.
+    const PREFIXES: &[&str] = &["NIX_", "LC_", "DEVENV_", "GIANT_"];
+
+    let mut names: std::collections::BTreeSet<String> =
+        BASE.iter().map(|s| (*s).to_string()).collect();
+    names.extend(spec.env.keys().cloned());
+    names.extend(
+        std::env::vars()
+            .map(|(k, _)| k)
+            .filter(|k| PREFIXES.iter().any(|p| k.starts_with(p))),
+    );
+    names.into_iter().collect()
 }
 
 /// Write the spec under `<cache>/sandbox/<target>.json`. The cache dir is

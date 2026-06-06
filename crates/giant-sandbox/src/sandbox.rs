@@ -39,11 +39,19 @@ pub fn run(spec: &SandboxSpec, command: &[OsString]) -> Result<u8> {
         cage.add_exception(Exception::Networking)
             .context("granting network access")?;
     }
-    // v1 inherits the ambient env (ADR-0030 §4); birdcage scrubs the
-    // environment by default, so opt the whole thing back in. Scrubbing down to
-    // the declared `env:` is a stricter follow-on.
-    cage.add_exception(Exception::FullEnvironment)
-        .context("granting environment access")?;
+    // birdcage scrubs the environment by default. An empty allowlist means the
+    // engine wants the whole ambient env (back-compat); otherwise grant exactly
+    // the listed names - PATH + toolchain essentials + declared `env:`
+    // (ADR-0030 §4).
+    if spec.env.is_empty() {
+        cage.add_exception(Exception::FullEnvironment)
+            .context("granting environment access")?;
+    } else {
+        for name in &spec.env {
+            cage.add_exception(Exception::Environment(name.clone()))
+                .with_context(|| format!("granting env {name}"))?;
+        }
+    }
 
     // birdcage's Command carries only program + args (no cwd/env setters), so
     // set the working directory on ourselves before the fork - the child
