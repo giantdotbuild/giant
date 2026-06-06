@@ -29,6 +29,10 @@ fn write_ws(declared: bool) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();
     let inputs = if declared { "[\"data.txt\"]" } else { "[]" };
+    // Add the Nix roots/env so the test runs on a NixOS host (where PATH points
+    // into /nix/store + /run/current-system/sw); on a plain distro these filter
+    // out and the generic FHS defaults carry the build. This also exercises the
+    // `sandbox:` config path.
     std::fs::write(
         ws.join("giant.yaml"),
         format!(
@@ -37,6 +41,9 @@ workspace:
   name: sbx
 cache:
   dir: ./cache
+sandbox:
+  roots: ["/nix/store", "/run/current-system/sw"]
+  env: ["NIX_*", "DEVENV_*", "LOCALE_ARCHIVE"]
 targets:
   - name: "reader"
     inputs: {inputs}

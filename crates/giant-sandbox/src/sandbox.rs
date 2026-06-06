@@ -25,9 +25,11 @@ pub fn run(spec: &SandboxSpec, command: &[OsString]) -> Result<u8> {
         cage.add_exception(Exception::ExecuteAndRead(p.clone()))
             .with_context(|| format!("granting ro+x {}", p.display()))?;
     }
-    // Declared inputs: read-only.
+    // Declared inputs: read (and execute - some inputs are scripts the command
+    // runs, e.g. a wrapper; execute on a declared input is harmless for
+    // enforcement and a data file can't be meaningfully exec'd anyway).
     for p in &spec.ro {
-        cage.add_exception(Exception::Read(p.clone()))
+        cage.add_exception(Exception::ExecuteAndRead(p.clone()))
             .with_context(|| format!("granting ro {}", p.display()))?;
     }
     // Declared outputs and scratch: read-write.

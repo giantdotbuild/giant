@@ -7,6 +7,20 @@ workspace:
 cache:
   dir: .giant/cache
 
+# Sandbox extras for this repo's Nix/devenv toolchain (only consulted under
+# `giant --sandbox` / `giant verify`). Core grants the generic FHS roots and a
+# generic env allowlist; these add what a devenv environment needs - the Nix
+# store and its env families - so sandboxed builds resolve their tools here. A
+# non-Nix project would not need this block; giant assumes no toolchain manager.
+sandbox:
+  roots:
+    - "/nix/store"
+    - "/run/current-system/sw"
+  env:
+    - "NIX_*"
+    - "DEVENV_*"
+    - "LOCALE_ARCHIVE"
+
 # -----------------------------------------------------------------------------
 # Per-package config (the multi-file model). Each package's targets live
 # in its own directory's giant.yaml; the engine scans and merges them:

@@ -260,8 +260,9 @@ pub(super) async fn execute_with_mode(
     }
 
     // Resolve `--sandbox` once: errors here (no helper / non-Linux) fail the
-    // build before any target runs, never a silent unsandboxed fallback.
-    let sandbox = super::resolve_sandbox(global.sandbox)?;
+    // build before any target runs, never a silent unsandboxed fallback. The
+    // workspace's `sandbox.roots`/`sandbox.env` extend the generic defaults.
+    let sandbox = super::resolve_sandbox(global.sandbox, &prepared.config.sandbox)?;
 
     // Watch: rebuild the affected subset on change, through the engine's
     // `watch.start` - the same loop the stdio session runs (TDD-0021).

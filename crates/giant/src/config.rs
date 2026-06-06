@@ -50,6 +50,9 @@ pub struct Config {
     #[serde(default)]
     pub state: StateConfig,
 
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+
     /// How `giant <name>` routes when `<name>` is neither a built-in nor
     /// a `giant-<name>` binary on PATH. See ADR-0021. Core stays
     /// decoupled from giant-task: it reads this table and execs whatever
@@ -189,6 +192,30 @@ impl Default for StateConfig {
 
 fn default_state_dir() -> String {
     ".giant".into()
+}
+
+/// Extra paths and env names a sandboxed build may access, on top of the
+/// generic FHS defaults the engine grants (ADR-0030 §3). This is how a
+/// non-FHS toolchain - Nix, asdf, a vendored `bin/` - extends the sandbox
+/// without giant assuming any particular scheme. Additive: the defaults
+/// always apply; these are added to them. Inert unless `--sandbox` is used.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxConfig {
+    /// Extra read-and-execute roots, e.g. `/nix/store` or `~/.asdf`.
+    #[serde(default)]
+    pub roots: Vec<String>,
+
+    /// Extra writable paths outside the workspace, e.g. a build cache like
+    /// `~/.cache/go-build`. Must already exist (a sandbox rule needs a real
+    /// path); missing entries are skipped.
+    #[serde(default)]
+    pub rw: Vec<String>,
+
+    /// Extra environment variable names the command may read. A trailing `*`
+    /// is a prefix match, e.g. `NIX_*`.
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 fn default_schema_version() -> u32 {
@@ -915,6 +942,28 @@ workspace: { name: p }
         let d = DispatchConfig::default();
         assert_eq!(d.route("deploy"), Some("giant-task"));
         assert_eq!(d.route("anything-at-all"), Some("giant-task"));
+    }
+
+    #[test]
+    fn sandbox_config_parses_and_defaults_empty() {
+        let cfg: Config = serde_yaml_ng::from_str("workspace: { name: p }\n").unwrap();
+        assert!(cfg.sandbox.roots.is_empty());
+        assert!(cfg.sandbox.rw.is_empty());
+        assert!(cfg.sandbox.env.is_empty());
+
+        let cfg: Config = serde_yaml_ng::from_str(
+            r#"
+workspace: { name: p }
+sandbox:
+  roots: ["/nix/store"]
+  rw: ["~/.cache/go-build"]
+  env: ["NIX_*", "GOPATH"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.sandbox.roots, vec!["/nix/store"]);
+        assert_eq!(cfg.sandbox.rw, vec!["~/.cache/go-build"]);
+        assert_eq!(cfg.sandbox.env, vec!["NIX_*", "GOPATH"]);
     }
 
     #[test]

@@ -24,8 +24,16 @@ use crate::paths::AbsPath;
 pub struct SandboxPolicy {
     /// Absolute path to the `giant-sandbox` helper.
     pub helper: PathBuf,
-    /// Toolchain paths granted read + execute (v1: `/nix/store` when present).
+    /// Read-and-execute roots: the generic FHS defaults plus any configured
+    /// extras (`sandbox.roots`), filtered to those present. No scheme assumed.
     pub toolchain: Vec<PathBuf>,
+    /// Extra writable paths outside the workspace (`sandbox.rw`), e.g. a build
+    /// cache. Added to every target's `rw` set.
+    pub rw: Vec<PathBuf>,
+    /// Env var names the command may read: the generic base plus configured
+    /// extras (`sandbox.env`), prefixes already expanded. The per-target step
+    /// adds the target's declared `env:` keys on top.
+    pub env: Vec<String>,
 }
 
 /// Build the `giant-sandbox`-wrapped command for an eligible target, writing
@@ -55,10 +63,10 @@ pub(super) async fn wrapped_command(
         let workspace_root = ctx.workspace_root.clone();
         let cache = ctx.cache.clone();
         let cwd = cwd.to_path_buf();
-        let toolchain = policy.toolchain.clone();
+        let policy = policy.clone();
         let scratch = scratch.clone();
         tokio::task::spawn_blocking(move || {
-            resolve_spec(&spec, &workspace_root, &cache, cwd, toolchain, scratch)
+            resolve_spec(&spec, &workspace_root, &cache, cwd, &policy, scratch)
         })
         .await
         .map_err(|e| io::Error::other(format!("sandbox spec task: {e}")))??
@@ -89,7 +97,7 @@ fn resolve_spec(
     workspace_root: &AbsPath,
     cache: &crate::cache::LocalCache,
     cwd: PathBuf,
-    toolchain: Vec<PathBuf>,
+    policy: &SandboxPolicy,
     scratch: PathBuf,
 ) -> io::Result<SandboxSpec> {
     let mut ro = super::key::resolve_input_paths(spec, workspace_root, cache)?;
@@ -103,55 +111,24 @@ fn resolve_spec(
         .map(|dir| workspace_root.as_path().join(dir))
         .collect();
     rw.push(scratch);
+    rw.extend(policy.rw.iter().cloned());
     rw.sort();
     rw.dedup();
+
+    // The build-wide allowlist (defaults + config, resolved at the CLI
+    // boundary) plus this target's declared `env:` keys.
+    let mut env: std::collections::BTreeSet<String> = policy.env.iter().cloned().collect();
+    env.extend(spec.env.keys().cloned());
 
     Ok(SandboxSpec {
         schema: SANDBOX_SPEC_SCHEMA,
         cwd,
         ro,
         rw,
-        toolchain,
-        env: env_allowlist(spec),
+        toolchain: policy.toolchain.clone(),
+        env: env.into_iter().collect(),
         network: spec.network,
     })
-}
-
-/// The environment a sandboxed command may read (ADR-0030 §4). Unlike Bazel's
-/// fixed `PATH`, giant runs inside devenv where `PATH` and a handful of vars
-/// *are* the toolchain, so we keep those plus the target's declared `env:` and
-/// drop everything else (random user/CI vars - the non-hermetic part).
-fn env_allowlist(spec: &TargetSpec) -> Vec<String> {
-    // Always-keep names: the shell/runtime basics plus the Nix/locale/TLS vars
-    // a devenv toolchain relies on. TMPDIR is set by the wrapper to the scratch
-    // dir, so the child must be allowed to read it.
-    const BASE: &[&str] = &[
-        "PATH",
-        "HOME",
-        "USER",
-        "SHELL",
-        "TERM",
-        "TZ",
-        "TMPDIR",
-        "LANG",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "LOCALE_ARCHIVE",
-        "PKG_CONFIG_PATH",
-        "LD_LIBRARY_PATH",
-    ];
-    // Whole families a Nix/devenv environment populates.
-    const PREFIXES: &[&str] = &["NIX_", "LC_", "DEVENV_", "GIANT_"];
-
-    let mut names: std::collections::BTreeSet<String> =
-        BASE.iter().map(|s| (*s).to_string()).collect();
-    names.extend(spec.env.keys().cloned());
-    names.extend(
-        std::env::vars()
-            .map(|(k, _)| k)
-            .filter(|k| PREFIXES.iter().any(|p| k.starts_with(p))),
-    );
-    names.into_iter().collect()
 }
 
 /// Write the spec under `<cache>/sandbox/<target>.json`. The cache dir is

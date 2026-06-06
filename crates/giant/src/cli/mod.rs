@@ -207,6 +207,7 @@ pub struct GlobalFlags {
 /// host is not Linux - never silently degrades to an unsandboxed run.
 pub(crate) fn resolve_sandbox(
     enabled: bool,
+    cfg: &crate::config::SandboxConfig,
 ) -> anyhow::Result<Option<crate::executor::SandboxPolicy>> {
     if !enabled {
         return Ok(None);
@@ -217,26 +218,103 @@ pub(crate) fn resolve_sandbox(
     let helper = external::find_on_path("giant-sandbox").ok_or_else(|| {
         anyhow::anyhow!("--sandbox needs the `giant-sandbox` helper on PATH, but it was not found")
     })?;
-    // v1 toolchain (ADR-0030 §3): the Nix store plus the standard system roots
-    // that hold interpreters, shared libraries, and PATH binaries, read-only +
-    // executable, filtered to those that exist. This keeps `--sandbox` usable
-    // outside a devenv shell (where PATH points at /run/current-system/sw or
-    // /usr) while enforcement still bites on the *workspace* - only declared
-    // inputs are readable there. The toolchain-declared model lands later.
-    let toolchain = [
-        "/nix/store",
-        "/run/current-system/sw",
-        "/usr",
-        "/bin",
-        "/lib",
-        "/lib64",
-        "/etc",
-    ]
-    .into_iter()
-    .map(std::path::PathBuf::from)
-    .filter(|p| p.exists())
-    .collect();
-    Ok(Some(crate::executor::SandboxPolicy { helper, toolchain }))
+
+    // Generic FHS roots (read-only + executable). Anything scheme-specific - a
+    // Nix `/nix/store`, an asdf `~/.asdf`, a vendored `bin/` - is added by the
+    // workspace's `sandbox.roots`. Core assumes no toolchain manager (ADR-0030
+    // §3). Filtered to those present; enforcement still bites on the workspace.
+    const DEFAULT_ROOTS: &[&str] = &["/usr", "/bin", "/lib", "/lib64", "/etc"];
+    let toolchain = DEFAULT_ROOTS
+        .iter()
+        .map(|s| (*s).to_string())
+        .chain(cfg.roots.iter().cloned())
+        .map(|s| expand_tilde(&s))
+        .filter(|p| p.exists())
+        .collect();
+
+    // The standard pseudo-devices, writable. birdcage has no mount namespace,
+    // so there is no synthetic /dev; without these, `> /dev/null`, `/dev/urandom`,
+    // etc. - which almost every real command touches - fail. Universal on Linux,
+    // not scheme-specific. Granted read-write (they are harmless sinks/sources).
+    const DEFAULT_DEV: &[&str] = &[
+        "/dev/null",
+        "/dev/zero",
+        "/dev/full",
+        "/dev/random",
+        "/dev/urandom",
+        "/dev/tty",
+    ];
+
+    // Extra writable paths (e.g. a build cache outside the workspace) plus the
+    // pseudo-devices. Must already exist - a sandbox rule needs a real path -
+    // so skip missing ones.
+    let rw = DEFAULT_DEV
+        .iter()
+        .map(|s| (*s).to_string())
+        .chain(cfg.rw.iter().cloned())
+        .map(|s| expand_tilde(&s))
+        .filter(|p| p.exists())
+        .collect();
+
+    // Generic env allowlist. Scheme-specific families (e.g. `NIX_*`) come from
+    // `sandbox.env`. A trailing `*` is a prefix; birdcage grants exact names,
+    // so we expand against the ambient environment here (ADR-0030 §4).
+    const DEFAULT_ENV: &[&str] = &[
+        "PATH",
+        "HOME",
+        "USER",
+        "SHELL",
+        "TERM",
+        "TZ",
+        "TMPDIR",
+        "LANG",
+        "LC_*",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "PKG_CONFIG_PATH",
+        "LD_LIBRARY_PATH",
+        "GIANT_*",
+    ];
+    let env = expand_env_patterns(
+        DEFAULT_ENV
+            .iter()
+            .map(|s| (*s).to_string())
+            .chain(cfg.env.iter().cloned()),
+    );
+
+    Ok(Some(crate::executor::SandboxPolicy {
+        helper,
+        toolchain,
+        rw,
+        env,
+    }))
+}
+
+/// Expand a leading `~/` against `$HOME`; otherwise return the path as-is.
+fn expand_tilde(p: &str) -> std::path::PathBuf {
+    match p.strip_prefix("~/") {
+        Some(rest) => match std::env::var_os("HOME") {
+            Some(home) => std::path::PathBuf::from(home).join(rest),
+            None => std::path::PathBuf::from(p),
+        },
+        None => std::path::PathBuf::from(p),
+    }
+}
+
+/// Resolve env allowlist patterns into concrete names. A trailing `*` matches
+/// ambient variable names by prefix; everything else is a literal name.
+fn expand_env_patterns(patterns: impl IntoIterator<Item = String>) -> Vec<String> {
+    let ambient: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
+    let mut names = std::collections::BTreeSet::new();
+    for pat in patterns {
+        match pat.strip_suffix('*') {
+            Some(prefix) => names.extend(ambient.iter().filter(|k| k.starts_with(prefix)).cloned()),
+            None => {
+                names.insert(pat);
+            }
+        }
+    }
+    names.into_iter().collect()
 }
 
 /// Returned by a subcommand to exit non-zero without `main` printing

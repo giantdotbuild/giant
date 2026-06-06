@@ -180,3 +180,67 @@ fn env_allowlist_scrubs_undeclared_vars() {
         "an env var outside the allowlist must be scrubbed"
     );
 }
+
+#[test]
+fn declared_executable_input_can_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    if !sandbox_available(dir.path()) {
+        eprintln!("skipping: no working sandbox on this host");
+        return;
+    }
+    // An executable script declared in `ro` must be runnable - `ro` grants
+    // execute as well as read (some inputs are scripts the command runs).
+    let script = dir.path().join("hello.sh");
+    fs::write(&script, "#!/bin/sh\necho ran\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let spec = serde_json::json!({
+        "schema": 1, "cwd": "/", "ro": [script], "rw": [],
+        "toolchain": toolchain(), "env": ["PATH"], "network": false,
+    });
+    let out = run(&spec, dir.path(), &[&script]);
+    assert!(
+        out.status.success(),
+        "a declared executable input should run; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.stdout, b"ran\n");
+}
+
+#[test]
+fn granted_device_node_is_writable() {
+    let dir = tempfile::tempdir().unwrap();
+    if !sandbox_available(dir.path()) {
+        eprintln!("skipping: no working sandbox on this host");
+        return;
+    }
+    let Some(sh) = which("sh") else {
+        eprintln!("skipping: no `sh` on PATH");
+        return;
+    };
+    // A device node granted in `rw` is usable - this is what lets the engine's
+    // default `/dev/null` grant make redirects work (birdcage has no /dev).
+    let spec = serde_json::json!({
+        "schema": 1, "cwd": "/", "ro": [], "rw": ["/dev/null"],
+        "toolchain": toolchain(), "env": ["PATH"], "network": false,
+    });
+    let spec_path = dir.path().join("spec.json");
+    fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
+    let out = Command::new(BIN)
+        .arg("run")
+        .arg("--spec")
+        .arg(&spec_path)
+        .arg("--")
+        .arg(&sh)
+        .arg("-c")
+        .arg("echo hi > /dev/null && echo ok")
+        .output()
+        .expect("spawn giant-sandbox");
+    assert!(
+        out.status.success(),
+        "writing to a granted /dev/null should work; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.stdout, b"ok\n");
+}
