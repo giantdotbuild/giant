@@ -103,9 +103,10 @@ async fn breakdown_for_target(
 
 /// Compute (cache_key, output_content_hash) for a target by walking
 /// its dep closure. Each dep contributes its real output hash (read
-/// from its AC entry if present, sentinel-empty if not). Memoised so
-/// shared ancestors get computed once.
-async fn walk_target(
+/// from its AC entry if present, sentinel-empty if not). Memoised via
+/// `memo` so shared ancestors get computed once. Shared with the
+/// session's `query.status` handler (ADR-0033).
+pub(super) async fn walk_target(
     graph: &BuildGraph,
     cache: &LocalCache,
     workspace_root: &AbsPath,

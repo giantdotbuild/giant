@@ -15,6 +15,11 @@ pub enum Event {
         version: String,
         protocol: u32,
         workspace: String,
+        /// Read/query capabilities (ADR-0033, protocol 2). Absent or empty
+        /// means a protocol-1 engine: structural catalog + build events only,
+        /// no pull queries.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
     },
 
     #[serde(rename = "engine.shutdown")]
@@ -201,6 +206,47 @@ pub enum Event {
     /// succeed (e.g. user `git fetch`-es the missing ref).
     #[serde(rename = "affected.error")]
     AffectedError { base: String, message: String },
+
+    /// Reply to `query.status` (ADR-0033). Per-target cache state, correlated
+    /// by `command_id`.
+    #[serde(rename = "query.status")]
+    QueryStatus {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+        targets: Vec<TargetStatus>,
+    },
+
+    /// One captured log line replayed for `logs.get` (ADR-0033), correlated by
+    /// `command_id`. Distinct from `target.log`, which is live build output.
+    #[serde(rename = "logs.line")]
+    LogsLine {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+        target: TargetId,
+        stream: LogStream,
+        line: String,
+    },
+
+    /// End of a `logs.get` replay (always sent, even when there were no logs).
+    #[serde(rename = "logs.end")]
+    LogsEnd {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+        target: TargetId,
+    },
+}
+
+/// One target's cache state in a `query.status` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetStatus {
+    pub id: TargetId,
+    /// `cached` (the action cache has an entry at the current key) or `stale`
+    /// (no entry at the current key - never built, or built at a different key).
+    pub state: String,
+    pub key: String,
+    /// Duration of the build behind the cached entry, when `state == cached`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_duration_ms: Option<u64>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -270,6 +316,7 @@ mod tests {
             version: "0.1.0".into(),
             protocol: 1,
             workspace: "/tmp/proj".into(),
+            capabilities: Vec::new(),
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"t\":\"engine.hello\""));
@@ -301,6 +348,74 @@ mod tests {
             }
             _ => panic!("wrong variant after round-trip"),
         }
+    }
+
+    #[test]
+    fn engine_hello_serializes_capabilities() {
+        let ev = Event::EngineHello {
+            version: "0.2.0".into(),
+            protocol: 2,
+            workspace: "/tmp/p".into(),
+            capabilities: vec!["query.status".into()],
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"protocol\":2"));
+        assert!(s.contains("\"capabilities\":[\"query.status\"]"));
+    }
+
+    #[test]
+    fn query_status_round_trips() {
+        let ev = Event::QueryStatus {
+            command_id: Some("q1".into()),
+            targets: vec![TargetStatus {
+                id: TargetId::new("//:a"),
+                state: "cached".into(),
+                key: "7a3f".into(),
+                last_duration_ms: Some(342),
+            }],
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"t\":\"query.status\""));
+        assert!(s.contains("\"command_id\":\"q1\""));
+        let back: Event = serde_json::from_str(&s).unwrap();
+        match back {
+            Event::QueryStatus { targets, .. } => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].state, "cached");
+                assert_eq!(targets[0].last_duration_ms, Some(342));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn logs_line_and_end_round_trip() {
+        let line = Event::LogsLine {
+            command_id: Some("q6".into()),
+            target: TargetId::new("//:a"),
+            stream: LogStream::Stdout,
+            line: "writing bin/server".into(),
+        };
+        let s = serde_json::to_string(&line).unwrap();
+        assert!(s.contains("\"t\":\"logs.line\""));
+        assert!(s.contains("\"stream\":\"stdout\""));
+        assert!(s.contains("\"command_id\":\"q6\""));
+
+        let end = Event::LogsEnd {
+            command_id: Some("q6".into()),
+            target: TargetId::new("//:a"),
+        };
+        let s2 = serde_json::to_string(&end).unwrap();
+        assert!(s2.contains("\"t\":\"logs.end\""));
+        // both deserialize back.
+        assert!(matches!(
+            serde_json::from_str::<Event>(&s).unwrap(),
+            Event::LogsLine { .. }
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Event>(&s2).unwrap(),
+            Event::LogsEnd { .. }
+        ));
     }
 
     #[test]

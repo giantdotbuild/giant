@@ -19,7 +19,7 @@ use crate::cache::LocalCache;
 use crate::cli::prep;
 use crate::cli::{GlobalFlags, SilentExit};
 use crate::commands::Command;
-use crate::events::{Event, EventSender, ShutdownReason, TargetCounts};
+use crate::events::{Event, EventSender, LogStream, ShutdownReason, TargetCounts, TargetStatus};
 use crate::executor::{BuildJob, build};
 use crate::graph::BuildGraph;
 use crate::model::TargetId;
@@ -38,6 +38,10 @@ pub struct SessionArgs {
     #[arg(long, value_name = "FORMAT", default_value = "ndjson")]
     pub events: String,
 }
+
+/// Read/query capabilities this engine advertises in `engine.hello`
+/// (ADR-0033). Extend as queries are added.
+const CAPABILITIES: &[&str] = &["query.status", "logs.get"];
 
 pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<()> {
     if args.events != "ndjson" {
@@ -65,8 +69,9 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
     let _ = event_tx
         .send(Event::EngineHello {
             version: env!("CARGO_PKG_VERSION").into(),
-            protocol: 1,
+            protocol: 2,
             workspace: workspace_hint(global).unwrap_or_default(),
+            capabilities: CAPABILITIES.iter().map(|s| (*s).to_string()).collect(),
         })
         .await;
 
@@ -547,8 +552,164 @@ impl SessionState {
                 }
                 self.ack(command_id, None).await;
             }
+            Command::QueryStatus {
+                command_id,
+                targets,
+            } => {
+                self.query_status(command_id, targets).await;
+            }
+            Command::LogsGet {
+                command_id,
+                target,
+                follow,
+            } => {
+                self.logs_get(command_id, target, follow).await;
+            }
         }
         false
+    }
+
+    /// Answer `logs.get` (ADR-0033): replay a target's captured logs from its
+    /// last cached build as `logs.line` events, then `logs.end`. Reuses the
+    /// cache-key walk + the AC entry's stdout/stderr blobs (the same data
+    /// `giant logs` reads). `follow` (live tail of a running target) is not yet
+    /// implemented; this always replays the persisted logs.
+    async fn logs_get(&self, command_id: Option<String>, target: TargetId, _follow: bool) {
+        if let Some(reason) = self.validate_targets(std::slice::from_ref(&target)) {
+            self.reject(command_id, reason).await;
+            return;
+        }
+        let mut memo = std::collections::BTreeMap::new();
+        let key = match super::explain::walk_target(
+            &self.graph,
+            &self.cache,
+            &self.workspace_root,
+            &target,
+            &mut memo,
+        )
+        .await
+        {
+            Ok((key, _)) => key,
+            Err(e) => {
+                self.reject(command_id, format!("cannot compute cache key: {e:#}"))
+                    .await;
+                return;
+            }
+        };
+
+        if let Some(entry) = self.cache.get_ac(&key).await.ok().flatten() {
+            self.replay_blob(
+                &command_id,
+                &target,
+                entry.stdout_blob.as_deref(),
+                LogStream::Stdout,
+            )
+            .await;
+            self.replay_blob(
+                &command_id,
+                &target,
+                entry.stderr_blob.as_deref(),
+                LogStream::Stderr,
+            )
+            .await;
+        }
+
+        let _ = self
+            .event_tx
+            .send(Event::LogsEnd { command_id, target })
+            .await;
+    }
+
+    /// Read a captured log blob (CAS hex) and emit each line as a `logs.line`.
+    async fn replay_blob(
+        &self,
+        command_id: &Option<String>,
+        target: &TargetId,
+        hex: Option<&str>,
+        stream: LogStream,
+    ) {
+        let Some(hex) = hex else { return };
+        let Some(hash) = crate::model::ContentHash::from_hex(hex) else {
+            return;
+        };
+        let Ok(Some(bytes)) = self.cache.get_cas(&hash).await else {
+            return;
+        };
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let _ = self
+                .event_tx
+                .send(Event::LogsLine {
+                    command_id: command_id.clone(),
+                    target: target.clone(),
+                    stream,
+                    line: line.to_string(),
+                })
+                .await;
+        }
+    }
+
+    /// Answer `query.status` (ADR-0033): per-target cache state. Recomputes each
+    /// target's cache key (the same walk `giant explain` uses) and consults the
+    /// action cache. Read-only; safe to run alongside or between builds.
+    async fn query_status(&self, command_id: Option<String>, targets: Vec<TargetId>) {
+        if !targets.is_empty()
+            && let Some(reason) = self.validate_targets(&targets)
+        {
+            self.reject(command_id, reason).await;
+            return;
+        }
+        let ids: Vec<TargetId> = if targets.is_empty() {
+            let mut v: Vec<TargetId> = self.graph.iter().map(|(id, _)| id.clone()).collect();
+            v.sort();
+            v
+        } else {
+            targets
+        };
+
+        let mut memo = std::collections::BTreeMap::new();
+        let mut out = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let status = match super::explain::walk_target(
+                &self.graph,
+                &self.cache,
+                &self.workspace_root,
+                id,
+                &mut memo,
+            )
+            .await
+            {
+                Ok((key, _)) => {
+                    let entry = self.cache.get_ac(&key).await.ok().flatten();
+                    let (state, last_duration_ms) = match entry {
+                        Some(e) => ("cached", Some(e.duration_ms)),
+                        None => ("stale", None),
+                    };
+                    TargetStatus {
+                        id: id.clone(),
+                        state: state.to_string(),
+                        key: key.to_hex(),
+                        last_duration_ms,
+                    }
+                }
+                // A key we cannot compute (e.g. a missing declared input) reads
+                // as stale with no key, rather than failing the whole query.
+                Err(_) => TargetStatus {
+                    id: id.clone(),
+                    state: "stale".to_string(),
+                    key: String::new(),
+                    last_duration_ms: None,
+                },
+            };
+            out.push(status);
+        }
+
+        let _ = self
+            .event_tx
+            .send(Event::QueryStatus {
+                command_id,
+                targets: out,
+            })
+            .await;
     }
 
     fn start_affected(&mut self, base: String) {

@@ -113,6 +113,29 @@ pub enum Command {
         #[serde(default)]
         command_id: Option<String>,
     },
+
+    /// Read query: per-target cache state (ADR-0033). Computes each target's
+    /// cache key and consults the action cache. Empty `targets` means every
+    /// target (may be slow on a large graph). Answered with `query.status`.
+    #[serde(rename = "query.status")]
+    QueryStatus {
+        #[serde(default)]
+        command_id: Option<String>,
+        #[serde(default)]
+        targets: Vec<TargetId>,
+    },
+
+    /// Read query: replay a target's captured logs from the last cached build
+    /// (ADR-0033). Streams `logs.line` events then `logs.end`. `follow` (live
+    /// tail of a running target) is not yet implemented; it replays regardless.
+    #[serde(rename = "logs.get")]
+    LogsGet {
+        #[serde(default)]
+        command_id: Option<String>,
+        target: TargetId,
+        #[serde(default)]
+        follow: bool,
+    },
 }
 
 impl Command {
@@ -128,7 +151,9 @@ impl Command {
             | Command::AffectedSubscribe { command_id, .. }
             | Command::AffectedUnsubscribe { command_id, .. }
             | Command::WatchSubscribe { command_id, .. }
-            | Command::WatchUnsubscribe { command_id, .. } => command_id.as_deref(),
+            | Command::WatchUnsubscribe { command_id, .. }
+            | Command::QueryStatus { command_id, .. }
+            | Command::LogsGet { command_id, .. } => command_id.as_deref(),
         }
     }
 }
@@ -213,6 +238,58 @@ mod tests {
             Command::WatchSubscribe { targets, globs, .. } => {
                 assert!(targets.is_empty() && globs.is_empty());
             }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn query_status_parses_with_targets() {
+        let raw = r#"{"c":"query.status","command_id":"q1","targets":["//:a","//:b"]}"#;
+        let cmd: Command = serde_json::from_str(raw).unwrap();
+        match cmd {
+            Command::QueryStatus {
+                command_id,
+                targets,
+            } => {
+                assert_eq!(command_id.as_deref(), Some("q1"));
+                assert_eq!(targets.len(), 2);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn query_status_defaults_to_all_targets() {
+        let cmd: Command = serde_json::from_str(r#"{"c":"query.status"}"#).unwrap();
+        match cmd {
+            Command::QueryStatus { targets, .. } => assert!(targets.is_empty()),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn logs_get_parses_with_follow() {
+        let raw = r#"{"c":"logs.get","command_id":"q6","target":"//:a","follow":true}"#;
+        let cmd: Command = serde_json::from_str(raw).unwrap();
+        match cmd {
+            Command::LogsGet {
+                command_id,
+                target,
+                follow,
+            } => {
+                assert_eq!(command_id.as_deref(), Some("q6"));
+                assert_eq!(target.as_str(), "//:a");
+                assert!(follow);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn logs_get_follow_defaults_false() {
+        let cmd: Command = serde_json::from_str(r#"{"c":"logs.get","target":"//:a"}"#).unwrap();
+        match cmd {
+            Command::LogsGet { follow, .. } => assert!(!follow),
             _ => panic!("wrong variant"),
         }
     }
