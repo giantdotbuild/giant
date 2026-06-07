@@ -10,6 +10,7 @@
 
 mod check;
 mod config;
+mod link;
 mod run;
 mod star;
 
@@ -128,5 +129,24 @@ async fn run_all(selected: &[Generator], root: &Path) -> Result<i32> {
             failures += 1;
         }
     }
-    Ok(if failures > 0 { 1 } else { 0 })
+    if failures > 0 {
+        return Ok(1);
+    }
+
+    // Phase 2: resolve deps over the whole emitted tree and write them into the
+    // generated files (TDD-0026). Skipped above on any generator failure, since
+    // the tree would be partial.
+    let root = root.to_path_buf();
+    match tokio::task::spawn_blocking(move || link::run(&root)).await? {
+        Ok(n) => {
+            if n > 0 {
+                println!("link\tresolved deps in {n} file(s)");
+            }
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("giant gen: link: {e:#}");
+            Ok(1)
+        }
+    }
 }
