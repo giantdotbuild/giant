@@ -397,7 +397,6 @@ mod tests {
             test: false,
             tags: Default::default(),
             label: None,
-            inferred_deps: Default::default(),
             prune_dirs: Vec::new(),
         }
     }
@@ -462,11 +461,11 @@ mod tests {
 
     #[test]
     fn transitive_downstream_included() {
-        // a (input: src/*.go) → produces bin/a
-        // b (input: bin/a) → depends on a via inference
+        // a (input: src/*.go) produces bin/a; b depends on a. A change to a's
+        // input affects a and, transitively, its downstream consumer b.
         let g = graph_with(vec![
             spec("a", &[], &["bin/a"], &["src/**/*.go"]),
-            spec("b", &[], &["bin/b"], &["bin/a"]),
+            spec("b", &["a"], &["bin/b"], &[]),
         ]);
         let aff = affected_targets(&g, &[Path::new("src/main.go")]);
         assert!(aff.contains(&TargetId::new("a")));

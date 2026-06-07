@@ -1,9 +1,10 @@
 //! Build graph backed by `petgraph`.
 //!
-//! Holds the merged set of targets and dep edges (explicit + output-inferred).
-//! See ADR-0004 for output-based inference, TDD-0001 for the schema and merge.
+//! Holds the merged set of targets and their explicit `deps:` edges.
+//! See ADR-0032 for why dep edges come from `deps:` only (output-based
+//! inference moved to generation), TDD-0001 for the schema and merge.
 
-use crate::model::{Input, TargetId, TargetSpec};
+use crate::model::{TargetId, TargetSpec};
 use petgraph::Direction;
 use petgraph::algo::toposort;
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -82,20 +83,14 @@ impl BuildGraph {
     /// times (clears existing edges first). Does three things:
     ///
     /// 1. Wire explicit `deps:` edges, checking they reference known IDs.
-    /// 2. Run output-based dep inference (ADR-0004), adding edges where a
-    ///    target's input glob matches another target's output paths.
+    /// 2. Validate output uniqueness (two targets, same output is a config bug).
     /// 3. Validate acyclic.
     ///
-    /// After this, `direct_deps()` returns the union of explicit and
-    /// inferred deps, deduplicated.
+    /// Dependency inference is no longer done here (ADR-0032 supersedes
+    /// ADR-0004): deps are resolved at generation time and read from `deps:`,
+    /// so `direct_deps()` returns the explicit deps.
     pub fn build_edges_and_validate(&mut self) -> Result<(), GraphError> {
         self.g.clear_edges();
-
-        // Reset inferred_deps so re-runs after adding more targets don't
-        // accumulate stale entries.
-        for spec in self.targets.values_mut() {
-            spec.inferred_deps.clear();
-        }
 
         let mut seen_edges: HashSet<(TargetId, TargetId)> = HashSet::new();
 
@@ -120,23 +115,33 @@ impl BuildGraph {
             }
         }
 
-        // 2. Output-based inference (ADR-0004).
-        let inferred = compute_inferred_edges(&self.targets)?;
-        for (parent, dep) in inferred {
-            if !seen_edges.insert((parent.clone(), dep.clone())) {
-                continue;
-            }
-            let parent_idx = *self.idx.get(&parent).expect("target node missing");
-            let dep_idx = *self.idx.get(&dep).expect("target node missing");
-            self.g.add_edge(parent_idx, dep_idx, ());
-            if let Some(spec) = self.targets.get_mut(&parent) {
-                spec.inferred_deps.insert(dep);
-            }
-        }
+        // 2. Output uniqueness.
+        self.validate_output_uniqueness()?;
 
         // 3. Acyclic check.
         self.validate_acyclic()?;
 
+        Ok(())
+    }
+
+    /// Two targets declaring the same output path is a config bug, not an
+    /// ambiguity we can resolve. O(n) over all outputs. The generation link
+    /// pass also checks this (ADR-0032); the engine keeps it as a backstop, and
+    /// it covers hand-written-only workspaces that never run generation.
+    fn validate_output_uniqueness(&self) -> Result<(), GraphError> {
+        let mut producer: HashMap<String, TargetId> = HashMap::new();
+        for (id, spec) in &self.targets {
+            for output in &spec.outputs {
+                let path = output.as_path().to_string_lossy().into_owned();
+                if let Some(prev) = producer.insert(path.clone(), id.clone()) {
+                    return Err(GraphError::OutputCollision {
+                        path,
+                        a: prev,
+                        b: id.clone(),
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -162,7 +167,7 @@ impl BuildGraph {
         Ok(order.into_iter().rev().map(|n| self.g[n].clone()).collect())
     }
 
-    /// Direct dependencies (explicit ∪ inferred), sorted, deduplicated.
+    /// Direct dependencies (the explicit `deps:` edges), sorted, deduplicated.
     pub fn direct_deps(&self, id: &TargetId) -> Vec<TargetId> {
         let Some(&node) = self.idx.get(id) else {
             return Vec::new();
@@ -211,54 +216,6 @@ impl BuildGraph {
     }
 }
 
-/// Output-based dependency inference (ADR-0004).
-///
-/// For each target T and each input glob G, find producers whose output
-/// paths match G. Returns (parent, dep) tuples. Hard-errors when two
-/// targets declare the same output path - that's a config bug, not an
-/// ambiguity we can fix automatically.
-fn compute_inferred_edges(
-    targets: &HashMap<TargetId, TargetSpec>,
-) -> Result<Vec<(TargetId, TargetId)>, GraphError> {
-    // Inverted index: output path → producer.
-    let mut producer: HashMap<String, TargetId> = HashMap::new();
-    for (id, spec) in targets {
-        for output in &spec.outputs {
-            let path = output.as_path().to_string_lossy().into_owned();
-            if let Some(prev) = producer.insert(path.clone(), id.clone()) {
-                return Err(GraphError::OutputCollision {
-                    path,
-                    a: prev,
-                    b: id.clone(),
-                });
-            }
-        }
-    }
-
-    // For each (target, input-glob), find every producer whose output
-    // satisfies the glob. Dedupe at the end.
-    let mut edges: Vec<(TargetId, TargetId)> = Vec::new();
-    for (id, spec) in targets {
-        for input in &spec.inputs {
-            let Input::File { glob } = input;
-            let Ok(pattern) = glob::Pattern::new(glob.as_str()) else {
-                continue;
-            };
-            for (output_path, prod) in &producer {
-                if prod == id {
-                    continue; // a target doesn't depend on itself
-                }
-                if pattern.matches(output_path) {
-                    edges.push((id.clone(), prod.clone()));
-                }
-            }
-        }
-    }
-    edges.sort();
-    edges.dedup();
-    Ok(edges)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,7 +253,6 @@ mod tests {
             test: false,
             tags: Default::default(),
             label: None,
-            inferred_deps: Default::default(),
             prune_dirs: Vec::new(),
         }
     }
@@ -359,53 +315,27 @@ mod tests {
     }
 
     #[test]
-    fn output_based_inference_links_matching_input() {
-        // a produces gen/api.pb.go
-        // b inputs include gen/**/*.go - should infer b depends on a
+    fn explicit_dep_links() {
+        // Edges come from explicit `deps:` only; output-based inference moved to
+        // generation (ADR-0032). The glob-vs-output matching lives in giant-gen's
+        // link pass tests now.
         let g = build(vec![
-            spec("a", &[], &["gen/api.pb.go"], &[]),
-            spec("b", &[], &["bin/server"], &["gen/**/*.go"]),
+            spec("a", &[], &["bin/a"], &[]),
+            spec("b", &["a"], &["bin/b"], &[]),
         ])
         .unwrap();
-        let deps_of_b = g.direct_deps(&TargetId::new("b"));
-        assert_eq!(deps_of_b, vec![TargetId::new("a")]);
-        // explicit deps remain empty; inferred_deps populated.
-        let b = g.get(&TargetId::new("b")).unwrap();
-        assert!(b.deps.is_empty());
-        assert!(b.inferred_deps.contains(&TargetId::new("a")));
-    }
-
-    #[test]
-    fn inference_doesnt_duplicate_existing_explicit_dep() {
-        // a → b is both declared and inferred. Should appear once.
-        let g = build(vec![
-            spec("a", &[], &["bin/foo"], &[]),
-            spec("b", &["a"], &["bin/bar"], &["bin/foo"]),
-        ])
-        .unwrap();
-        let deps_of_b = g.direct_deps(&TargetId::new("b"));
-        assert_eq!(deps_of_b, vec![TargetId::new("a")]);
-    }
-
-    #[test]
-    fn inference_skips_self_dependency() {
-        // a's input glob matches its own output. Should not depend on itself.
-        let g = build(vec![spec("a", &[], &["a.txt"], &["*.txt"])]).unwrap();
-        let deps_of_a = g.direct_deps(&TargetId::new("a"));
-        assert!(deps_of_a.is_empty());
+        assert_eq!(g.direct_deps(&TargetId::new("b")), vec![TargetId::new("a")]);
     }
 
     #[test]
     fn rebuild_edges_idempotent() {
         // Calling build_edges_and_validate twice doesn't accumulate edges.
         let mut g = BuildGraph::new();
-        g.add_target(spec("a", &[], &["gen/x.go"], &[])).unwrap();
-        g.add_target(spec("b", &[], &["bin/b"], &["gen/**/*.go"]))
-            .unwrap();
+        g.add_target(spec("a", &[], &["bin/a"], &[])).unwrap();
+        g.add_target(spec("b", &["a"], &["bin/b"], &[])).unwrap();
         g.build_edges_and_validate().unwrap();
         g.build_edges_and_validate().unwrap();
-        let deps = g.direct_deps(&TargetId::new("b"));
-        assert_eq!(deps.len(), 1);
+        assert_eq!(g.direct_deps(&TargetId::new("b")).len(), 1);
     }
 
     #[test]

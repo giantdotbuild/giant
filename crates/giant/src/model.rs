@@ -217,10 +217,6 @@ pub struct TargetSpec {
     pub tags: HashSet<String>,
     pub label: Option<String>,
 
-    /// Runtime-only: the subset of `deps` populated by output-based
-    /// inference. Display metadata for `giant explain`.
-    pub inferred_deps: HashSet<TargetId>,
-
     /// Runtime-only: workspace-relative directories of subpackages (nested
     /// `giant.yaml` files) that this target's globs must not cross into,
     /// so no two packages claim the same file (TDD-0001 §Path resolution).
@@ -253,7 +249,6 @@ impl From<giant_schema::WireTarget> for TargetSpec {
             test: w.test,
             tags: w.tags.into_iter().collect(),
             label: w.label,
-            inferred_deps: HashSet::new(),
             prune_dirs: Vec::new(),
         }
     }

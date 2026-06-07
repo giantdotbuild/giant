@@ -478,51 +478,6 @@ targets:
 }
 
 #[test]
-fn output_based_inference_links_static_targets() {
-    // 'b' has input matching 'a's output. Engine infers b depends on a
-    // without an explicit deps: declaration.
-    let dir = tempfile::tempdir().unwrap();
-    let ws = dir.path();
-    std::fs::write(
-        ws.join("giant.yaml"),
-        r#"
-workspace:
-  name: inferlinks
-cache:
-  dir: ./cache
-targets:
-  - name: "a"
-    inputs: []
-    outputs: ["gen.txt"]
-    command: "echo from-a > gen.txt"
-  - name: "b"
-    inputs: ["gen.txt"]
-    outputs: ["out.txt"]
-    command: "cat gen.txt > out.txt"
-"#,
-    )
-    .unwrap();
-    let out = Command::new(giant_bin())
-        .arg("build")
-        .current_dir(ws)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "build failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
-    assert!(built(&s, "//:a"), "a should build; got: {s}");
-    assert!(built(&s, "//:b"), "b should build; got: {s}");
-    // Verify b ran after a - b's output depends on a's having run first.
-    assert_eq!(
-        std::fs::read_to_string(ws.join("out.txt")).unwrap().trim(),
-        "from-a"
-    );
-}
-
-#[test]
 fn exists_check_succeeding_skips_build_command() {
     // `exists:` says "yes, it's already there" → build command must not
     // run. We prove the command didn't run by having it write a marker
@@ -874,8 +829,8 @@ targets:
 
 #[test]
 fn affected_walks_downstream_transitively() {
-    // a's output feeds b's input. Editing src/a/* should make BOTH a and
-    // b run (b is transitively affected via output-based inference).
+    // a's output feeds b's input, and b declares the dep. Editing src/a/*
+    // should make BOTH a and b run (b is transitively affected).
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();
     std::fs::create_dir_all(ws.join("src/a")).unwrap();
@@ -894,6 +849,7 @@ targets:
     command: "cp src/a/main.go a.out"
   - name: "b"
     inputs: ["a.out"]
+    deps: ["//:a"]
     outputs: ["b.out"]
     command: "cp a.out b.out"
 "#,
@@ -946,6 +902,7 @@ targets:
     command: "echo b > b.out"
   - name: "c"
     inputs: ["a.out"]
+    deps: ["//:a"]
     outputs: ["c.out"]
     command: "cp a.out c.out"
 "#,
@@ -1151,6 +1108,7 @@ targets:
     command: "echo a > a.txt"
   - name: "b"
     inputs: ["a.txt"]
+    deps: ["//:a"]
     outputs: ["b.txt"]
     command: "cat a.txt > b.txt"
   - name: "c"
@@ -1175,7 +1133,7 @@ targets:
     for id in ["//:a", "//:b", "//:c"] {
         assert!(s.contains(id), "expected target {id:?} in list; got: {s}");
     }
-    // 'b' depends on 'a' (inferred via a.txt), so it should show the arrow.
+    // 'b' depends on 'a', so it should show the arrow.
     assert!(s.contains("//:b") && s.contains("→") && s.contains("//:a"));
     // Footer.
     assert!(s.contains("3 target(s)"), "expected count footer; got: {s}");
@@ -1199,10 +1157,12 @@ targets:
     command: "echo a > a.txt"
   - name: "b"
     inputs: ["a.txt"]
+    deps: ["//:a"]
     outputs: ["b.txt"]
     command: "cat a.txt > b.txt"
   - name: "c"
     inputs: ["b.txt"]
+    deps: ["//:b"]
     outputs: ["c.txt"]
     command: "cat b.txt > c.txt"
 "#,
@@ -1242,10 +1202,12 @@ targets:
     command: "echo lib > lib.o"
   - name: "app"
     inputs: ["lib.o"]
+    deps: ["//:lib"]
     outputs: ["app"]
     command: "cp lib.o app"
   - name: "release"
     inputs: ["app"]
+    deps: ["//:app"]
     outputs: ["release.tag"]
     command: "echo r > release.tag"
 "#,
@@ -2000,73 +1962,6 @@ targets:
     assert!(
         cached(&s2, "//src/lib:build"),
         "expected cache hit; got: {s2}"
-    );
-}
-
-#[test]
-fn cross_package_inference_via_root_anchored_input() {
-    let dir = tempfile::tempdir().unwrap();
-    let ws = dir.path();
-    // Root package has a target that consumes the lib package's output via
-    // a `//`-anchored input, which infers the cross-package dep.
-    std::fs::write(
-        ws.join("giant.yaml"),
-        r#"
-workspace:
-  name: xpkg
-cache:
-  dir: ./cache
-targets:
-  - name: bundle
-    inputs: ["//src/lib/out.txt"]
-    outputs: ["bundle.txt"]
-    command: "cat src/lib/out.txt > bundle.txt"
-"#,
-    )
-    .unwrap();
-    std::fs::create_dir_all(ws.join("src/lib")).unwrap();
-    std::fs::write(ws.join("src/lib/seed.txt"), "lib-data\n").unwrap();
-    std::fs::write(
-        ws.join("src/lib/giant.yaml"),
-        r#"
-targets:
-  - name: gen
-    inputs: ["seed.txt"]
-    outputs: ["out.txt"]
-    command: "cat seed.txt > out.txt"
-"#,
-    )
-    .unwrap();
-
-    let out = Command::new(giant_bin())
-        .arg("build")
-        .current_dir(ws)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "build failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    // The lib target produced out.txt and the root target consumed it.
-    assert_eq!(
-        std::fs::read_to_string(ws.join("bundle.txt"))
-            .unwrap()
-            .trim(),
-        "lib-data"
-    );
-
-    // `giant graph //:bundle` shows the inferred cross-package dep.
-    let g = Command::new(giant_bin())
-        .arg("graph")
-        .arg("//:bundle")
-        .current_dir(ws)
-        .output()
-        .unwrap();
-    let gs = String::from_utf8_lossy(&g.stdout);
-    assert!(
-        gs.contains("//src/lib:gen"),
-        "expected inferred dep on //src/lib:gen in graph; got: {gs}"
     );
 }
 

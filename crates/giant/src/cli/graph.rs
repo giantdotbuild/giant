@@ -80,8 +80,8 @@ fn print_list(graph: &BuildGraph) {
     let _ = w.flush();
 }
 
-/// Indented tree printout. Inferred-vs-explicit is marked inline so
-/// users see why an edge exists.
+/// Indented tree printout of a target's deps (or downstream consumers in
+/// reverse mode).
 fn print_tree(graph: &BuildGraph, root: &TargetId, reverse: bool) {
     let stdout = std::io::stdout();
     let mut w = stdout.lock();
@@ -105,30 +105,14 @@ fn walk(
     } else {
         graph.direct_deps(id)
     };
-    let spec = graph.get(id);
-    let inferred: &HashSet<TargetId> = spec
-        .map(|s| &s.inferred_deps)
-        .unwrap_or(EMPTY_INFERRED.get_or_init(HashSet::new));
 
     for dep in neighbors {
-        let mark = if reverse {
-            ""
-        } else if inferred.contains(&dep) {
-            "  (inferred)"
-        } else {
-            ""
-        };
         let prefix = "  ".repeat(depth);
         if !visited.insert(dep.clone()) {
-            let _ = writeln!(w, "{prefix}{dep}{mark}  (cycle/visited)");
+            let _ = writeln!(w, "{prefix}{dep}  (cycle/visited)");
             continue;
         }
-        let _ = writeln!(w, "{prefix}{dep}{mark}");
+        let _ = writeln!(w, "{prefix}{dep}");
         walk(w, graph, &dep, depth + 1, reverse, visited);
     }
 }
-
-use std::sync::OnceLock;
-/// Shared empty set so we can return a `&HashSet` without allocating
-/// when a target spec is missing (only happens on graph-state bugs).
-static EMPTY_INFERRED: OnceLock<HashSet<TargetId>> = OnceLock::new();
