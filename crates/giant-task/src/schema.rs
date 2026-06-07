@@ -165,9 +165,9 @@ pub struct ServiceSpec {
     pub cwd: Option<String>,
 }
 
-/// How to tell whether a service is ready. v1 supports only `command`
-/// - a shell snippet run periodically until it exits 0, or
-/// `timeout_secs` elapses.
+/// How to tell whether a service is ready. v1 supports only `command`,
+/// a shell snippet run periodically until it exits 0, or `timeout_secs`
+/// elapses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadyProbe {

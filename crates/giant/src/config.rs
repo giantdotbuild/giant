@@ -551,8 +551,8 @@ impl Config {
     }
 
     /// Locate the workspace root - the directory of an explicit config,
-    /// else the nearest ancestor whose `giant.yaml` declares `workspace:`
-    /// - then scan + merge the whole workspace. Returns the merged config
+    /// else the nearest ancestor whose `giant.yaml` declares `workspace:`,
+    /// then scan + merge the whole workspace. Returns the merged config
     /// and the workspace root directory.
     pub fn scan_workspace(explicit: Option<&Path>) -> Result<(Self, PathBuf), ConfigError> {
         let root_dir = find_workspace_root(explicit)?;
