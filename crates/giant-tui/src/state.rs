@@ -5,7 +5,9 @@
 //! visible screens; transitions are triggered by both engine events
 //! (catalog ready, build finished) and key actions (Enter, Esc).
 
-use giant::events::{Event, LogStream, TargetCounts, TargetResultKind};
+use giant::events::{
+    Event, ExplainDep, ExplainEnv, ExplainInput, LogStream, TargetCounts, TargetResultKind,
+};
 use giant::model::TargetId;
 use giant::selection::{PatternMatcher, has_glob_chars};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -30,6 +32,9 @@ pub enum Screen {
     Watching,
     /// The build just finished; hold on the summary.
     BuildFinished,
+    /// Full-screen log viewer for one target, fed by `logs.get` replay
+    /// (ADR-0033). Opened from the browser; Esc returns.
+    Logs,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -102,6 +107,9 @@ pub enum Mode {
     /// `state.log_search`; the pane filters to matching lines until the
     /// query is cleared (Esc or empty + Enter).
     LogSearch,
+    /// "Why did this run / why cached" overlay for the selected target,
+    /// fed by `query.explain` (ADR-0033). Any key closes it.
+    Explain,
 }
 
 /// "Affected since <base>" filter on the catalog. While set, the
@@ -173,6 +181,21 @@ pub struct LogLine {
     pub target: TargetId,
     pub stream: LogStream,
     pub line: String,
+}
+
+/// Cache-key breakdown for the explain overlay, from `query.explain`
+/// (ADR-0033). None of these are computed locally - they are what the engine
+/// reported feeds the target's key.
+#[derive(Debug, Clone)]
+pub struct ExplainView {
+    pub target: TargetId,
+    pub key: String,
+    pub cached: bool,
+    pub command: String,
+    pub cwd: String,
+    pub file_inputs: Vec<ExplainInput>,
+    pub deps: Vec<ExplainDep>,
+    pub env: Vec<ExplainEnv>,
 }
 
 /// Static metadata for one target, learned from `target.described`.
@@ -250,6 +273,19 @@ pub struct State {
     /// scrolled with j/k while the log pane is focused. 0 = follow
     /// tail; bumped up by k, down by j.
     pub log_scroll_back: usize,
+
+    /// Per-target cache state from `query.status` (ADR-0033): true = cached
+    /// (an action-cache hit at the current key), false = stale. Absent = not
+    /// yet queried. Refreshed on catalog ready and after each build.
+    pub cache_status: HashMap<TargetId, bool>,
+
+    /// The target whose logs the `Screen::Logs` viewer is showing, fed by a
+    /// `logs.get` replay (ADR-0033). None when not in the log viewer.
+    pub log_view_target: Option<TargetId>,
+
+    /// Cache-key breakdown for the `Mode::Explain` overlay, from
+    /// `query.explain` (ADR-0033). None while the reply is in flight.
+    pub explain: Option<ExplainView>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -403,6 +439,48 @@ impl State {
                 message: reason, ..
             } => {
                 self.last_error = Some(reason);
+            }
+            Event::QueryStatus { targets, .. } => {
+                for t in targets {
+                    self.cache_status.insert(t.id, t.state == "cached");
+                }
+            }
+            Event::LogsLine {
+                target,
+                stream,
+                line,
+                ..
+            } => {
+                self.logs
+                    .entry(target.clone())
+                    .or_default()
+                    .push_back(LogLine {
+                        target,
+                        stream,
+                        line,
+                    });
+            }
+            Event::QueryExplained {
+                target,
+                key,
+                cached,
+                command,
+                cwd,
+                file_inputs,
+                deps,
+                env,
+                ..
+            } => {
+                self.explain = Some(ExplainView {
+                    target,
+                    key,
+                    cached,
+                    command,
+                    cwd,
+                    file_inputs,
+                    deps,
+                    env,
+                });
             }
             _ => {}
         }
@@ -560,6 +638,15 @@ impl State {
             .collect()
     }
 
+    /// The browser's highlighted target: `scroll_offset` doubles as the cursor
+    /// (the scroll methods keep it clamped to a valid row). Used by `l` (logs)
+    /// and `e` (explain) to act on the selected row.
+    pub fn selected_browser_target(&self) -> Option<TargetId> {
+        self.filtered_catalog()
+            .get(self.scroll_offset)
+            .map(|(id, _)| (*id).clone())
+    }
+
     pub fn known_tags(&self) -> Vec<String> {
         let mut all: HashSet<&str> = HashSet::new();
         for entry in self.catalog.values() {
@@ -653,7 +740,7 @@ impl State {
             Screen::Building | Screen::Watching | Screen::BuildFinished => {
                 self.sorted_build_targets().len()
             }
-            Screen::Loading => 0,
+            Screen::Loading | Screen::Logs => 0,
         }
     }
 
@@ -776,6 +863,26 @@ impl State {
         };
         self.logs.get(&id).map(|d| d.as_slices().0).unwrap_or(EMPTY)
     }
+
+    /// Open the full-screen log viewer for `target`. Clears any buffered lines
+    /// for it so the incoming `logs.get` replay starts fresh, and resets the
+    /// log search/scroll. The caller sends the `logs.get` command.
+    pub fn open_logs(&mut self, target: TargetId) {
+        self.logs.entry(target.clone()).or_default().clear();
+        self.log_view_target = Some(target);
+        self.log_search.clear();
+        self.log_scroll_back = 0;
+        self.screen = Screen::Logs;
+    }
+
+    /// Buffered log lines for the target the log viewer is showing.
+    pub fn log_view_logs(&self) -> &[LogLine] {
+        static EMPTY: &[LogLine] = &[];
+        let Some(id) = &self.log_view_target else {
+            return EMPTY;
+        };
+        self.logs.get(id).map(|d| d.as_slices().0).unwrap_or(EMPTY)
+    }
 }
 
 /// Same semantics as `selection::SelectionOpts::passes_tags`:
@@ -857,6 +964,87 @@ mod tests {
             outputs: vec![],
             deps: vec![],
         }
+    }
+
+    #[test]
+    fn open_logs_then_replay_fills_view() {
+        let mut s = State::default();
+        // A stale line from a prior build that open_logs should clear.
+        s.logs.entry(tid("//:a")).or_default().push_back(LogLine {
+            target: tid("//:a"),
+            stream: LogStream::Stdout,
+            line: "old".into(),
+        });
+        s.open_logs(tid("//:a"));
+        assert_eq!(s.screen, Screen::Logs);
+        assert_eq!(s.log_view_target.as_ref(), Some(&tid("//:a")));
+        assert!(
+            s.log_view_logs().is_empty(),
+            "buffer cleared for fresh replay"
+        );
+
+        s.apply(Event::LogsLine {
+            command_id: Some("L1".into()),
+            target: tid("//:a"),
+            stream: LogStream::Stdout,
+            line: "hello-logs".into(),
+        });
+        s.apply(Event::LogsEnd {
+            command_id: Some("L1".into()),
+            target: tid("//:a"),
+        });
+        let lines: Vec<&str> = s.log_view_logs().iter().map(|l| l.line.as_str()).collect();
+        assert_eq!(lines, vec!["hello-logs"]);
+    }
+
+    #[test]
+    fn query_explained_populates_overlay() {
+        let mut s = State::default();
+        s.apply(Event::QueryExplained {
+            command_id: Some("e1".into()),
+            target: tid("//:a"),
+            key: "deadbeef".into(),
+            cached: false,
+            command: "go build".into(),
+            cwd: String::new(),
+            file_inputs: vec![ExplainInput {
+                path: "main.go".into(),
+                hash: "abcd1234".into(),
+                size: 9,
+            }],
+            deps: vec![],
+            env: vec![],
+        });
+        let ex = s.explain.expect("explain set");
+        assert_eq!(ex.target.as_str(), "//:a");
+        assert!(!ex.cached);
+        assert_eq!(ex.file_inputs.len(), 1);
+        assert_eq!(ex.command, "go build");
+    }
+
+    #[test]
+    fn query_status_populates_cache_state() {
+        let mut s = State::default();
+        s.apply(Event::QueryStatus {
+            command_id: Some("q1".into()),
+            targets: vec![
+                giant::events::TargetStatus {
+                    id: tid("//:a"),
+                    state: "cached".into(),
+                    key: "k".into(),
+                    last_duration_ms: Some(5),
+                },
+                giant::events::TargetStatus {
+                    id: tid("//:b"),
+                    state: "stale".into(),
+                    key: "k2".into(),
+                    last_duration_ms: None,
+                },
+            ],
+        });
+        assert_eq!(s.cache_status.get(&tid("//:a")), Some(&true));
+        assert_eq!(s.cache_status.get(&tid("//:b")), Some(&false));
+        assert_eq!(s.cache_status.get(&tid("//:c")), None);
     }
 
     #[test]

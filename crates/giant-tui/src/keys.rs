@@ -2,6 +2,7 @@
 
 use crate::state::{Focus, Mode, Screen, State};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use giant::model::TargetId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -27,6 +28,12 @@ pub enum Action {
     RefreshAffectedAgain,
     /// Drop the affected filter; tear down the file watcher.
     ClearAffected,
+    /// Open the log viewer for a target: send `logs.get` for it (ADR-0033).
+    /// The state transition to `Screen::Logs` is already done.
+    ViewLogs(TargetId),
+    /// Open the explain overlay for a target: send `query.explain` (ADR-0033).
+    /// The overlay (`Mode::Explain`) is already showing.
+    Explain(TargetId),
     /// Key consumed but no UI effect.
     Ignore,
 }
@@ -50,6 +57,7 @@ pub fn handle(state: &mut State, key: KeyEvent) -> Action {
         Mode::TagPicker => return handle_tag_picker(state, key),
         Mode::AffectedPrompt => return handle_affected_prompt(state, key),
         Mode::LogSearch => return handle_log_search(state, key),
+        Mode::Explain => return handle_explain(state, key),
         Mode::Normal => {}
     }
     // Any non-Ctrl-C input clears the last-error banner.
@@ -58,6 +66,52 @@ pub fn handle(state: &mut State, key: KeyEvent) -> Action {
         Screen::Loading | Screen::Browser => handle_browser(state, key),
         Screen::Building | Screen::Watching => handle_running_build(state, key),
         Screen::BuildFinished => handle_finished(state, key),
+        Screen::Logs => handle_logs(state, key),
+    }
+}
+
+/// Keys for the full-screen log viewer (`Screen::Logs`). Esc returns to the
+/// browser; `/` searches within the logs (reusing `Mode::LogSearch`); j/k
+/// scroll; q quits.
+fn handle_logs(state: &mut State, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
+        KeyCode::Esc => {
+            state.log_view_target = None;
+            state.log_search.clear();
+            state.screen = Screen::Browser;
+            Action::Redraw
+        }
+        KeyCode::Char('/') => {
+            state.mode = Mode::LogSearch;
+            state.log_search.clear();
+            Action::Redraw
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.log_scroll_up(1);
+            Action::Redraw
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.log_scroll_down(1);
+            Action::Redraw
+        }
+        KeyCode::PageUp => {
+            state.log_scroll_up(10);
+            Action::Redraw
+        }
+        KeyCode::PageDown => {
+            state.log_scroll_down(10);
+            Action::Redraw
+        }
+        KeyCode::Char('g') => {
+            state.log_scroll_to_top();
+            Action::Redraw
+        }
+        KeyCode::Char('G') => {
+            state.log_scroll_to_bottom();
+            Action::Redraw
+        }
+        _ => Action::Ignore,
     }
 }
 
@@ -66,6 +120,29 @@ fn handle_browser(state: &mut State, key: KeyEvent) -> Action {
         KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
         KeyCode::Enter | KeyCode::Char('b') => Action::StartBuild,
         KeyCode::Char('w') => Action::StartWatch,
+        KeyCode::Char('l') => match state.selected_browser_target() {
+            Some(target) => {
+                state.open_logs(target.clone());
+                Action::ViewLogs(target)
+            }
+            None => {
+                state.last_error = Some("no target to show logs for".into());
+                Action::Redraw
+            }
+        },
+        KeyCode::Char('e') => match state.selected_browser_target() {
+            Some(target) => {
+                // Show the overlay immediately (with a loading state); the
+                // query.explained reply fills it in (ADR-0033).
+                state.explain = None;
+                state.mode = Mode::Explain;
+                Action::Explain(target)
+            }
+            None => {
+                state.last_error = Some("no target to explain".into());
+                Action::Redraw
+            }
+        },
         KeyCode::Char('/') => {
             state.mode = Mode::Search;
             state.filters.search.clear();
@@ -271,6 +348,13 @@ fn handle_finished(state: &mut State, key: KeyEvent) -> Action {
 
 fn handle_help(state: &mut State, _key: KeyEvent) -> Action {
     state.mode = Mode::Normal;
+    Action::Redraw
+}
+
+/// Any key dismisses the explain overlay (ADR-0033).
+fn handle_explain(state: &mut State, _key: KeyEvent) -> Action {
+    state.mode = Mode::Normal;
+    state.explain = None;
     Action::Redraw
 }
 

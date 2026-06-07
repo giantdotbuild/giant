@@ -29,6 +29,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
         Screen::Building | Screen::Watching | Screen::BuildFinished => {
             draw_build_view(frame, area, state)
         }
+        Screen::Logs => draw_logs(frame, area, state),
     }
 
     if state.mode == Mode::Search {
@@ -42,6 +43,9 @@ pub fn draw(frame: &mut Frame, state: &State) {
     }
     if state.mode == Mode::AffectedPrompt {
         draw_affected_prompt(frame, area, state);
+    }
+    if state.mode == Mode::Explain {
+        draw_explain_overlay(frame, area, state);
     }
     if let Some(err) = &state.last_error {
         draw_error_banner(frame, area, err);
@@ -132,11 +136,23 @@ fn draw_browser_header(frame: &mut Frame, area: Rect, state: &State) {
 }
 
 fn draw_catalog_list(frame: &mut Frame, area: Rect, state: &State) {
-    let rows: Vec<Line> = state
-        .filtered_catalog()
+    let catalog = state.filtered_catalog();
+    // `scroll_offset` is the cursor; window so it stays visible and highlight it.
+    let height = area.height as usize;
+    let cursor = state.scroll_offset.min(catalog.len().saturating_sub(1));
+    let start = if cursor >= height {
+        cursor - height + 1
+    } else {
+        0
+    };
+    let rows: Vec<Line> = catalog
         .iter()
-        .skip(state.scroll_offset)
-        .map(|(id, entry)| catalog_row(id, entry))
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(i, (id, entry))| {
+            catalog_row(id, entry, state.cache_status.get(*id).copied(), i == cursor)
+        })
         .collect();
     let body = if rows.is_empty() && !state.filters.search.is_empty() {
         vec![Line::from(Span::styled(
@@ -150,9 +166,27 @@ fn draw_catalog_list(frame: &mut Frame, area: Rect, state: &State) {
     frame.render_widget(para, area);
 }
 
-fn catalog_row<'a>(id: &'a TargetId, entry: &'a CatalogEntry) -> Line<'a> {
-    let dot = Span::styled("  · ", Style::default().fg(Color::DarkGray));
-    let id_span = Span::raw(format!("{:<48}", truncate(id.as_str(), 48)));
+fn catalog_row<'a>(
+    id: &'a TargetId,
+    entry: &'a CatalogEntry,
+    cached: Option<bool>,
+    selected: bool,
+) -> Line<'a> {
+    // Cache state glyph (ADR-0033 query.status): filled green = cached, hollow
+    // yellow = stale, dim dot = not yet known.
+    let (glyph, color) = match cached {
+        Some(true) => ("●", Color::Green),
+        Some(false) => ("○", Color::Yellow),
+        None => ("·", Color::DarkGray),
+    };
+    let caret = if selected { "▸" } else { " " };
+    let dot = Span::styled(format!(" {caret}{glyph} "), Style::default().fg(color));
+    let id_style = if selected {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let id_span = Span::styled(format!("{:<48}", truncate(id.as_str(), 48)), id_style);
     let mut tags: Vec<&str> = entry.tags.iter().map(|s| s.as_str()).collect();
     tags.sort();
     let tags_text = if tags.is_empty() {
@@ -375,13 +409,11 @@ fn target_row<'a>(id: &'a TargetId, v: &'a TargetView, selected: bool) -> Line<'
     Line::from(vec![cursor, icon, id_span, label, dur])
 }
 
-fn draw_recent_logs(frame: &mut Frame, area: Rect, state: &State) {
-    let height = area.height.saturating_sub(2) as usize;
-    let logs = state.selected_target_logs();
-    // Apply the log-pane substring filter (case-insensitive) before
-    // we slice down to the last `height` lines, so the user always
-    // sees matches against the full buffer - not just what happened
-    // to fall into the visible window.
+/// Filter `logs` by the active log search and take the visible window honoring
+/// scroll-back. Returns the visible lines and the filtered count (for titles).
+/// Shared by the build view's log pane and the full-screen log viewer; filtering
+/// happens against the full buffer so a match is found even outside the window.
+fn log_window<'a>(state: &State, logs: &'a [LogLine], height: usize) -> (Vec<&'a LogLine>, usize) {
     let q = state.log_search.to_lowercase();
     let filtered: Vec<&LogLine> = if q.is_empty() {
         logs.iter().collect()
@@ -390,16 +422,66 @@ fn draw_recent_logs(frame: &mut Frame, area: Rect, state: &State) {
             .filter(|l| l.line.to_lowercase().contains(&q))
             .collect()
     };
-    // scroll_back lifts the visible window away from the tail; when
-    // the user pages up they want to hold position even as new lines
-    // arrive. Clamp so an aggressively-scrolled window never falls
-    // off the buffer.
-    let max_back = filtered.len().saturating_sub(height);
+    let count = filtered.len();
+    let max_back = count.saturating_sub(height);
     let back = state.log_scroll_back.min(max_back);
-    let end = filtered.len().saturating_sub(back);
+    let end = count.saturating_sub(back);
     let start = end.saturating_sub(height);
-    let mut lines: Vec<Line> = Vec::with_capacity(height);
-    for l in &filtered[start..end] {
+    (filtered[start..end].to_vec(), count)
+}
+
+/// Full-screen log viewer for one target (`Screen::Logs`), fed by a `logs.get`
+/// replay (ADR-0033). Search reuses `Mode::LogSearch`; j/k scroll; Esc returns.
+fn draw_logs(frame: &mut Frame, area: Rect, state: &State) {
+    let height = area.height.saturating_sub(2) as usize;
+    let logs = state.log_view_logs();
+    let (window, filtered_count) = log_window(state, logs, height);
+    let mut lines: Vec<Line> = Vec::with_capacity(window.len());
+    for l in &window {
+        lines.extend(log_lines(l));
+    }
+    let target = state
+        .log_view_target
+        .as_ref()
+        .map(|t| t.as_str())
+        .unwrap_or("");
+    let title = if state.mode == Mode::LogSearch {
+        format!(
+            " logs · {target} · /{}_ ({filtered_count} of {} lines) ",
+            state.log_search,
+            logs.len()
+        )
+    } else if !state.log_search.is_empty() {
+        format!(
+            " logs · {target} · /{} ({filtered_count} of {} lines) · Esc clears ",
+            state.log_search,
+            logs.len()
+        )
+    } else if logs.is_empty() {
+        format!(" logs · {target} · no captured output · Esc browser ")
+    } else {
+        format!(
+            " logs · {target} · {} lines · Esc browser · / search · q quit ",
+            logs.len()
+        )
+    };
+    let para = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(title),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(para, area);
+}
+
+fn draw_recent_logs(frame: &mut Frame, area: Rect, state: &State) {
+    let height = area.height.saturating_sub(2) as usize;
+    let logs = state.selected_target_logs();
+    let (window, filtered_count) = log_window(state, logs, height);
+    let mut lines: Vec<Line> = Vec::with_capacity(window.len());
+    for l in &window {
         lines.extend(log_lines(l));
     }
     let base_title = match state.selected_build_target() {
@@ -411,14 +493,14 @@ fn draw_recent_logs(frame: &mut Frame, area: Rect, state: &State) {
         format!(
             " logs - /{}_ ({} of {} lines) ",
             state.log_search,
-            filtered.len(),
+            filtered_count,
             logs.len()
         )
     } else if !state.log_search.is_empty() {
         format!(
             " logs - /{} ({} of {} lines) · Esc clears ",
             state.log_search,
-            filtered.len(),
+            filtered_count,
             logs.len()
         )
     } else {
@@ -693,7 +775,7 @@ fn draw_tag_picker(frame: &mut Frame, area: Rect, state: &State) {
 
 fn draw_help_overlay(frame: &mut Frame, area: Rect) {
     let w = 60.min(area.width.saturating_sub(2));
-    let h = 26.min(area.height.saturating_sub(2));
+    let h = 30.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let rect = Rect {
@@ -709,6 +791,9 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("    Enter / b    build the current filter selection"),
         Line::from("    /            search target ids (substring, or"),
         Line::from("                 glob: bin:*, docker:**, etc.)"),
+        Line::from("    j/k          move the selection cursor"),
+        Line::from("    l            view the selected target's logs"),
+        Line::from("    e            explain the selected target's cache key"),
         Line::from("    t            open tag picker (multi-select +/-)"),
         Line::from("    T            toggle test-only filter"),
         Line::from("    Tab / f      cycle status filter (build screens)"),
@@ -735,6 +820,106 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
             .title(" keys ")
             .style(Style::default().fg(Color::White)),
     );
+    frame.render_widget(para, rect);
+}
+
+/// "Why did this run / why cached" overlay (ADR-0033 query.explain). Shows the
+/// cache key, cache state, and what feeds the key. Renders a loading line until
+/// the `query.explained` reply arrives.
+fn draw_explain_overlay(frame: &mut Frame, area: Rect, state: &State) {
+    let w = 76.min(area.width.saturating_sub(2));
+    let h = 28.min(area.height.saturating_sub(2));
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, rect);
+
+    let body_rows = h.saturating_sub(2) as usize;
+    let lines: Vec<Line> = match &state.explain {
+        None => vec![Line::from(""), Line::from("  computing cache key…")],
+        Some(ex) => {
+            let mut v = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!("  {}", ex.target.as_str()),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(format!("  key:   {}", ex.key)),
+                Line::from(Span::styled(
+                    if ex.cached {
+                        "  state: cached (action-cache hit at this key)".to_string()
+                    } else {
+                        "  state: stale (would rebuild)".to_string()
+                    },
+                    Style::default().fg(if ex.cached {
+                        Color::Green
+                    } else {
+                        Color::Yellow
+                    }),
+                )),
+                Line::from(""),
+                Line::from(format!(
+                    "  command: {}",
+                    truncate(&ex.command, w as usize - 12)
+                )),
+                Line::from(format!(
+                    "  cwd:     {}",
+                    if ex.cwd.is_empty() {
+                        "(workspace root)"
+                    } else {
+                        &ex.cwd
+                    }
+                )),
+                Line::from(""),
+                Line::from(format!("  file inputs ({}):", ex.file_inputs.len())),
+            ];
+            for f in &ex.file_inputs {
+                v.push(Line::from(Span::styled(
+                    format!(
+                        "    {}  {}",
+                        &f.hash.chars().take(12).collect::<String>(),
+                        f.path
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            if !ex.deps.is_empty() {
+                v.push(Line::from(""));
+                v.push(Line::from(format!("  deps ({}):", ex.deps.len())));
+                for d in &ex.deps {
+                    v.push(Line::from(Span::styled(
+                        format!("    {}", d.id.as_str()),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+            if !ex.env.is_empty() {
+                v.push(Line::from(""));
+                v.push(Line::from(format!("  env ({}):", ex.env.len())));
+                for e in &ex.env {
+                    let suffix = if e.built_in { "  (built-in)" } else { "" };
+                    v.push(Line::from(Span::styled(
+                        format!("    {}={}{}", e.key, truncate(&e.value, 40), suffix),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+            // Trim to the box so a huge input list does not overflow.
+            v.truncate(body_rows);
+            v
+        }
+    };
+    let para = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" explain · any key dismisses ")
+                .style(Style::default().fg(Color::White)),
+        )
+        .wrap(Wrap { trim: false });
     frame.render_widget(para, rect);
 }
 

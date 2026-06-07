@@ -226,6 +226,23 @@ async fn run(initial_patterns: &[String], config: Option<&std::path::Path>) -> R
                                 command_id: Some(format!("c_{}", new_command_seq())),
                             }).await;
                         }
+                        Action::ViewLogs(target) => {
+                            // State already switched to the log viewer; fetch
+                            // the target's persisted logs (ADR-0033 logs.get).
+                            let _ = cmd_tx.send(Command::LogsGet {
+                                command_id: Some(format!("c_{}", new_command_seq())),
+                                target,
+                                follow: false,
+                            }).await;
+                        }
+                        Action::Explain(target) => {
+                            // Overlay already open; fetch the cache-key
+                            // breakdown (ADR-0033 query.explain).
+                            let _ = cmd_tx.send(Command::QueryExplain {
+                                command_id: Some(format!("c_{}", new_command_seq())),
+                                target,
+                            }).await;
+                        }
                         Action::Ignore => {}
                     }
                 }
@@ -244,7 +261,23 @@ async fn run(initial_patterns: &[String], config: Option<&std::path::Path>) -> R
                                 | Event::CommandError { .. }
                                 | Event::CatalogReady
                         );
+                        // Cache state can change when the catalog (re)loads or
+                        // a build completes; ask the engine to recompute it
+                        // (ADR-0033 query.status). The reply lands as a
+                        // QueryStatus event and updates the browser column.
+                        let refresh_status = matches!(
+                            ev,
+                            Event::EngineReady | Event::CatalogReady | Event::BuildFinished { .. }
+                        );
                         state.apply(ev);
+                        if refresh_status {
+                            let _ = cmd_tx
+                                .send(Command::QueryStatus {
+                                    command_id: Some(format!("c_{}", new_command_seq())),
+                                    targets: vec![],
+                                })
+                                .await;
+                        }
                         if significant {
                             terminal.draw(|f| ui::draw(f, &state))?;
                         }
