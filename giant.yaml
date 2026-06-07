@@ -95,12 +95,15 @@ tasks:
     needs: ["check", "release-build", "docs"]
 
   bin:
-    command: "echo refreshed bin/giant, bin/giant-task, and bin/giant-tui"
-    description: "build the binaries and install them into ./bin"
+    command: "echo refreshed ./bin with the giant suite"
+    description: "build every binary and install it into ./bin"
     deps:
       - "//crates/giant:giant"
       - "//crates/giant-task:giant-task"
       - "//crates/giant-tui:giant-tui"
+      - "//crates/giant-gen:giant-gen"
+      - "//crates/giant-graph:giant-graph"
+      - "//crates/giant-sandbox:giant-sandbox"
 
   docs:
     command: "echo docs built to docs-site/dist/"

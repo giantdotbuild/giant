@@ -1,0 +1,17 @@
+targets:
+- name: giant-gen
+  inputs:
+  - src/**/*.rs
+  - Cargo.toml
+  - //Cargo.toml
+  - //Cargo.lock
+  outputs:
+  - //bin/giant-gen
+  deps:
+  - //:devenv
+  command: cargo build --release -p giant-gen --bin giant-gen && install -m 0755 target/release/giant-gen bin/giant-gen
+  cwd: //
+  timeout_secs: 600
+  tags:
+  - bin
+  - rust

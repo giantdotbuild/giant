@@ -1,0 +1,17 @@
+targets:
+- name: giant-graph
+  inputs:
+  - src/**/*.rs
+  - Cargo.toml
+  - //Cargo.toml
+  - //Cargo.lock
+  outputs:
+  - //bin/giant-graph
+  deps:
+  - //:devenv
+  command: cargo build --release -p giant-graph --bin giant-graph && install -m 0755 target/release/giant-graph bin/giant-graph
+  cwd: //
+  timeout_secs: 600
+  tags:
+  - bin
+  - rust

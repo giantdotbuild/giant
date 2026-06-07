@@ -1,0 +1,17 @@
+targets:
+- name: giant-tui
+  inputs:
+  - src/**/*.rs
+  - Cargo.toml
+  - //Cargo.toml
+  - //Cargo.lock
+  outputs:
+  - //bin/giant-tui
+  deps:
+  - //:devenv
+  command: cargo build --release -p giant-tui --bin giant-tui && install -m 0755 target/release/giant-tui bin/giant-tui
+  cwd: //
+  timeout_secs: 600
+  tags:
+  - bin
+  - rust

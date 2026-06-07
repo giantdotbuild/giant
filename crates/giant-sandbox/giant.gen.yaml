@@ -1,0 +1,17 @@
+targets:
+- name: giant-sandbox
+  inputs:
+  - src/**/*.rs
+  - Cargo.toml
+  - //Cargo.toml
+  - //Cargo.lock
+  outputs:
+  - //bin/giant-sandbox
+  deps:
+  - //:devenv
+  command: cargo build --release -p giant-sandbox --bin giant-sandbox && install -m 0755 target/release/giant-sandbox bin/giant-sandbox
+  cwd: //
+  timeout_secs: 600
+  tags:
+  - bin
+  - rust
