@@ -234,6 +234,47 @@ pub enum Event {
         command_id: Option<String>,
         target: TargetId,
     },
+
+    /// Reply to `query.explain` (ADR-0033): what feeds a target's cache key,
+    /// and whether it is currently cached. The structured form of `giant
+    /// explain`, for an inline "why did this run / why cached" view.
+    #[serde(rename = "query.explained")]
+    QueryExplained {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+        target: TargetId,
+        key: String,
+        cached: bool,
+        command: String,
+        cwd: String,
+        file_inputs: Vec<ExplainInput>,
+        deps: Vec<ExplainDep>,
+        env: Vec<ExplainEnv>,
+    },
+}
+
+/// A file input contributing to a target's cache key (`query.explained`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplainInput {
+    pub path: String,
+    pub hash: String,
+    pub size: u64,
+}
+
+/// A dep's output hash contributing to a target's cache key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplainDep {
+    pub id: TargetId,
+    pub output_hash: String,
+}
+
+/// An environment variable contributing to a target's cache key. `built_in`
+/// marks engine-provided vars (vs the target's declared `env`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplainEnv {
+    pub key: String,
+    pub value: String,
+    pub built_in: bool,
 }
 
 /// One target's cache state in a `query.status` reply.
@@ -416,6 +457,50 @@ mod tests {
             serde_json::from_str::<Event>(&s2).unwrap(),
             Event::LogsEnd { .. }
         ));
+    }
+
+    #[test]
+    fn query_explained_round_trips() {
+        let ev = Event::QueryExplained {
+            command_id: Some("e1".into()),
+            target: TargetId::new("//:a"),
+            key: "7a3f".into(),
+            cached: true,
+            command: "go build".into(),
+            cwd: "".into(),
+            file_inputs: vec![ExplainInput {
+                path: "src/main.go".into(),
+                hash: "abcd".into(),
+                size: 12,
+            }],
+            deps: vec![ExplainDep {
+                id: TargetId::new("//:lib"),
+                output_hash: "ef01".into(),
+            }],
+            env: vec![ExplainEnv {
+                key: "PATH".into(),
+                value: "/bin".into(),
+                built_in: true,
+            }],
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"t\":\"query.explained\""));
+        assert!(s.contains("\"cached\":true"));
+        match serde_json::from_str::<Event>(&s).unwrap() {
+            Event::QueryExplained {
+                command,
+                file_inputs,
+                deps,
+                env,
+                ..
+            } => {
+                assert_eq!(command, "go build");
+                assert_eq!(file_inputs.len(), 1);
+                assert_eq!(deps[0].id.as_str(), "//:lib");
+                assert!(env[0].built_in);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

@@ -265,6 +265,67 @@ targets:
 }
 
 #[test]
+fn query_explain_returns_breakdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(ws.join("in.txt"), "hi\n").unwrap();
+    write_config(
+        ws,
+        r#"
+workspace: { name: e }
+targets:
+  - name: "a"
+    command: "cat in.txt"
+    inputs: ["in.txt"]
+    outputs: ["o"]
+"#,
+    );
+
+    let mut child = Command::new(giant_bin())
+        .args(["session", "--events", "ndjson"])
+        .current_dir(ws)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn giant session");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+
+    read_catalog_until(&mut out, |e| matches!(e, Event::EngineReady));
+
+    writeln!(
+        stdin,
+        r#"{{"c":"query.explain","command_id":"e1","target":"//:a"}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let reply = read_until(&mut out, |e| {
+        matches!(e, Event::QueryExplained { command_id, .. } if command_id.as_deref() == Some("e1"))
+    })
+    .expect("query.explained reply");
+    if let Event::QueryExplained {
+        command,
+        cached,
+        key,
+        file_inputs,
+        ..
+    } = reply
+    {
+        assert_eq!(command, "cat in.txt");
+        assert!(!cached, "never built → not cached");
+        assert!(!key.is_empty());
+        assert!(
+            file_inputs.iter().any(|f| f.path == "in.txt"),
+            "in.txt should feed the key; got {file_inputs:?}"
+        );
+    }
+
+    shutdown(child, stdin);
+}
+
+#[test]
 fn editing_giant_yaml_auto_reloads_via_the_watcher() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();

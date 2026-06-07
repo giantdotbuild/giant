@@ -136,6 +136,16 @@ pub enum Command {
         #[serde(default)]
         follow: bool,
     },
+
+    /// Read query: what feeds a target's cache key, and whether it is cached
+    /// (ADR-0033). Answered with `query.explained` - the structured form of
+    /// `giant explain`.
+    #[serde(rename = "query.explain")]
+    QueryExplain {
+        #[serde(default)]
+        command_id: Option<String>,
+        target: TargetId,
+    },
 }
 
 impl Command {
@@ -153,7 +163,8 @@ impl Command {
             | Command::WatchSubscribe { command_id, .. }
             | Command::WatchUnsubscribe { command_id, .. }
             | Command::QueryStatus { command_id, .. }
-            | Command::LogsGet { command_id, .. } => command_id.as_deref(),
+            | Command::LogsGet { command_id, .. }
+            | Command::QueryExplain { command_id, .. } => command_id.as_deref(),
         }
     }
 }
@@ -290,6 +301,20 @@ mod tests {
         let cmd: Command = serde_json::from_str(r#"{"c":"logs.get","target":"//:a"}"#).unwrap();
         match cmd {
             Command::LogsGet { follow, .. } => assert!(!follow),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn query_explain_parses() {
+        let cmd: Command =
+            serde_json::from_str(r#"{"c":"query.explain","command_id":"e1","target":"//:a"}"#)
+                .unwrap();
+        match cmd {
+            Command::QueryExplain { command_id, target } => {
+                assert_eq!(command_id.as_deref(), Some("e1"));
+                assert_eq!(target.as_str(), "//:a");
+            }
             _ => panic!("wrong variant"),
         }
     }

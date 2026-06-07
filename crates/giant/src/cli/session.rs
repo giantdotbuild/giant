@@ -19,7 +19,10 @@ use crate::cache::LocalCache;
 use crate::cli::prep;
 use crate::cli::{GlobalFlags, SilentExit};
 use crate::commands::Command;
-use crate::events::{Event, EventSender, LogStream, ShutdownReason, TargetCounts, TargetStatus};
+use crate::events::{
+    Event, EventSender, ExplainDep, ExplainEnv, ExplainInput, LogStream, ShutdownReason,
+    TargetCounts, TargetStatus,
+};
 use crate::executor::{BuildJob, build};
 use crate::graph::BuildGraph;
 use crate::model::TargetId;
@@ -41,7 +44,7 @@ pub struct SessionArgs {
 
 /// Read/query capabilities this engine advertises in `engine.hello`
 /// (ADR-0033). Extend as queries are added.
-const CAPABILITIES: &[&str] = &["query.status", "logs.get"];
+const CAPABILITIES: &[&str] = &["query.status", "logs.get", "query.explain"];
 
 pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<()> {
     if args.events != "ndjson" {
@@ -565,8 +568,86 @@ impl SessionState {
             } => {
                 self.logs_get(command_id, target, follow).await;
             }
+            Command::QueryExplain { command_id, target } => {
+                self.query_explain(command_id, target).await;
+            }
         }
         false
+    }
+
+    /// Answer `query.explain` (ADR-0033): the structured cache-key breakdown for
+    /// a target, plus whether it is currently cached. Reuses the same
+    /// `breakdown_for_target` walk `giant explain` uses.
+    async fn query_explain(&self, command_id: Option<String>, target: TargetId) {
+        if let Some(reason) = self.validate_targets(std::slice::from_ref(&target)) {
+            self.reject(command_id, reason).await;
+            return;
+        }
+        let mut memo = std::collections::BTreeMap::new();
+        let (key, breakdown, _) = match super::explain::breakdown_for_target(
+            &self.graph,
+            &self.cache,
+            &self.workspace_root,
+            &target,
+            &mut memo,
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                self.reject(command_id, format!("cannot compute cache key: {e:#}"))
+                    .await;
+                return;
+            }
+        };
+        let cached = self.cache.get_ac(&key).await.ok().flatten().is_some();
+
+        let file_inputs = breakdown
+            .file_inputs
+            .iter()
+            .map(|f| ExplainInput {
+                path: f.rel_path.clone(),
+                hash: f.content_hash.to_hex(),
+                size: f.size,
+            })
+            .collect();
+        let deps = breakdown
+            .dep_outputs
+            .iter()
+            .map(|(id, h)| ExplainDep {
+                id: id.clone(),
+                output_hash: h.to_hex(),
+            })
+            .collect();
+        let mut env: Vec<ExplainEnv> = breakdown
+            .user_env
+            .iter()
+            .map(|(k, v)| ExplainEnv {
+                key: k.clone(),
+                value: v.clone(),
+                built_in: false,
+            })
+            .collect();
+        env.extend(breakdown.built_in_env.iter().map(|(k, v)| ExplainEnv {
+            key: k.clone(),
+            value: v.clone(),
+            built_in: true,
+        }));
+
+        let _ = self
+            .event_tx
+            .send(Event::QueryExplained {
+                command_id,
+                target,
+                key: key.to_hex(),
+                cached,
+                command: breakdown.command,
+                cwd: breakdown.cwd,
+                file_inputs,
+                deps,
+                env,
+            })
+            .await;
     }
 
     /// Answer `logs.get` (ADR-0033): replay a target's captured logs from its

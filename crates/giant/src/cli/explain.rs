@@ -44,16 +44,28 @@ pub async fn execute(args: ExplainArgs, global: &super::GlobalFlags) -> anyhow::
     }
 
     let mut memo: BTreeMap<TargetId, (CacheKey, Option<ContentHash>)> = BTreeMap::new();
-    let (key, breakdown, output_hash) =
-        breakdown_for_target(&prepared, &target_id, &mut memo).await?;
+    let (key, breakdown, output_hash) = breakdown_for_target(
+        &prepared.graph,
+        &prepared.cache,
+        &prepared.workspace_root,
+        &target_id,
+        &mut memo,
+    )
+    .await?;
 
     if let Some(other) = &args.diff {
         let other_id = TargetId::new(other);
         if prepared.graph.get(&other_id).is_none() {
             anyhow::bail!("target {:?} not found in graph", other);
         }
-        let (other_key, other_bd, _) =
-            breakdown_for_target(&prepared, &other_id, &mut memo).await?;
+        let (other_key, other_bd, _) = breakdown_for_target(
+            &prepared.graph,
+            &prepared.cache,
+            &prepared.workspace_root,
+            &other_id,
+            &mut memo,
+        )
+        .await?;
         print_diff(
             (&target_id, key, &breakdown),
             (&other_id, other_key, &other_bd),
@@ -66,37 +78,28 @@ pub async fn execute(args: ExplainArgs, global: &super::GlobalFlags) -> anyhow::
     Ok(())
 }
 
-async fn breakdown_for_target(
-    prepared: &prep::Prepared,
+/// Compute a target's (cache_key, breakdown, own output hash). Component-based
+/// so the session's `query.explain` handler can reuse it (ADR-0033), the same
+/// way it reuses `walk_target`.
+pub(super) async fn breakdown_for_target(
+    graph: &BuildGraph,
+    cache: &LocalCache,
+    workspace_root: &AbsPath,
     target_id: &TargetId,
     memo: &mut BTreeMap<TargetId, (CacheKey, Option<ContentHash>)>,
 ) -> anyhow::Result<(CacheKey, CacheKeyBreakdown, Option<ContentHash>)> {
-    let (key, output_hash) = walk_target(
-        &prepared.graph,
-        &prepared.cache,
-        &prepared.workspace_root,
-        target_id,
-        memo,
-    )
-    .await?;
+    let (key, output_hash) = walk_target(graph, cache, workspace_root, target_id, memo).await?;
 
-    let dep_outputs: BTreeMap<TargetId, ContentHash> = prepared
-        .graph
+    let dep_outputs: BTreeMap<TargetId, ContentHash> = graph
         .direct_deps(target_id)
         .into_iter()
         .filter_map(|d| memo.get(&d).and_then(|(_, oh)| oh.map(|h| (d, h))))
         .collect();
-    let spec = prepared
-        .graph
+    let spec = graph
         .get(target_id)
         .ok_or_else(|| anyhow::anyhow!("target {target_id:?} missing"))?;
-    let (verify_key, breakdown) = compute_cache_key_with_breakdown(
-        spec,
-        &prepared.workspace_root,
-        &prepared.cache,
-        dep_outputs,
-    )
-    .await?;
+    let (verify_key, breakdown) =
+        compute_cache_key_with_breakdown(spec, workspace_root, cache, dep_outputs).await?;
     debug_assert_eq!(key, verify_key, "two paths for the same key disagreed");
     Ok((key, breakdown, output_hash))
 }
