@@ -1,0 +1,16 @@
+[package]
+name = "giant-graph"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# The engine as a library, for config scan + graph construction only. The
+# graph is fully static on disk (ADR-0032), so this porcelain needs no engine
+# execution, cache, or protocol - just the loader and BuildGraph.
+giant = { path = "../giant" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

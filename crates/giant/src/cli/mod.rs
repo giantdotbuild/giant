@@ -16,7 +16,6 @@ mod completions;
 pub(crate) mod dynamic;
 mod explain;
 mod external;
-mod graph;
 mod logs;
 pub(crate) mod prep;
 mod session;
@@ -85,9 +84,6 @@ pub enum Commands {
     /// invocation of a target - answer "what did the build say?"
     /// without busting the cache.
     Logs(logs::LogsArgs),
-
-    /// List targets, or show a target's dep tree.
-    Graph(graph::GraphArgs),
 
     /// Clear the local cache.
     Clean(clean::CleanArgs),
@@ -185,7 +181,6 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Affected(args) => affected::execute(args, &global).await,
         Commands::Explain(args) => explain::execute(args, &global).await,
         Commands::Logs(args) => logs::execute(args, &global).await,
-        Commands::Graph(args) => graph::execute(args, &global).await,
         Commands::Clean(args) => clean::execute(args, &global).await,
         Commands::Session(args) => session::execute(args, &global).await,
         Commands::Completions(args) => completions::execute(args),
@@ -347,7 +342,6 @@ const BUILTIN_SUBCOMMANDS: &[&str] = &[
     "test",
     "affected",
     "explain",
-    "graph",
     "clean",
     "watch",
     "session",

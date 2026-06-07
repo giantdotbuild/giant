@@ -1269,6 +1269,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "giant-graph"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "giant",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "giant-sandbox"
 version = "0.1.0"
 dependencies = [

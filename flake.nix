@@ -111,6 +111,7 @@
         giant-task = mkBin { name = "giant-task"; };
         giant-tui = mkBin { name = "giant-tui"; };
         giant-sandbox = mkBin { name = "giant-sandbox"; };
+        giant-graph = mkBin { name = "giant-graph"; };
 
         # giant-gen ships the official Starlark std collection as files (not
         # embedded in the binary; ADR-0031). The library lands in
@@ -162,9 +163,10 @@
             giant-tui
             giant-gen
             giant-sandbox
+            giant-graph
           ];
           meta = {
-            description = "Giant + every first-party porcelain (task, tui, gen, sandbox)";
+            description = "Giant + every first-party porcelain (task, tui, gen, sandbox, graph)";
             mainProgram = "giant";
           };
         };
@@ -177,6 +179,7 @@
             giant-tui
             giant-gen
             giant-sandbox
+            giant-graph
             giant-suite
             ;
           default = giant-suite;
@@ -188,6 +191,7 @@
           giant-tui = flake-utils.lib.mkApp { drv = giant-tui; };
           giant-gen = flake-utils.lib.mkApp { drv = giant-gen; };
           giant-sandbox = flake-utils.lib.mkApp { drv = giant-sandbox; };
+          giant-graph = flake-utils.lib.mkApp { drv = giant-graph; };
           default = flake-utils.lib.mkApp { drv = giant; };
         };
 
