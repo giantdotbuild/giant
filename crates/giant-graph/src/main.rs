@@ -9,6 +9,7 @@
 
 mod render;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
@@ -42,6 +43,11 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Format::Text)]
     format: Format,
 
+    /// When to colorize text output. `auto` colors only when writing to a
+    /// terminal (and `NO_COLOR` is unset).
+    #[arg(long, value_enum, default_value_t = ColorWhen::Auto)]
+    color: ColorWhen,
+
     /// Path to giant.yaml (defaults to walking up from the current directory).
     #[arg(long)]
     config: Option<PathBuf>,
@@ -53,6 +59,25 @@ enum Format {
     Dot,
     Mermaid,
     Json,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ColorWhen {
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorWhen {
+    fn enabled(self) -> bool {
+        match self {
+            ColorWhen::Always => true,
+            ColorWhen::Never => false,
+            ColorWhen::Auto => {
+                std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+            }
+        }
+    }
 }
 
 fn main() {
@@ -82,11 +107,12 @@ fn real_main() -> Result<()> {
         Direction::Deps
     };
 
+    let pal = render::Palette::new(cli.color.enabled());
     let out = match cli.format {
         Format::Text => match (&root, cli.compact) {
-            (None, _) => render::list(&graph),
-            (Some(r), false) => render::tree(&graph, r, dir, cli.depth),
-            (Some(r), true) => render::compact(&graph, r, dir),
+            (None, _) => render::list(&graph, &pal),
+            (Some(r), false) => render::tree(&graph, r, dir, cli.depth, &pal),
+            (Some(r), true) => render::compact(&graph, r, dir, &pal),
         },
         Format::Dot => render::dot(&graph, root.as_ref(), dir),
         Format::Mermaid => render::mermaid(&graph, root.as_ref(), dir),

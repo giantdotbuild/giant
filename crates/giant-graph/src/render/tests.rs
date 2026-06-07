@@ -3,7 +3,12 @@ use std::fs;
 use giant::{BuildGraph, Config, TargetId};
 use tempfile::TempDir;
 
-use super::{Direction, compact, dot, json, list, mermaid, tree};
+use super::{Direction, Palette, compact, dot, json, list, mermaid, tree};
+
+/// Color-off palette so assertions match plain text.
+fn plain() -> Palette {
+    Palette::new(false)
+}
 
 /// Build the static graph from a workspace `giant.yaml` (the real loader path).
 fn graph(yaml: &str) -> BuildGraph {
@@ -48,7 +53,7 @@ fn id(s: &str) -> TargetId {
 #[test]
 fn list_shows_all_targets_with_deps_and_count() {
     let g = graph(DIAMOND);
-    let out = list(&g);
+    let out = list(&g, &plain());
     assert!(out.contains("//:app"));
     assert!(out.contains("→ //:libA, //:libB"), "got:\n{out}");
     assert!(out.contains("//:base\n"), "leaf has no arrow; got:\n{out}");
@@ -58,10 +63,14 @@ fn list_shows_all_targets_with_deps_and_count() {
 #[test]
 fn tree_expands_and_marks_repeats_seen() {
     let g = graph(DIAMOND);
-    let out = tree(&g, &id("//:app"), Direction::Deps, None);
+    let out = tree(&g, &id("//:app"), Direction::Deps, None, &plain());
     assert!(out.starts_with("//:app\n"));
-    assert!(out.contains("  //:libA"));
-    assert!(out.contains("    //:base"));
+    // Box-drawing connectors for children, deeper nesting carries the │ rail.
+    assert!(
+        out.contains("├─ //:libA") || out.contains("└─ //:libA"),
+        "got:\n{out}"
+    );
+    assert!(out.contains("//:base"), "got:\n{out}");
     // base is shared by libA and libB; the second occurrence is not re-expanded.
     assert!(
         out.contains("(seen)"),
@@ -70,9 +79,25 @@ fn tree_expands_and_marks_repeats_seen() {
 }
 
 #[test]
+fn tree_colors_when_palette_on() {
+    let g = graph(DIAMOND);
+    let out = tree(
+        &g,
+        &id("//:app"),
+        Direction::Deps,
+        None,
+        &Palette::new(true),
+    );
+    assert!(
+        out.contains("\x1b["),
+        "colored output carries SGR codes; got:\n{out}"
+    );
+}
+
+#[test]
 fn tree_depth_limits_levels() {
     let g = graph(DIAMOND);
-    let out = tree(&g, &id("//:app"), Direction::Deps, Some(1));
+    let out = tree(&g, &id("//:app"), Direction::Deps, Some(1), &plain());
     assert!(out.contains("//:libA") && out.contains("//:libB"));
     assert!(
         !out.contains("//:base"),
@@ -83,7 +108,7 @@ fn tree_depth_limits_levels() {
 #[test]
 fn compact_lists_closure_once() {
     let g = graph(DIAMOND);
-    let out = compact(&g, &id("//:app"), Direction::Deps);
+    let out = compact(&g, &id("//:app"), Direction::Deps, &plain());
     // base gets exactly one node line (no repeated subtree); it still appears
     // in libA's and libB's dep lists.
     let base_node_lines = out.lines().filter(|l| l.trim() == "//:base").count();
@@ -94,7 +119,7 @@ fn compact_lists_closure_once() {
 #[test]
 fn reverse_walks_downstream() {
     let g = graph(DIAMOND);
-    let out = tree(&g, &id("//:base"), Direction::Rdeps, None);
+    let out = tree(&g, &id("//:base"), Direction::Rdeps, None, &plain());
     // base's consumers: libA, libB, and transitively app.
     assert!(
         out.contains("//:libA") && out.contains("//:app"),
