@@ -53,118 +53,9 @@ pub struct Config {
     #[serde(default)]
     pub sandbox: SandboxConfig,
 
-    /// How `giant <name>` routes when `<name>` is neither a built-in nor
-    /// a `giant-<name>` binary on PATH. See ADR-0021. Core stays
-    /// decoupled from giant-task: it reads this table and execs whatever
-    /// binary it names. Defaults to `* -> giant-task`.
-    #[serde(default)]
-    pub dispatch: DispatchConfig,
-
     #[cfg(feature = "remote")]
     #[serde(default)]
     pub remote: RemoteConfig,
-}
-
-/// Routing for unknown subcommands (ADR-0021). `unknown` is either a
-/// single catch-all binary or an ordered list of `match -> binary` rules.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DispatchConfig {
-    #[serde(default = "default_unknown_route")]
-    pub unknown: UnknownRoute,
-}
-
-impl Default for DispatchConfig {
-    fn default() -> Self {
-        Self {
-            unknown: default_unknown_route(),
-        }
-    }
-}
-
-/// The `dispatch.unknown` value: a bare binary name (sugar for a single
-/// `* -> name` rule) or an ordered, first-match-wins rule list.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum UnknownRoute {
-    One(String),
-    Rules(Vec<Route>),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Route {
-    /// Glob matched against the subcommand name.
-    #[serde(rename = "match")]
-    pub pattern: String,
-    /// Binary to exec (resolved on PATH), invoked as `<to> <name> <args>`.
-    pub to: String,
-}
-
-fn default_unknown_route() -> UnknownRoute {
-    UnknownRoute::One("giant-task".into())
-}
-
-impl DispatchConfig {
-    /// The binary that handles `name`: the `to` of the first rule whose
-    /// glob matches. The string form is one `* -> binary` rule, so it
-    /// always matches. A rule list returns `None` when no rule matches -
-    /// the caller emits the "no such subcommand" error.
-    pub fn route(&self, name: &str) -> Option<&str> {
-        match &self.unknown {
-            UnknownRoute::One(bin) => Some(bin.as_str()),
-            UnknownRoute::Rules(rules) => rules
-                .iter()
-                .find(|r| {
-                    glob::Pattern::new(&r.pattern)
-                        .map(|p| p.matches(name))
-                        .unwrap_or(false)
-                })
-                .map(|r| r.to.as_str()),
-        }
-    }
-}
-
-/// Load just the `dispatch:` table from the nearest config, tolerant of
-/// everything else (ADR-0021: degrade, don't fail). Walks up from
-/// `start_dir` for `giant.yaml`/`giant.yml`/`giant.json`, honoring the
-/// `GIANT_CONFIG` env var first. Any failure - no config, parse error -
-/// yields the default table (`* -> giant-task`), because the user is
-/// running a subcommand and should still reach the catch-all.
-pub fn load_dispatch(start_dir: &Path) -> DispatchConfig {
-    // Only `dispatch:` is read; every other top-level field is ignored.
-    #[derive(Deserialize, Default)]
-    struct DispatchOnly {
-        #[serde(default)]
-        dispatch: DispatchConfig,
-    }
-
-    let path = std::env::var_os("GIANT_CONFIG")
-        .map(PathBuf::from)
-        .filter(|p| p.is_file())
-        .or_else(|| find_config_upward(start_dir));
-    let Some(path) = path else {
-        return DispatchConfig::default();
-    };
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return DispatchConfig::default();
-    };
-    let parsed: Option<DispatchOnly> = match path.extension().and_then(|e| e.to_str()) {
-        Some("json") => serde_json::from_str(&raw).ok(),
-        _ => serde_yaml_ng::from_str(&raw).ok(),
-    };
-    parsed.map(|d| d.dispatch).unwrap_or_default()
-}
-
-/// Walk up from `start_dir` looking for a config file. Mirrors the
-/// finder the build path uses.
-fn find_config_upward(start_dir: &Path) -> Option<PathBuf> {
-    let mut dir = Some(start_dir);
-    while let Some(d) = dir {
-        if let Some(found) = find_config_in_dir(d) {
-            return Some(found);
-        }
-        dir = d.parent();
-    }
-    None
 }
 
 /// Workspace-local engine state. Distinct from `cache.dir` (which can
@@ -938,15 +829,6 @@ workspace: { name: p }
         assert!(msg.contains("schema_version 999"), "got: {msg}");
     }
 
-    // --- dispatch routing (ADR-0021) ---
-
-    #[test]
-    fn dispatch_default_routes_to_giant_task() {
-        let d = DispatchConfig::default();
-        assert_eq!(d.route("deploy"), Some("giant-task"));
-        assert_eq!(d.route("anything-at-all"), Some("giant-task"));
-    }
-
     #[test]
     fn sandbox_config_parses_and_defaults_empty() {
         let cfg: Config = serde_yaml_ng::from_str("workspace: { name: p }\n").unwrap();
@@ -967,58 +849,6 @@ sandbox:
         assert_eq!(cfg.sandbox.roots, vec!["/nix/store"]);
         assert_eq!(cfg.sandbox.rw, vec!["~/.cache/go-build"]);
         assert_eq!(cfg.sandbox.env, vec!["NIX_*", "GOPATH"]);
-    }
-
-    #[test]
-    fn dispatch_string_form_routes_everything_there() {
-        let cfg: Config = serde_yaml_ng::from_str(
-            "workspace: { name: p }\ndispatch:\n  unknown: \"giant-other\"\n",
-        )
-        .unwrap();
-        assert_eq!(cfg.dispatch.route("foo"), Some("giant-other"));
-    }
-
-    #[test]
-    fn dispatch_rules_first_match_wins_and_can_miss() {
-        let cfg: Config = serde_yaml_ng::from_str(
-            r#"
-workspace: { name: p }
-dispatch:
-  unknown:
-    - { match: "db:*", to: "giant-dbtool" }
-    - { match: "deploy", to: "giant-deploy" }
-"#,
-        )
-        .unwrap();
-        assert_eq!(cfg.dispatch.route("db:migrate"), Some("giant-dbtool"));
-        assert_eq!(cfg.dispatch.route("deploy"), Some("giant-deploy"));
-        // No `*` rule, so an unmatched name falls through to None.
-        assert_eq!(cfg.dispatch.route("test-thing"), None);
-    }
-
-    #[test]
-    fn load_dispatch_reads_table_from_workspace() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("giant.yaml"),
-            // A full-ish config: load_dispatch ignores everything but `dispatch:`.
-            "workspace: { name: p }\ntargets: []\ndispatch:\n  unknown: \"giant-other\"\n",
-        )
-        .unwrap();
-        let d = load_dispatch(dir.path());
-        assert_eq!(d.route("foo"), Some("giant-other"));
-    }
-
-    #[test]
-    fn load_dispatch_degrades_to_default_when_absent_or_malformed() {
-        // No config anywhere up the tree → default route.
-        let empty = tempfile::tempdir().unwrap();
-        assert_eq!(load_dispatch(empty.path()).route("x"), Some("giant-task"));
-
-        // Malformed YAML → default route, never a hard error.
-        let bad = tempfile::tempdir().unwrap();
-        std::fs::write(bad.path().join("giant.yaml"), "this: : : not yaml\n").unwrap();
-        assert_eq!(load_dispatch(bad.path()).route("x"), Some("giant-task"));
     }
 
     // --- scan + merge + package-relative paths (TDD-0001, M2) ---

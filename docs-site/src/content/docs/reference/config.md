@@ -61,8 +61,8 @@ resolves against) and is the only file that may carry the workspace-global
 sections - `workspace`, `cache`, `remote` - plus the porcelain-owned
 `tasks:` / `services:` blocks. A **nested package file carries only
 `targets:`**; putting a root-only section (`workspace`, `cache`, `remote`,
-`tasks`, `services`) in a package file is a loud error, not a silent
-no-op.
+`tasks`, `services`) in a package file fails the config load loudly; it is
+never silently ignored.
 
 ```yaml
 # crates/giant/giant.yaml  →  package //crates/giant
@@ -162,33 +162,6 @@ Root file only.
 | `tls.skip_verify` | `false` | If true, skip TLS cert verification. Don't use in production. |
 | `skip_head` | `false` | Skip the HEAD existence check before upload. |
 | `max_blob_size_mb` | `500` | Blobs larger than this (in MB) are not uploaded. |
-
-## `dispatch`
-
-How `giant <name>` routes when `<name>` is neither a built-in subcommand
-nor a `giant-<name>` binary on PATH. Core reads this table and execs the
-binary it names - it never learns what a task is. The default routes
-everything to `giant-task`, so `giant <task>` works out of the box.
-
-```yaml
-# Shorthand: a single catch-all binary (the default).
-dispatch:
-  unknown: "giant-task"
-```
-
-```yaml
-# Full form: ordered match → binary rules, first match wins.
-dispatch:
-  unknown:
-    - { match: "db:*", to: "giant-dbtool" }   # giant db:migrate → giant-dbtool db:migrate …
-    - { match: "*",    to: "giant-task" }      # everything else → giant-task
-```
-
-`match` is a glob over the subcommand name; the routed binary is exec'd
-as `<to> <name> <args…>` with everything passed through. An explicit
-`giant-<name>` binary on PATH still wins over the table. With no
-`dispatch:` (or a missing/invalid config), routing falls back to the
-default `* → giant-task`. See ADR-0021.
 
 ## `targets`
 

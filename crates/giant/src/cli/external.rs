@@ -1,12 +1,11 @@
 //! Porcelain dispatch - when `giant <name>` isn't a built-in
-//! subcommand, look for `giant-<name>` on PATH and exec it (ADR-0010).
-//! If there's no such binary, consult the configurable dispatch routing
-//! table and exec whatever binary it names (ADR-0021); the default route
-//! is `* -> giant-task`, so bare-name tasks work out of the box. Core
-//! never learns what a task is - it just routes.
+//! subcommand, look for a `giant-<name>` binary (beside the giant
+//! binary first, then on PATH) and exec it. A name with no matching
+//! binary is an error; there is no catch-all that hands the name off
+//! to a default runner.
 //!
-//! On unix we use `exec()` so the porcelain replaces our process -
-//! signals (Ctrl-C, SIGTERM) go directly to the porcelain, no parent
+//! On unix we use `exec()` so the porcelain replaces our process,
+//! letting signals (Ctrl-C, SIGTERM) reach it directly with no parent
 //! to translate. On non-unix we fall back to spawn + wait + propagate
 //! exit code.
 
@@ -22,42 +21,20 @@ pub fn dispatch(args: Vec<OsString>) -> anyhow::Result<()> {
     };
     let name = name_os.to_string_lossy();
 
-    // 1. An explicit `giant-<name>` binary wins (ADR-0010). Look beside the
-    //    giant binary first - the suite ships its porcelains in the same
-    //    directory - then fall back to PATH.
+    // A `giant-<name>` binary handles it (ADR-0010, ADR-0035). Look beside the
+    // giant binary first - the suite ships its porcelains in the same directory
+    // - then fall back to PATH. There is no catch-all: an unknown name errors
+    // (ADR-0035) instead of being quietly handed to a task runner.
     let prog = format!("giant-{name}");
     if let Some(path) = find_sibling(&prog).or_else(|| find_on_path(&prog)) {
         return exec_or_spawn(&path, rest);
     }
 
-    // 2. Otherwise consult the dispatch routing table (ADR-0021). The
-    //    routed binary is invoked as `<to> <name> <rest>` - the target
-    //    (giant-task by default) decides what `<name>` means and owns the
-    //    "no such task" error. Routing degrades to the default table when
-    //    there's no config, so it always resolves unless a user's rule
-    //    list deliberately excludes the name.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let table = crate::config::load_dispatch(&cwd);
-    let Some(to) = table.route(&name) else {
-        anyhow::bail!(
-            "no such subcommand '{name}': no built-in, no '{prog}' on PATH, \
-             and no dispatch rule matches it (see the `dispatch:` section of \
-             giant.yaml, ADR-0021)."
-        );
-    };
-    let Some(to_path) = find_on_path(to) else {
-        anyhow::bail!(
-            "subcommand '{name}' routes to '{to}' per the dispatch table, but \
-             '{to}' was not found on PATH.\n\
-             hint: install '{to}' (the default route is `giant-task`)."
-        );
-    };
-
-    // Hand the routed binary `<name> <rest...>`.
-    let mut routed: Vec<OsString> = Vec::with_capacity(rest.len() + 1);
-    routed.push(name_os.clone());
-    routed.extend_from_slice(rest);
-    exec_or_spawn(&to_path, &routed)
+    anyhow::bail!(
+        "no such subcommand '{name}': not a built-in and no '{prog}' found beside \
+         giant or on PATH.\n\
+         hint: to run a task named '{name}', use `giant task {name}`."
+    )
 }
 
 /// Look for `name` next to the running `giant` binary. The first-party

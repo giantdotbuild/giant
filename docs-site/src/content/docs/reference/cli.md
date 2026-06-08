@@ -226,20 +226,17 @@ config edits without a restart. `config.reload` forces the same thing.
 ## Porcelain dispatch
 
 `giant <name>` resolves in order: a built-in subcommand, then a
-`giant-<name>` binary on PATH, then the configurable dispatch routing
-table. The table's default route sends anything else to `giant-task`, so
-a bare task name just works - and everything after the name is passed
-through untouched (no `--` needed).
+`giant-<name>` binary (beside the giant binary, then on PATH). Everything
+after the name is passed through untouched (no `--` needed). There is no
+catch-all - an unknown name is an error, not a silent hand-off, so a typo
+of a command fails loudly instead of being treated as a task.
 
 ```
-giant tui                # → giant-tui binary on PATH
-giant task deploy        # → giant-task with args [deploy]
-giant deploy prod        # → routes to giant-task: run the `deploy` task with arg `prod`
-giant deploy --help      # → giant-task prints the deploy task's signature
+giant tui                # → giant-tui binary
+giant task deploy        # → giant-task with args [deploy] (run the `deploy` task)
+giant deploy prod        # → error: no such subcommand 'deploy' (use `giant task deploy`)
 ```
 
-The catch-all is configurable per workspace - route namespaces to your
-own porcelains via the `dispatch:` section (see
-[config reference](/reference/config/#dispatch)). Core itself never
-parses tasks; it only routes. See [Porcelains](/extending/porcelains/)
-for how to build one.
+Tasks live behind the explicit `giant task` front door (the `giant-task`
+porcelain); core itself never parses tasks. See
+[Porcelains](/extending/porcelains/) for how to build one.
