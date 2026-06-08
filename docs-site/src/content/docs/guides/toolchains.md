@@ -51,7 +51,18 @@ targets:
     command: "command -v rustc | xargs readlink -f > .giant/toolchains/rust.id"
     outputs: ["//.giant/toolchains/rust.id"]
     tags: ["toolchain"]
+    sandbox: false             # see "Toolchain targets and giant verify" below
 ```
+
+A toolchain target reads the realized environment - the `rustc` on PATH, the
+resolved store path, a `.tool-versions` line - none of which is a declared
+source input. That's deliberate (its job is to capture the *current* tool's
+identity), so the target can't be hermetic - set `sandbox: false` on it.
+Otherwise `giant verify` (which forces the sandbox on) blocks the undeclared
+read and the target fails. What keeps it sound is the declared lock /
+`.tool-versions` inputs; the sandbox would only get in the way - see
+[Toolchain targets and giant verify](#toolchain-targets-and-giant-verify). The
+examples below all carry it.
 
 ```yaml
 # crates/server/giant.yaml
@@ -79,7 +90,7 @@ This is the same shape Bazel and Buck2 use: the toolchain is a node in
 the dependency graph, so a toolchain change re-keys exactly the targets
 that depend on it. A Node bump moves `//:node`'s id and leaves `//:rust`
 untouched, so your Rust targets stay cached. You get per-ecosystem
-scoping for free.
+scoping automatically.
 
 ## With devenv
 
@@ -94,6 +105,7 @@ the cleanest identity is the resolved store path of the executable:
   command: "command -v go | xargs readlink -f > .giant/toolchains/go.id"
   outputs: ["//.giant/toolchains/go.id"]
   tags: ["toolchain"]
+  sandbox: false
 ```
 
 `command -v go` finds `go` on PATH; `readlink -f` resolves it to its
@@ -107,9 +119,9 @@ changed, the realized `go` hasn't changed, so the toolchain target stays
 cached and doesn't even re-run. The trust boundary is devenv's, the same
 way it trusts your declared inputs.
 
-One caveat worth knowing: Nix store paths are derived from build
-*inputs*, not output bytes. So the path can change even when the binary
-is identical (rebuilt from a different but irrelevant input). That only
+One caveat: a Nix store path is derived from a derivation's build
+inputs, so the path can change even when the binary is byte-identical
+(rebuilt from a different but irrelevant input). That only
 ever over-invalidates - it never reuses a stale artifact - so it's the
 safe direction. If you want an exact-content identity, use the
 `sha256sum` form below.
@@ -129,6 +141,7 @@ targets:
     command: "command -v go | xargs readlink -f > .giant/toolchains/go.id"
     outputs: ["//.giant/toolchains/go.id"]
     tags: ["toolchain"]
+    sandbox: false
 
   - name: "node"               #  →  //:node
     inputs: ["//devenv.lock", "//devenv.nix"]
@@ -136,6 +149,7 @@ targets:
     command: "command -v node | xargs readlink -f > .giant/toolchains/node.id"
     outputs: ["//.giant/toolchains/node.id"]
     tags: ["toolchain"]
+    sandbox: false
 ```
 
 Every Go target depends on `//:go`; every Node target on `//:node`. A
@@ -159,6 +173,7 @@ never moves and you'd reuse a stale artifact. Hash the content instead:
   command: "sha256sum bin/go | cut -d' ' -f1 > .giant/toolchains/go.id"
   outputs: ["//.giant/toolchains/go.id"]
   tags: ["toolchain"]
+  sandbox: false
 ```
 
 `inputs: ["//bin/go"]` makes the target re-run only when the binary
@@ -189,6 +204,7 @@ instead. This is simplest and needs no asdf binary in the build:
   command: "grep '^golang ' .tool-versions > .giant/toolchains/go.id"
   outputs: ["//.giant/toolchains/go.id"]
   tags: ["toolchain"]
+  sandbox: false
 ```
 
 The input is the whole `.tool-versions`, so the target re-runs on any edit -
@@ -210,6 +226,26 @@ giant build --show-toolchains
 ```
 
 The same flag works on `giant test` and on `--watch` (`build --watch` / `test --watch`).
+
+## Toolchain targets and `giant verify`
+
+`giant verify` runs every target sandboxed with the cache bypassed, to catch
+undeclared inputs. A toolchain target trips that on purpose: its
+command reads the realized environment - the tool on PATH, `.devenv/profile`,
+a resolved store path - which is exactly the undeclared access the sandbox
+denies. So a toolchain target without `sandbox: false` fails `verify`:
+
+```console
+$ giant verify
+✗ FAIL      //:rust    0ms  exit code 1     # readlink of an undeclared path, denied
+```
+
+Set `sandbox: false` on every toolchain target (as the examples above do). It
+exempts that target from the sandbox - it runs normally even under `verify` -
+while every real build target stays audited. It doesn't open a hole in the
+check: a toolchain target produces no build artifact to verify, and its
+correctness rests on its declared lock / `.tool-versions` inputs - hermeticity
+was never what made it sound.
 
 ## System-installed tools
 

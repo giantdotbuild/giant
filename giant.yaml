@@ -49,6 +49,11 @@ targets:
     outputs: [".giant/toolchains/devenv.id"]
     command: "readlink -f .devenv/profile > .giant/toolchains/devenv.id"
     tags: ["toolchain"]
+    # Reads the realized `.devenv/profile` (generated env state, not a declared
+    # source input), so it can't be hermetic - exempt it from `--sandbox` /
+    # `giant verify`. Its soundness is the declared lock/nix inputs, not the
+    # sandbox. (A toolchain identity probe is never a hermetic build.)
+    sandbox: false
 
 # -----------------------------------------------------------------------------
 # Tasks - named commands. Most are `cargo X` wrappers; the docs pipeline
