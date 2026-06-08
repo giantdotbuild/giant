@@ -13,6 +13,7 @@ pub mod commands;
 pub mod config;
 pub mod events;
 pub mod executor;
+pub mod explain;
 pub mod git;
 pub mod graph;
 pub mod model;

@@ -1274,6 +1274,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "giant-explain"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "giant",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "giant-gen"
 version = "0.1.0"
 dependencies = [

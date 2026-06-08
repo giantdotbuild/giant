@@ -12,7 +12,6 @@ use std::path::PathBuf;
 mod build;
 mod completions;
 pub(crate) mod dynamic;
-mod explain;
 mod external;
 pub mod prep;
 mod session;
@@ -68,10 +67,6 @@ pub enum Commands {
     /// bypassed, so any undeclared input/output/network use fails. This is
     /// `build --sandbox --fresh` over all targets (Linux only; ADR-0030).
     Verify(verify::VerifyArgs),
-
-    /// Show what feeds a target's cache key - the first thing to reach
-    /// for when "why did this rebuild?" comes up.
-    Explain(explain::ExplainArgs),
 
     /// Persistent engine over stdio. Loads config and builds the graph
     /// once, then reads JSON commands on stdin and emits NDJSON events
@@ -163,7 +158,6 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Build(args) => build::execute(args, &global).await,
         Commands::Test(args) => test::execute(args, &global).await,
         Commands::Verify(args) => verify::execute(args, &global).await,
-        Commands::Explain(args) => explain::execute(args, &global).await,
         Commands::Session(args) => session::execute(args, &global).await,
         Commands::Completions(args) => completions::execute(args),
         Commands::External(args) => external::dispatch(args),
@@ -319,7 +313,7 @@ impl std::error::Error for SilentExit {}
 /// Subcommand names that clap already knows about - porcelain
 /// detection skips these so we don't end up listing `giant-clean` as
 /// a porcelain alongside the built-in `clean`.
-const BUILTIN_SUBCOMMANDS: &[&str] = &["build", "test", "explain", "session", "completions"];
+const BUILTIN_SUBCOMMANDS: &[&str] = &["build", "test", "session", "completions"];
 
 /// True iff the user is asking for help - explicitly via `--help`,
 /// `-h`, or `help`, or implicitly by running `giant` with no

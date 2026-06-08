@@ -585,7 +585,7 @@ impl SessionState {
             return;
         }
         let mut memo = std::collections::BTreeMap::new();
-        let (key, breakdown, _) = match super::explain::breakdown_for_target(
+        let (key, breakdown, _) = match crate::explain::breakdown_for_target(
             &self.graph,
             &self.cache,
             &self.workspace_root,
@@ -696,7 +696,7 @@ impl SessionState {
             },
             None => {
                 let mut memo = std::collections::BTreeMap::new();
-                match super::explain::walk_target(
+                match crate::explain::walk_target(
                     &self.graph,
                     &self.cache,
                     &self.workspace_root,
@@ -787,7 +787,7 @@ impl SessionState {
         let mut memo = std::collections::BTreeMap::new();
         let mut out = Vec::with_capacity(ids.len());
         for id in &ids {
-            let status = match super::explain::walk_target(
+            let status = match crate::explain::walk_target(
                 &self.graph,
                 &self.cache,
                 &self.workspace_root,

@@ -115,6 +115,7 @@
         giant-affected = mkBin { name = "giant-affected"; };
         giant-clean = mkBin { name = "giant-clean"; };
         giant-logs = mkBin { name = "giant-logs"; };
+        giant-explain = mkBin { name = "giant-explain"; };
 
         # giant-gen ships the official Starlark std collection as files (not
         # embedded in the binary; ADR-0031). The library lands in
@@ -170,9 +171,10 @@
             giant-affected
             giant-clean
             giant-logs
+            giant-explain
           ];
           meta = {
-            description = "Giant + every first-party porcelain (task, tui, gen, sandbox, graph, affected, clean, logs)";
+            description = "Giant + every first-party porcelain (task, tui, gen, sandbox, graph, affected, clean, logs, explain)";
             mainProgram = "giant";
           };
         };
@@ -189,6 +191,7 @@
             giant-affected
             giant-clean
             giant-logs
+            giant-explain
             giant-suite
             ;
           default = giant-suite;
@@ -204,6 +207,7 @@
           giant-affected = flake-utils.lib.mkApp { drv = giant-affected; };
           giant-clean = flake-utils.lib.mkApp { drv = giant-clean; };
           giant-logs = flake-utils.lib.mkApp { drv = giant-logs; };
+          giant-explain = flake-utils.lib.mkApp { drv = giant-explain; };
           default = flake-utils.lib.mkApp { drv = giant; };
         };
 
