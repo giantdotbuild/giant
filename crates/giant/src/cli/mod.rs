@@ -80,14 +80,17 @@ pub async fn run() -> anyhow::Result<()> {
     // porcelain hit on the matches and dispatch before falling through
     // to `from_arg_matches`.
     let porcelains = detect_porcelains();
-    let want_help = is_help_invocation();
+    // About-lines only show in help, and scraping each means spawning
+    // `<porcelain> --help`; do it in one bounded concurrent batch so help stays
+    // fast no matter how many porcelains are installed.
+    let abouts = if is_help_invocation() {
+        porcelain_abouts(&porcelains)
+    } else {
+        BTreeMap::new()
+    };
     let mut cmd = Cli::command();
-    for (name, path) in &porcelains {
-        let about = if want_help {
-            porcelain_about(path).unwrap_or_default()
-        } else {
-            String::new()
-        };
+    for name in porcelains.keys() {
+        let about = abouts.get(name).cloned().unwrap_or_default();
         // clap's Command::new takes `impl Into<Str>` where Str only
         // converts from `&'static str` - we have to leak the name so
         // it satisfies the bound. The leak is once per porcelain per
@@ -325,22 +328,62 @@ fn is_help_invocation() -> bool {
     !has_subcommand
 }
 
-/// Run `<porcelain> --help` and pull out the about text - the first
-/// non-empty, non-`Usage:` line of stdout. Clap convention puts the
-/// about right at the top. Returns `None` if the porcelain failed to
-/// run, didn't produce parseable output, or just didn't have an about.
-fn porcelain_about(path: &std::path::Path) -> Option<String> {
-    let output = std::process::Command::new(path)
-        .arg("--help")
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    stdout
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty() && !l.starts_with("Usage:"))
-        .map(|l| l.to_string())
+/// Scrape the about-line of every porcelain by running `<porcelain> --help`.
+/// All children are spawned at once, then collected under a shared deadline: a
+/// slow or wedged porcelain can't slow help past the budget - it just shows up
+/// without a description. The about is the first non-empty, non-`Usage:` line of
+/// stdout (clap convention puts it right at the top).
+fn porcelain_abouts(porcelains: &BTreeMap<String, PathBuf>) -> BTreeMap<String, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    // Generous next to a well-behaved `--help` (a few ms), tight enough that help
+    // stays snappy even when a porcelain does real work on startup.
+    const BUDGET: Duration = Duration::from_millis(100);
+
+    let mut running: Vec<(String, std::process::Child)> = porcelains
+        .iter()
+        .filter_map(|(name, path)| {
+            let child = std::process::Command::new(path)
+                .arg("--help")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok()?;
+            Some((name.clone(), child))
+        })
+        .collect();
+
+    // Wait until all have exited or the budget runs out, whichever is first.
+    let deadline = Instant::now() + BUDGET;
+    while Instant::now() < deadline
+        && running
+            .iter_mut()
+            .any(|(_, c)| matches!(c.try_wait(), Ok(None)))
+    {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    running
+        .into_iter()
+        .filter_map(|(name, mut child)| {
+            // Still running at the deadline - kill it and show the bare name.
+            if matches!(child.try_wait(), Ok(None)) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            let mut stdout = String::new();
+            child.stdout.take()?.read_to_string(&mut stdout).ok()?;
+            let about = stdout
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with("Usage:"))?;
+            Some((name, about.to_string()))
+        })
+        .collect()
 }
 
 /// Walk PATH for `giant-<name>` executables that don't shadow a
