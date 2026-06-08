@@ -5,6 +5,14 @@
 - **Builds on**: ADR-0003 (headless engine), ADR-0010 / ADR-0021 (porcelain
   dispatch), ADR-0032 (static graph), ADR-0033 (protocol query surface)
 
+> **Revised 2026-06-08**: the coupling rule below originally said "porcelains
+> link the giant library" as a blanket default. That was too coarse. The
+> refined rule sorts porcelains by *what data they need* into three categories -
+> engine-computed state goes over the NDJSON protocol, static committed data is
+> read directly, fs/config maintenance reads config - so lib-linking is the
+> fallback, not the default. `explain` and `logs` are protocol clients, not
+> lib-linked. See "Decision - coupling" and "Phasing" below.
+
 ## Context
 
 The `giant` binary still bundles most user-facing commands: `build`, `test`,
@@ -35,18 +43,39 @@ is a thin layer over the engine.
   protocol's `watch.start` / `watch.stop`. The vestigial `"watch"` entry in
   `BUILTIN_SUBCOMMANDS` is removed.
 
-**Coupling: porcelains link the giant library, not the protocol.** The library
-crate is the engine and a reusable workspace API (config scan, graph, cache,
-selection, git, cache-key). First-party CLI porcelains link it directly and call
-its public API - the giant-gen / giant-graph pattern - rather than spawning a
-`session` subprocess. The NDJSON protocol remains for out-of-process and
-interactive clients (the TUI, IDEs); a CLI command that just reads or runs once
-has no reason to pay for a subprocess and a serialization round-trip.
+**Coupling: pick the interface by what data the porcelain needs.** Core does the
+engine and emits NDJSON; it presents no UI, CLI or otherwise. Porcelains present.
+That sorts them into three categories:
 
-This needs one small public entry point - **`prepare(config) -> Prepared
-{ graph, cache, workspace_root, config }`** (today's internal `cli::prep`) -
-alongside the already-public `cache` / `selection` / `git` / `executor`
-cache-key functions. That is the porcelain contract.
+1. **Engine-computed state → the NDJSON protocol.** Cache status, the explain
+   cache-key breakdown, captured logs, build progress - data the engine computes
+   from the graph and cache. The porcelain spawns (or attaches to) a `session`
+   and renders the events; it does not recompute. `explain` (over `query.explain`),
+   `logs` (over `logs.get`), `build` / `test` (over `build` + the event stream),
+   and the TUI all live here. This is the pure model and the one to reach for by
+   default: the engine lives in exactly one place, the same protocol feeds the
+   CLI and the TUI, and a future warm daemon (ADR-0003) answers without
+   rebuilding the graph per invocation - something a lib-linked command can never
+   do.
+2. **Static committed data → read it directly.** ADR-0032 put the build graph on
+   disk, so `graph` and `affected` (= static graph + a `git diff`) need neither
+   the engine nor a subprocess. They use `prepare()` to load the graph and run.
+3. **fs / config maintenance → read config.** `clean` wipes `cache.dir`; there is
+   nothing to render, so there is no protocol round-trip to justify.
+
+Lib-linking is the fallback for categories 2 and 3, not a blanket default. The
+static/config porcelains use one small public entry point - **`prepare(config)
+-> Prepared { graph, cache, workspace_root, config }`** (today's internal
+`cli::prep`) - alongside the public `cache` / `selection` / `git` / `executor`
+cache-key functions. The protocol porcelains use the wire types
+(`commands::Command` / `events::Event`) plus a shared session-client helper that
+spawns `giant session`, sends one correlated command, and collects the reply.
+
+*Honest follow-up:* the protocol porcelains still depend on the `giant` crate for
+the wire types, so today they still compile the engine into their binary, exactly
+as the TUI already does. Extracting a `giant-protocol` crate (the `Command` /
+`Event` types + `TargetId`) so they stop linking the engine is a mechanical
+follow-up; it does not change this model.
 
 **Crate layout:** one porcelain crate per command (matching the existing
 porcelains), except `build` / `test` / `verify` share one crate - they share the
@@ -56,13 +85,22 @@ there. `test` is build with a test selection; `verify` is build --sandbox
 
 ## Phasing
 
-- **Phase A (inspection, trivial):** `affected`, `clean`, `explain`, `logs`.
-  Thin library clients. `clean` reads only `cache.dir`; `affected` needs the
-  graph + git; `explain` / `logs` reuse `breakdown_for_target` and the cache
-  reads. Each relocates the existing `cli/<cmd>.rs` into a porcelain crate.
+- **Phase A (inspection):**
+  - `affected` (category 2, static graph + git) and `clean` (category 3, config)
+    relocate their `cli/<cmd>.rs` wholesale into porcelain crates. **Done.**
+  - `explain` (category 1) becomes a protocol client over `query.explain`, and
+    `logs` (category 1) over `logs.get`. Their `cli/<cmd>.rs` is deleted, not
+    moved: the engine already computes the data in the session handlers. The
+    `breakdown_for_target` / `walk_target` helpers stay in core (the session uses
+    them) and move out of `cli/` into a library module. To keep full fidelity the
+    protocol gains additive fields: `query.explained` carries the cache-hit detail
+    (built-at, duration, exit, outputs, `outputs_content_hash`) and `logs.get`
+    takes an optional `key` to inspect a specific historical AC entry.
 - **Phase B (the renderer move):** `build`, `test`, `verify` into one
-  `giant-build` crate; `renderer.rs` and `run_one_build` move with them. After
-  this the binary has only `session` + `completions`.
+  `giant-build` crate. These are category 1 (build progress is engine-computed),
+  but the in-process build adapter is the heavy lift; the renderer and the
+  build/event plumbing move there. After this the binary has only `session` +
+  `completions`.
 
 ## Consequences
 
