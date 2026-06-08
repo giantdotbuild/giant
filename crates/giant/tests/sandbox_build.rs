@@ -163,6 +163,17 @@ fn verify_audits_without_an_explicit_flag() {
         "verify must catch an undeclared read with no flag; stderr:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // The failure is annotated with the likely cause (ADR-0036), not just a
+    // bare exit code, so the user knows the sandbox denied an access.
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        rendered.contains("sandbox") || rendered.contains("declare"),
+        "verify failure should explain the denial; got:\n{rendered}"
+    );
 }
 
 /// The core ADR-0036 guarantee: a verify run cannot touch the live working tree.

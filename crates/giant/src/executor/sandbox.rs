@@ -38,13 +38,15 @@ pub struct SandboxPolicy {
 
 /// Build the `giant-sandbox`-wrapped command for an eligible target, writing
 /// its `SandboxSpec` under the cache directory first. `cwd` is the absolute
-/// working directory the command will run in.
+/// working directory the command will run in. Returns the command and the set
+/// of paths the sandbox grants (inputs, outputs, toolchain), which the executor
+/// uses to explain a denial if the command fails.
 pub(super) async fn wrapped_command(
     ctx: &TargetCtx,
     spec: &TargetSpec,
     cwd: &Path,
     policy: &SandboxPolicy,
-) -> io::Result<Command> {
+) -> io::Result<(Command, Vec<PathBuf>)> {
     // A per-target scratch dir, granted read-write and pointed at via TMPDIR.
     // We deliberately do *not* grant the whole system temp dir: a workspace
     // under /tmp would then be readable, defeating enforcement.
@@ -72,6 +74,16 @@ pub(super) async fn wrapped_command(
         .map_err(|e| io::Error::other(format!("sandbox spec task: {e}")))??
     };
 
+    // The granted set, for failure diagnosis: anything the command was allowed
+    // to touch. A denied path outside this set is an undeclared access.
+    let allowed: Vec<PathBuf> = sb
+        .ro
+        .iter()
+        .chain(sb.rw.iter())
+        .chain(sb.toolchain.iter())
+        .cloned()
+        .collect();
+
     let spec_path = write_spec(ctx, spec, &sb).await?;
 
     let mut cmd = Command::new(&policy.helper);
@@ -85,7 +97,7 @@ pub(super) async fn wrapped_command(
     // Tools that honour TMPDIR write scratch into the granted dir rather than
     // the ungranted /tmp. Set on the helper process; birdcage forwards it.
     cmd.env("TMPDIR", &scratch);
-    Ok(cmd)
+    Ok((cmd, allowed))
 }
 
 /// Resolve the bind set. `ro` is the target's declared file inputs (which, by

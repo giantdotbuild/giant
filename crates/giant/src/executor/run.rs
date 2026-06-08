@@ -325,9 +325,11 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
     // Under `--sandbox`, an eligible target (ADR-0030 §4a: `sandbox != false`)
     // runs through the `giant-sandbox` wrapper instead of `sh` directly. An
     // exempt target, or sandbox mode off, takes the plain path unchanged.
-    let mut cmd = match ctx.sandbox.as_ref().filter(|_| spec.sandbox) {
+    // `sandbox_allowed` carries the granted path set for an enforced target, so
+    // a denial can be explained on failure. `None` = the target ran directly.
+    let (mut cmd, sandbox_allowed) = match ctx.sandbox.as_ref().filter(|_| spec.sandbox) {
         Some(policy) => match super::sandbox::wrapped_command(ctx, spec, &cwd, policy).await {
-            Ok(cmd) => cmd,
+            Ok((cmd, allowed)) => (cmd, Some(allowed)),
             Err(e) => {
                 return TargetResult::Failed {
                     error: format!("sandbox setup failed: {e}"),
@@ -337,7 +339,7 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
         None => {
             let mut cmd = Command::new("sh");
             cmd.arg("-c").arg(&spec.command);
-            cmd
+            (cmd, None)
         }
     };
     cmd.current_dir(&cwd)
@@ -434,9 +436,18 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
         }
     };
     if !exit.success() {
-        return TargetResult::Failed {
-            error: format!("exit code {}", exit.code().unwrap_or(-1)),
-        };
+        let code = exit.code().unwrap_or(-1);
+        let mut error = format!("exit code {code}");
+        // Under enforcement, turn a bare exit code into a likely cause - an
+        // undeclared read, a blocked socket, or a sandbox that wouldn't start
+        // (ADR-0036). Reads the captured stderr, so it needs log capture on
+        // (the default; `giant verify` always captures).
+        if let Some(allowed) = &sandbox_allowed
+            && let Some(hint) = diagnose_sandbox_failure(code, &stderr_bytes, allowed, spec.network)
+        {
+            error = format!("{error}; {hint}");
+        }
+        return TargetResult::Failed { error };
     }
 
     // Capture and store outputs.
@@ -826,9 +837,152 @@ where
     buf
 }
 
+/// giant-sandbox's reserved exit code for "could not set up the sandbox",
+/// distinct from the child's own status (mirrors the `env`/`docker` convention;
+/// see `giant-sandbox`'s `SETUP_FAILURE`).
+const SANDBOX_SETUP_FAILURE: i32 = 125;
+
+/// Best-effort explanation for why an enforced command failed, from its exit
+/// code and stderr (ADR-0036 diagnostics). The sandbox surfaces a denial as the
+/// child's own `EACCES` / network error, so we pattern-match those and point at
+/// the declared set. `None` when nothing recognisable stands out - the caller
+/// keeps the bare exit code.
+fn diagnose_sandbox_failure(
+    exit_code: i32,
+    stderr: &[u8],
+    allowed: &[std::path::PathBuf],
+    network: bool,
+) -> Option<String> {
+    let text = String::from_utf8_lossy(stderr);
+
+    // The sandbox failing to start (no unprivileged namespaces / Landlock, or a
+    // configured `sandbox.roots` path missing) shows up as the 125 setup code or
+    // a recognisable backend error - not as the command's own failure.
+    if exit_code == SANDBOX_SETUP_FAILURE || looks_like_setup_failure(&text) {
+        return Some(
+            "could not enter the sandbox - this host may not allow unprivileged \
+             namespaces or Landlock, or a configured `sandbox.roots` path is \
+             missing"
+                .to_string(),
+        );
+    }
+
+    if !network && looks_like_network_denial(&text) {
+        return Some(
+            "looks like it reached for the network, which the sandbox denies; \
+             set `network: true` on the target to allow it"
+                .to_string(),
+        );
+    }
+
+    // A hard denial (EACCES/EPERM) is unambiguous. Name the offending path when
+    // the tool printed an absolute one, otherwise a generic hint.
+    if looks_like_fs_denial(&text) {
+        if let Some(path) = first_denied_path(&text) {
+            let undeclared = !allowed.iter().any(|a| path.starts_with(a));
+            return Some(if undeclared {
+                format!(
+                    "looks like it accessed `{}`, which is not a declared input \
+                     or output; add it to `inputs:`/`outputs:` or set \
+                     `sandbox: false`",
+                    path.display()
+                )
+            } else {
+                format!(
+                    "the sandbox denied access to `{}`; it is declared, so this \
+                     may be a read-vs-write or permissions mismatch",
+                    path.display()
+                )
+            });
+        }
+        return Some(
+            "a file access was denied by the sandbox; the command likely uses a \
+             path it does not declare - add it to `inputs:`/`outputs:` or set \
+             `sandbox: false`"
+                .to_string(),
+        );
+    }
+
+    // Landlock often hides an undeclared path as a plain "not found" rather than
+    // a permission error, so under enforcement a failed open is a strong hint
+    // that an input is missing from the declared set.
+    if looks_like_missing_path(&text) {
+        return Some(
+            "a file the command opened was not found under the sandbox; if it \
+             exists in your tree, the target likely reads a path it does not \
+             declare - add it to `inputs:` or set `sandbox: false`"
+                .to_string(),
+        );
+    }
+
+    None
+}
+
+fn looks_like_setup_failure(text: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "giant-sandbox:",
+        "sandboxing failure",
+        "Landlock",
+        "seccomp",
+        "unprivileged",
+        "namespace",
+    ];
+    NEEDLES.iter().any(|n| text.contains(n))
+}
+
+fn looks_like_network_denial(text: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "Network is unreachable",
+        "ENETUNREACH",
+        "Could not resolve host",
+        "Temporary failure in name resolution",
+        "Name or service not known",
+        "EAI_AGAIN",
+        "getaddrinfo",
+    ];
+    NEEDLES.iter().any(|n| text.contains(n))
+}
+
+fn looks_like_fs_denial(text: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "Permission denied",
+        "Operation not permitted",
+        "EACCES",
+        "EPERM",
+    ];
+    NEEDLES.iter().any(|n| text.contains(n))
+}
+
+fn looks_like_missing_path(text: &str) -> bool {
+    const NEEDLES: &[&str] = &["No such file or directory", "ENOENT", "cannot open"];
+    NEEDLES.iter().any(|n| text.contains(n))
+}
+
+/// Pull the first absolute path out of a permission-denied line, if one is
+/// recognisable. Tools format these many ways ("cat: /x: Permission denied",
+/// "open '/x': Operation not permitted"), so this is heuristic: on a denial
+/// line, take the longest `/`-rooted token after trimming surrounding
+/// punctuation and quotes.
+fn first_denied_path(text: &str) -> Option<std::path::PathBuf> {
+    for line in text.lines() {
+        if !looks_like_fs_denial(line) {
+            continue;
+        }
+        let token = line
+            .split(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == '`')
+            .map(|tok| tok.trim_matches(|c: char| matches!(c, ':' | ',' | ')' | '(' | '.')))
+            .filter(|tok| tok.starts_with('/') && tok.len() > 1)
+            .max_by_key(|tok| tok.len());
+        if let Some(p) = token {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::output_parent_to_create;
+    use super::{diagnose_sandbox_failure, first_denied_path, output_parent_to_create};
     use std::path::{Path, PathBuf};
 
     fn parent(p: &str) -> Option<PathBuf> {
@@ -851,5 +1005,84 @@ mod tests {
         assert_eq!(parent("a/b/**/c.txt"), Some(PathBuf::from("a/b")));
         // A top-level glob has no literal prefix to create.
         assert_eq!(parent("*.txt"), None);
+    }
+
+    #[test]
+    fn diagnose_setup_failure_by_code_or_signature() {
+        // The 125 setup code, with no stderr at all.
+        let d = diagnose_sandbox_failure(125, b"", &[], false).unwrap();
+        assert!(d.contains("could not enter the sandbox"), "{d}");
+        // A recognisable backend error at any exit code.
+        let d =
+            diagnose_sandbox_failure(1, b"giant-sandbox: entering the sandbox: ...", &[], false)
+                .unwrap();
+        assert!(d.contains("could not enter the sandbox"), "{d}");
+    }
+
+    #[test]
+    fn diagnose_network_only_when_denied() {
+        let err = b"npm error network getaddrinfo EAI_AGAIN registry.npmjs.org";
+        let d = diagnose_sandbox_failure(1, err, &[], false).unwrap();
+        assert!(d.contains("network"), "{d}");
+        // With `network: true` the same output is not a sandbox network denial.
+        let allowed_net = diagnose_sandbox_failure(1, err, &[], true);
+        assert!(
+            allowed_net.is_none() || !allowed_net.as_deref().unwrap().contains("network"),
+            "{allowed_net:?}",
+        );
+    }
+
+    #[test]
+    fn diagnose_undeclared_vs_declared_path() {
+        // A denied path outside the granted set reads as undeclared.
+        let err = b"cat: /etc/secret: Permission denied";
+        let allowed = vec![PathBuf::from("/work/data.txt")];
+        let d = diagnose_sandbox_failure(1, err, &allowed, false).unwrap();
+        assert!(
+            d.contains("/etc/secret") && d.contains("not a declared"),
+            "{d}"
+        );
+
+        // A denied path *inside* the granted set is a read/write mismatch.
+        let err = b"open '/work/out/x': Operation not permitted";
+        let allowed = vec![PathBuf::from("/work/out")];
+        let d = diagnose_sandbox_failure(1, err, &allowed, false).unwrap();
+        assert!(d.contains("/work/out/x") && d.contains("declared"), "{d}");
+    }
+
+    #[test]
+    fn diagnose_generic_denial_and_silence() {
+        // Permission denied with no extractable path → generic FS hint.
+        let d = diagnose_sandbox_failure(1, b"error: Permission denied", &[], false).unwrap();
+        assert!(d.contains("file access was denied"), "{d}");
+        // An ordinary build failure is left as a bare exit code.
+        let none = diagnose_sandbox_failure(1, b"error[E0308]: mismatched types", &[], false);
+        assert!(none.is_none(), "{none:?}");
+    }
+
+    #[test]
+    fn diagnose_landlock_enoent_as_undeclared() {
+        // Landlock commonly surfaces an undeclared (relative) path as a plain
+        // "No such file or directory", so verify still explains it.
+        let err = b"cat: data.txt: No such file or directory";
+        let d = diagnose_sandbox_failure(1, err, &[], false).unwrap();
+        assert!(
+            d.contains("not found under the sandbox") && d.contains("declare"),
+            "{d}"
+        );
+    }
+
+    #[test]
+    fn first_denied_path_picks_the_path() {
+        assert_eq!(
+            first_denied_path("cat: /etc/secret: Permission denied"),
+            Some(PathBuf::from("/etc/secret")),
+        );
+        assert_eq!(
+            first_denied_path("open '/a/b': Operation not permitted"),
+            Some(PathBuf::from("/a/b")),
+        );
+        // No denial line → nothing.
+        assert_eq!(first_denied_path("just some log output"), None);
     }
 }
