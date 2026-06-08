@@ -165,6 +165,18 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
     Ok(())
 }
 
+/// Build-shaping options for the one-shot adapter, bundled so the call stays
+/// readable (and under clippy's argument limit).
+pub struct BuildOptions {
+    /// Bypass the cache - force every selected target to run.
+    pub fresh: bool,
+    /// Sandbox policy, or `None` to run commands directly (ADR-0030).
+    pub sandbox: Option<crate::executor::SandboxPolicy>,
+    /// Build in a disposable worktree of the committed state - `giant verify`
+    /// (ADR-0036). Requires a git/jj repo; errors otherwise.
+    pub isolate: bool,
+}
+
 /// Run one build through the engine and wait for it to finish - the
 /// in-process adapter behind `giant build` / `test` (TDD-0021). The same
 /// `Command::Build` → `start_build` path the stdio session uses; events
@@ -172,14 +184,32 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
 /// uploader is opened and drained here. Pass/fail is read off the event
 /// stream by the caller (the renderer captures `build.finished`).
 pub async fn run_one_build(
-    prepared: prep::Prepared,
+    mut prepared: prep::Prepared,
     event_tx: EventSender,
     config_path: Option<std::path::PathBuf>,
     parallelism: usize,
     selection: Vec<TargetId>,
-    fresh: bool,
-    sandbox: Option<crate::executor::SandboxPolicy>,
+    opts: BuildOptions,
 ) -> anyhow::Result<()> {
+    let BuildOptions {
+        fresh,
+        sandbox,
+        isolate,
+    } = opts;
+
+    // `giant verify` (isolate) builds in a throwaway worktree of the committed
+    // state so a sandboxed audit can never touch the live tree (ADR-0036).
+    // Failing here - no git repo - is a clean setup error, before any target
+    // runs. The guard removes the worktree when this function returns.
+    let _worktree = if isolate {
+        let id = format!("verify-{}", std::process::id());
+        let wt = crate::worktree::create(prepared.workspace_root.as_path(), &id).await?;
+        prepared.workspace_root = AbsPath::new(wt.path());
+        Some(wt)
+    } else {
+        None
+    };
+
     // No-op without the `remote` feature (returns all-None).
     let (remote, upload_tx, upload_handle) = prep::open_remote(&prepared.config)?;
 

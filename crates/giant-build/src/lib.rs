@@ -86,6 +86,12 @@ pub struct BuildArgs {
     /// default; no-op for `test`).
     #[arg(long)]
     pub with_tests: bool,
+
+    /// Audit mode: build in a disposable worktree of the committed state so the
+    /// sandbox can't touch the live tree (ADR-0036). Set by `giant verify`, not
+    /// a user flag.
+    #[arg(skip)]
+    pub verify: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -263,8 +269,11 @@ pub async fn run(args: BuildArgs, base_mode: TestMode) -> anyhow::Result<i32> {
         args.config.clone(),
         parallelism,
         selection,
-        args.fresh,
-        sandbox,
+        giant::BuildOptions {
+            fresh: args.fresh,
+            sandbox,
+            isolate: args.verify,
+        },
     )
     .await?;
 

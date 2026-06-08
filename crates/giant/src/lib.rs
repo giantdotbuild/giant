@@ -21,6 +21,7 @@ pub mod remote;
 pub mod selection;
 pub mod types;
 pub mod watcher;
+pub mod worktree;
 
 // The wire protocol lives in giant-protocol now (ADR-0034); re-export its modules
 // so `giant::commands` / `giant::events` / `giant::client` stay stable for
@@ -40,7 +41,7 @@ pub use cli::prep::{
 // The in-process build adapter the `giant-build` porcelain drives (ADR-0034
 // phase B): one build / a watch loop, plus sandbox-policy resolution.
 pub use cli::resolve_sandbox;
-pub use cli::session::{run_one_build, run_watch_command};
+pub use cli::session::{BuildOptions, run_one_build, run_watch_command};
 pub use config::Config;
 pub use executor::{BuildJob, BuildSummary, SandboxPolicy, build};
 pub use fmt::format_duration;

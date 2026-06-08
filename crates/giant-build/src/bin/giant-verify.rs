@@ -1,5 +1,6 @@
-//! `giant verify` - hermeticity audit (ADR-0030 §5): `build` with the sandbox
-//! and a fresh build forced on, over every target (tests included). Porcelain.
+//! `giant verify` - hermeticity audit (ADR-0030, ADR-0036): `build` with the
+//! sandbox and a fresh build forced on, over every target (tests included), in
+//! a disposable worktree of the committed state. Porcelain.
 
 use clap::Parser;
 use giant::selection::TestMode;
@@ -18,9 +19,11 @@ struct Cli {
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let mut cli = Cli::parse();
-    // Force sandbox enforcement and cache bypass regardless of the flags given.
+    // Force sandbox enforcement, cache bypass, and worktree isolation
+    // regardless of the flags given.
     cli.args.fresh = true;
     cli.args.sandbox = true;
+    cli.args.verify = true;
     match giant_build::run(cli.args, TestMode::Include).await {
         Ok(code) => std::process::ExitCode::from(code as u8),
         Err(e) => {
