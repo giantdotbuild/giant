@@ -8,7 +8,7 @@
 //!
 //! See TDD-0004 §Command types for the full wire schema.
 
-use crate::model::TargetId;
+use crate::TargetId;
 use serde::{Deserialize, Serialize};
 
 /// One command from a session client. Tagged on the `c` field.

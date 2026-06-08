@@ -8,6 +8,10 @@ description = "Build orchestration with content-addressed caching"
 [dependencies]
 # The shared wire schema: WireTarget and friends, defined once (ADR-0029 §5).
 giant-schema = { path = "../giant-schema" }
+# The NDJSON wire protocol (Command/Event/TargetId) + session client. Re-exported
+# so `giant::commands` / `giant::events` / `giant::TargetId` stay stable for
+# engine-linking porcelains (ADR-0034).
+giant-protocol = { path = "../giant-protocol" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

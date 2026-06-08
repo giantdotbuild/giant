@@ -12,8 +12,8 @@ use std::io::Write;
 
 use anyhow::Result;
 use clap::Parser;
-use giant::commands::Command;
-use giant::events::{Event, ExplainEnv};
+use giant_protocol::commands::Command;
+use giant_protocol::events::{Event, ExplainEnv};
 
 #[derive(Parser, Debug)]
 #[command(name = "giant-explain", about = "Show what feeds a target's cache key")]
@@ -59,9 +59,9 @@ async fn real_main() -> Result<()> {
 async fn explain(config: Option<&std::path::Path>, target: &str) -> Result<Explained> {
     let command = Command::QueryExplain {
         command_id: Some("e1".into()),
-        target: giant::TargetId::new(target),
+        target: giant_protocol::TargetId::new(target),
     };
-    let events = giant::query_session(config, command, |e| {
+    let events = giant_protocol::query_session(config, command, |e| {
         matches!(e, Event::QueryExplained { command_id, .. } if command_id.as_deref() == Some("e1"))
     })
     .await?;
@@ -85,7 +85,7 @@ struct Explained {
     built_in_env: EnvPairs,
     file_inputs: Vec<FileInput>,
     deps: EnvPairs,
-    cache_hit: Option<giant::events::ExplainCacheHit>,
+    cache_hit: Option<giant_protocol::events::ExplainCacheHit>,
 }
 
 struct FileInput {

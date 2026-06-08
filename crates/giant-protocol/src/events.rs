@@ -3,9 +3,8 @@
 //! See TDD-0004 for the full schema and command channel. This module
 //! defines the in-engine `Event` enum that gets serialized to the wire.
 
-use crate::model::TargetId;
+use crate::TargetId;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -368,12 +367,6 @@ pub struct TargetCounts {
 
 /// Best-effort sender that drops log events first under backpressure (TDD-0004).
 pub type EventSender = tokio::sync::mpsc::Sender<Event>;
-
-/// Unused right now; placeholder so lib.rs re-export resolves.
-#[allow(dead_code)]
-pub fn _ev_module_marker() -> HashMap<String, ()> {
-    HashMap::new()
-}
 
 #[cfg(test)]
 mod tests {

@@ -1220,6 +1220,7 @@ dependencies = [
  "dirs",
  "filetime",
  "futures-util",
+ "giant-protocol",
  "giant-schema",
  "glob",
  "globset",
@@ -1279,7 +1280,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "giant",
+ "giant-protocol",
  "tempfile",
  "tokio",
 ]
@@ -1320,8 +1321,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "giant",
+ "giant-protocol",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "giant-protocol"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

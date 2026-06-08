@@ -71,11 +71,15 @@ cache-key functions. The protocol porcelains use the wire types
 (`commands::Command` / `events::Event`) plus a shared session-client helper that
 spawns `giant session`, sends one correlated command, and collects the reply.
 
-*Honest follow-up:* the protocol porcelains still depend on the `giant` crate for
-the wire types, so today they still compile the engine into their binary, exactly
-as the TUI already does. Extracting a `giant-protocol` crate (the `Command` /
-`Event` types + `TargetId`) so they stop linking the engine is a mechanical
-follow-up; it does not change this model.
+The wire types live in a standalone **`giant-protocol`** crate - `Command`,
+`Event` (+ payloads), `TargetId`, and the `query_session` client - so the
+protocol porcelains (`giant-explain`, `giant-logs`) depend on it alone and do
+not compile the engine into their binary. The engine re-exports the crate's
+modules (`giant::commands` / `giant::events` / `giant::TargetId`) so engine
+internals and engine-linking porcelains are unaffected. The TUI is the one
+"protocol" consumer that still links the engine - not for the wire types, but
+because it reuses `giant::selection` for client-side target filtering; that is a
+deliberate exception, not the wire-type coupling this crate removed.
 
 **Crate layout:** one porcelain crate per command (matching the existing
 porcelains), except `build` / `test` / `verify` share one crate - they share the

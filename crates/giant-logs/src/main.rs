@@ -10,8 +10,8 @@ use std::io::Write;
 
 use anyhow::Result;
 use clap::Parser;
-use giant::commands::Command;
-use giant::events::{Event, LogStream};
+use giant_protocol::commands::Command;
+use giant_protocol::events::{Event, LogStream};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -57,11 +57,11 @@ async fn real_main() -> Result<()> {
 
     let command = Command::LogsGet {
         command_id: Some("L1".into()),
-        target: giant::TargetId::new(&cli.target),
+        target: giant_protocol::TargetId::new(&cli.target),
         follow: false,
         key: cli.key.clone(),
     };
-    let events = giant::query_session(
+    let events = giant_protocol::query_session(
         cli.config.as_deref(),
         command,
         |e| matches!(e, Event::LogsEnd { command_id, .. } if command_id.as_deref() == Some("L1")),
