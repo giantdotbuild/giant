@@ -20,8 +20,8 @@ use crate::cli::prep;
 use crate::cli::{GlobalFlags, SilentExit};
 use crate::commands::Command;
 use crate::events::{
-    Event, EventSender, ExplainDep, ExplainEnv, ExplainInput, LogStream, ShutdownReason,
-    TargetCounts, TargetStatus,
+    Event, EventSender, ExplainCacheHit, ExplainDep, ExplainEnv, ExplainInput, ExplainOutput,
+    LogStream, ShutdownReason, TargetCounts, TargetStatus,
 };
 use crate::executor::{BuildJob, build};
 use crate::graph::BuildGraph;
@@ -565,8 +565,9 @@ impl SessionState {
                 command_id,
                 target,
                 follow,
+                key,
             } => {
-                self.logs_get(command_id, target, follow).await;
+                self.logs_get(command_id, target, follow, key).await;
             }
             Command::QueryExplain { command_id, target } => {
                 self.query_explain(command_id, target).await;
@@ -600,7 +601,24 @@ impl SessionState {
                 return;
             }
         };
-        let cached = self.cache.get_ac(&key).await.ok().flatten().is_some();
+        let ac = self.cache.get_ac(&key).await.ok().flatten();
+        let cached = ac.is_some();
+        let cache_hit = ac.map(|entry| ExplainCacheHit {
+            built_at: entry.built_at,
+            duration_ms: entry.duration_ms,
+            exit_code: entry.exit_code,
+            outputs: entry
+                .outputs
+                .into_iter()
+                .map(|o| ExplainOutput {
+                    path: o.path,
+                    hash: o.content_hash,
+                    size: o.size,
+                    mode: o.mode,
+                })
+                .collect(),
+            outputs_content_hash: entry.outputs_content_hash,
+        });
 
         let file_inputs = breakdown
             .file_inputs
@@ -646,6 +664,7 @@ impl SessionState {
                 file_inputs,
                 deps,
                 env,
+                cache_hit,
             })
             .await;
     }
@@ -655,26 +674,44 @@ impl SessionState {
     /// cache-key walk + the AC entry's stdout/stderr blobs (the same data
     /// `giant logs` reads). `follow` (live tail of a running target) is not yet
     /// implemented; this always replays the persisted logs.
-    async fn logs_get(&self, command_id: Option<String>, target: TargetId, _follow: bool) {
+    async fn logs_get(
+        &self,
+        command_id: Option<String>,
+        target: TargetId,
+        _follow: bool,
+        key: Option<String>,
+    ) {
         if let Some(reason) = self.validate_targets(std::slice::from_ref(&target)) {
             self.reject(command_id, reason).await;
             return;
         }
-        let mut memo = std::collections::BTreeMap::new();
-        let key = match super::explain::walk_target(
-            &self.graph,
-            &self.cache,
-            &self.workspace_root,
-            &target,
-            &mut memo,
-        )
-        .await
-        {
-            Ok((key, _)) => key,
-            Err(e) => {
-                self.reject(command_id, format!("cannot compute cache key: {e:#}"))
-                    .await;
-                return;
+        let key = match key {
+            Some(hex) => match crate::model::ContentHash::from_hex(&hex) {
+                Some(h) => crate::model::CacheKey::new(h),
+                None => {
+                    self.reject(command_id, format!("malformed cache key: {hex}"))
+                        .await;
+                    return;
+                }
+            },
+            None => {
+                let mut memo = std::collections::BTreeMap::new();
+                match super::explain::walk_target(
+                    &self.graph,
+                    &self.cache,
+                    &self.workspace_root,
+                    &target,
+                    &mut memo,
+                )
+                .await
+                {
+                    Ok((key, _)) => key,
+                    Err(e) => {
+                        self.reject(command_id, format!("cannot compute cache key: {e:#}"))
+                            .await;
+                        return;
+                    }
+                }
             }
         };
 

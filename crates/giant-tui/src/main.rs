@@ -233,6 +233,7 @@ async fn run(initial_patterns: &[String], config: Option<&std::path::Path>) -> R
                                 command_id: Some(format!("c_{}", new_command_seq())),
                                 target,
                                 follow: false,
+                                key: None,
                             }).await;
                         }
                         Action::Explain(target) => {

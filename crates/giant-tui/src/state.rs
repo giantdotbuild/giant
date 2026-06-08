@@ -1014,6 +1014,7 @@ mod tests {
             }],
             deps: vec![],
             env: vec![],
+            cache_hit: None,
         });
         let ex = s.explain.expect("explain set");
         assert_eq!(ex.target.as_str(), "//:a");

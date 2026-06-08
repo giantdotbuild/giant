@@ -135,6 +135,10 @@ pub enum Command {
         target: TargetId,
         #[serde(default)]
         follow: bool,
+        /// Inspect a specific historical AC entry by its cache-key hex. Defaults
+        /// to the target's current cache key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
     },
 
     /// Read query: what feeds a target's cache key, and whether it is cached
@@ -287,10 +291,12 @@ mod tests {
                 command_id,
                 target,
                 follow,
+                key,
             } => {
                 assert_eq!(command_id.as_deref(), Some("q6"));
                 assert_eq!(target.as_str(), "//:a");
                 assert!(follow);
+                assert!(key.is_none());
             }
             _ => panic!("wrong variant"),
         }

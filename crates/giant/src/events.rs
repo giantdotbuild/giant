@@ -250,7 +250,35 @@ pub enum Event {
         file_inputs: Vec<ExplainInput>,
         deps: Vec<ExplainDep>,
         env: Vec<ExplainEnv>,
+        /// Present when `cached` - the cached action's metadata and outputs, so a
+        /// renderer can show "HIT (built X, Yms, exit Z)" and the output list
+        /// without a second round-trip. Absent on a miss.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_hit: Option<ExplainCacheHit>,
     },
+}
+
+/// The cached action behind a `query.explained` hit: metadata plus the produced
+/// outputs. Mirrors the action-cache entry, trimmed to what `giant explain`
+/// renders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplainCacheHit {
+    pub built_at: String,
+    pub duration_ms: u64,
+    pub exit_code: i32,
+    pub outputs: Vec<ExplainOutput>,
+    /// The aggregate hash of all outputs - the value a dependent target folds
+    /// into its own cache key.
+    pub outputs_content_hash: String,
+}
+
+/// One produced output in a `query.explained` cache hit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplainOutput {
+    pub path: String,
+    pub hash: String,
+    pub size: u64,
+    pub mode: String,
 }
 
 /// A file input contributing to a target's cache key (`query.explained`).
@@ -482,6 +510,18 @@ mod tests {
                 value: "/bin".into(),
                 built_in: true,
             }],
+            cache_hit: Some(ExplainCacheHit {
+                built_at: "2026-06-08T00:00:00Z".into(),
+                duration_ms: 42,
+                exit_code: 0,
+                outputs: vec![ExplainOutput {
+                    path: "bin/server".into(),
+                    hash: "c0ffee".into(),
+                    size: 1024,
+                    mode: "100755".into(),
+                }],
+                outputs_content_hash: "deadbeef".into(),
+            }),
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"t\":\"query.explained\""));
@@ -492,12 +532,16 @@ mod tests {
                 file_inputs,
                 deps,
                 env,
+                cache_hit,
                 ..
             } => {
                 assert_eq!(command, "go build");
                 assert_eq!(file_inputs.len(), 1);
                 assert_eq!(deps[0].id.as_str(), "//:lib");
                 assert!(env[0].built_in);
+                let hit = cache_hit.expect("cache_hit present");
+                assert_eq!(hit.duration_ms, 42);
+                assert_eq!(hit.outputs[0].path, "bin/server");
             }
             _ => panic!("wrong variant"),
         }

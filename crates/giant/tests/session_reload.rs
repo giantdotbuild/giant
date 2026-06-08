@@ -326,6 +326,71 @@ targets:
 }
 
 #[test]
+fn query_explain_reports_cache_hit_after_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    write_config(
+        ws,
+        r#"
+workspace: { name: e }
+targets:
+  - name: "a"
+    command: "touch built"
+    outputs: ["built"]
+"#,
+    );
+
+    let mut child = Command::new(giant_bin())
+        .args(["session", "--events", "ndjson"])
+        .current_dir(ws)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn giant session");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+
+    read_catalog_until(&mut out, |e| matches!(e, Event::EngineReady));
+
+    writeln!(
+        stdin,
+        r#"{{"c":"build","command_id":"b1","targets":["//:a"]}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    read_until(&mut out, |e| matches!(e, Event::BuildFinished { .. })).expect("build finishes");
+
+    writeln!(
+        stdin,
+        r#"{{"c":"query.explain","command_id":"e2","target":"//:a"}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let reply = read_until(&mut out, |e| {
+        matches!(e, Event::QueryExplained { command_id, .. } if command_id.as_deref() == Some("e2"))
+    })
+    .expect("query.explained reply");
+    if let Event::QueryExplained {
+        cached, cache_hit, ..
+    } = reply
+    {
+        assert!(cached, "built → cached");
+        let hit = cache_hit.expect("cache_hit present on a hit");
+        assert_eq!(hit.exit_code, 0);
+        assert!(
+            hit.outputs.iter().any(|o| o.path == "built"),
+            "outputs should list the produced file; got {:?}",
+            hit.outputs
+        );
+        assert!(!hit.outputs_content_hash.is_empty());
+    }
+
+    shutdown(child, stdin);
+}
+
+#[test]
 fn editing_giant_yaml_auto_reloads_via_the_watcher() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();
