@@ -658,7 +658,10 @@ tasks:
 }
 
 #[test]
-fn reserved_task_name_is_rejected() {
+fn task_named_after_a_giant_command_is_allowed() {
+    // Tasks are reached only as `giant task <name>` (ADR-0035), so a task named
+    // `build` is unambiguous and loads fine - it does not collide with the
+    // `giant build` porcelain.
     let dir = tempfile::tempdir().unwrap();
     write_config(
         dir.path(),
@@ -666,7 +669,7 @@ fn reserved_task_name_is_rejected() {
 workspace: { name: r }
 tasks:
   build:
-    command: "echo no"
+    command: "echo ok"
 "#,
     );
     let out = Command::new(giant_task_bin())
@@ -674,8 +677,12 @@ tasks:
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("shadows a built-in"));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("build"));
 }
 
 #[test]

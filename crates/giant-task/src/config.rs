@@ -80,13 +80,6 @@ fn validate(
     tasks: &IndexMap<String, TaskSpec>,
     services: &IndexMap<String, ServiceSpec>,
 ) -> Result<(), ConfigError> {
-    // Names that would shadow a built-in subcommand if dispatched via
-    // `giant <name>`. The dispatch shim picks built-ins first, but
-    // erroring here keeps the giant.yaml self-consistent.
-    const RESERVED: &[&str] = &[
-        "build", "test", "watch", "affected", "graph", "clean", "explain", "help",
-    ];
-
     for (name, spec) in services {
         if !is_valid_name(name) {
             return Err(ConfigError::Validation(format!(
@@ -134,11 +127,6 @@ fn validate(
         if !is_valid_name(name) {
             return Err(ConfigError::Validation(format!(
                 "task name {name:?} is invalid (alphanumeric, '-', '_'; no leading digit)"
-            )));
-        }
-        if RESERVED.contains(&name.as_str()) {
-            return Err(ConfigError::Validation(format!(
-                "task name '{name}' shadows a built-in `giant` subcommand"
             )));
         }
         match &spec.command {
@@ -373,7 +361,10 @@ tasks:
     }
 
     #[test]
-    fn rejects_reserved_name() {
+    fn allows_task_named_after_a_giant_command() {
+        // Tasks are reached only as `giant task <name>` (ADR-0035 dropped the
+        // bare `giant <name>` route), so a task named `build` is unambiguous
+        // and must load - it never collides with the `giant build` porcelain.
         let f = write_yaml(
             r#"
 workspace: { name: p }
@@ -382,8 +373,8 @@ tasks:
     command: "true"
 "#,
         );
-        let err = TaskConfig::load(f.path()).unwrap_err();
-        assert!(format!("{err}").contains("shadows a built-in"));
+        let cfg = TaskConfig::load(f.path()).expect("a task named 'build' is fine");
+        assert!(cfg.tasks.contains_key("build"));
     }
 
     #[test]

@@ -150,9 +150,10 @@ Because the watching lives in core, a task and a `giant build --watch`
 see the same change signal - one file-watching implementation, not two.
 
 Task names follow the same rules as workspace names (alphanumeric,
-hyphen, underscore; no leading digit). Names that would shadow a
-built-in giant subcommand (`build`, `test`, `watch`, `affected`,
-`graph`, `clean`, `explain`, `help`) are rejected at config load.
+hyphen, underscore; no leading digit). Any valid name is allowed - a task
+named `build` or `test` is fine. Tasks are always invoked as `giant task
+<name>`, so they never collide with a `giant` command like `giant build`
+(which runs the build porcelain); the two namespaces are separate.
 
 ## The service schema
 
