@@ -17,9 +17,10 @@ import giantGarden from '../../assets/giant-garden.png';
     <span class="eyebrow">Build orchestration · v0.1</span>
     <h1 class="hero-title">A build tool smaller than your repo. All the cache, none of the cathedral.</h1>
     <p class="hero-tag">
-      Giant tracks dependencies across language boundaries, builds in parallel,
-      and caches outputs locally and remotely. Tiny core, language-agnostic engine,
-      one config format.
+      A small build engine: content-addressed caching, a cross-language
+      dependency graph, parallel builds - driven over a tiny JSON protocol.
+      Tasks, the interactive UI, config generation are porcelains you add,
+      not core you carry.
     </p>
     <div class="cta-row">
       <a class="cta cta-primary" href="/start/quickstart/">Get started →</a>
@@ -65,11 +66,11 @@ import giantGarden from '../../assets/giant-garden.png';
     </p>
   </div>
   <div class="pillar">
-    <h3>Tiny core</h3>
+    <h3>A core you control</h3>
     <p>
-      One static binary. No JVM, no daemon, no plugins loaded into your
-      process. Optional porcelains extend the CLI via PATH, the
-      git/cargo model.
+      One static binary that builds, caches, and speaks NDJSON. No JVM, no
+      daemon, no plugins in your process. Everything else - tasks, the TUI,
+      generation - is a porcelain on your PATH. <a href="/extending/architecture/">Uninstall one and the feature is gone.</a>
     </p>
   </div>
 </section>
@@ -115,8 +116,8 @@ import giantGarden from '../../assets/giant-garden.png';
     <p>Mark targets with <code>release</code>, <code>flaky</code>, anything. Filter via <code>--tag</code> / <code>--no-tag</code>.</p>
   </div>
   <div class="feature">
-    <h4>NDJSON event stream</h4>
-    <p>Every build emits machine-readable events. Pipe into <code>jq</code>, IDE plugins, or your own TUI.</p>
+    <h4>An engine you can talk to</h4>
+    <p>Builds run over <a href="/guides/controlling-giant/">NDJSON</a>. A TUI, an IDE, or a web app drives Giant without linking its code.</p>
   </div>
   <div class="feature">
     <h4>LRU cache eviction</h4>
@@ -125,7 +126,7 @@ import giantGarden from '../../assets/giant-garden.png';
 </section>
 
 <div class="footnote">
-  MIT-licensed · <a href="https://github.com/johnae/giant">github.com/johnae/giant</a>
+  <a href="/compare/">How Giant compares</a> · MIT-licensed · <a href="https://github.com/johnae/giant">github.com/johnae/giant</a>
 </div>
 
 </div>

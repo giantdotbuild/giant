@@ -174,6 +174,31 @@ command writes, so getting this right is on you - `giant explain` shows
 each toolchain dependency's resolved hash so you can confirm it moves
 when you expect.
 
+## With asdf
+
+[asdf](https://asdf-vm.com) pins versions in a `.tool-versions` file. Unlike
+Nix, asdf's shims are *stable* paths (`~/.asdf/shims/go` doesn't move between
+versions), so the `readlink -f` trick won't work - key on the version line
+instead. This is simplest and needs no asdf binary in the build:
+
+```yaml
+# giant.yaml (workspace root)
+- name: "go"                   #  →  //:go
+  inputs: ["//.tool-versions"]
+  cwd: "//"
+  command: "grep '^golang ' .tool-versions > .giant/toolchains/go.id"
+  outputs: ["//.giant/toolchains/go.id"]
+  tags: ["toolchain"]
+```
+
+The input is the whole `.tool-versions`, so the target re-runs on any edit -
+but its output is only the `golang` line, so [early
+cutoff](/concepts/cache-key/) keeps your Go targets cached when you bump
+*Node* and re-keys them only when Go's line actually moves. For an identity
+that also catches a re-install of the same version, write `asdf which go`
+instead (it resolves to the version-specific install path, e.g.
+`~/.asdf/installs/golang/1.22.1/bin/go`).
+
 ## Showing toolchain targets
 
 Toolchain targets are folded out of the default output so the view stays

@@ -132,18 +132,31 @@ edits don't ripple through the dep graph as full rebuilds.
 
 ## Toolchain versions
 
-If your build's behaviour depends on a toolchain version (Go's
-compiler, Node's interpreter, etc.), put it in `env:` so the cache key
-reflects it:
+The cache key covers the command, inputs, env, and dependency outputs - but
+**not the compiler that runs the command**. Two machines on different Go or
+`rustc` versions compute the same key for the same target, and a shared remote
+cache will hand one a stale artifact built by the other. So a toolchain
+version has to be made part of the key explicitly.
+
+The right way is a **toolchain target**: a `toolchain`-tagged target whose
+input is whatever pins your tools (a `devenv.lock` / `flake.lock`, an `asdf`
+`.tool-versions`, a checked-in or git-lfs binary) and whose output is a
+content-derived identity. Build targets `deps:` on it, so a toolchain bump
+re-keys exactly the targets in that ecosystem and leaves the rest cache-warm.
+**[Pinning toolchains](/guides/toolchains/)** is the full guide - it covers
+devenv/Nix (resolving the store path), git-lfs binaries (hashing the bytes),
+per-tool targets, and why a system-installed tool can't be pinned honestly.
+
+The quick-and-dirty alternative is to stamp the version into `env:` so it
+folds into the key directly:
 
 ```yaml
 - name: "server"
   command: "go build -o //bin/server ."
   env:
-    GOVERSION: "1.23.4"   # bump this when you bump Go
+    GOVERSION: "1.23.4"   # bump this by hand when you bump Go
 ```
 
-Alternatively, capture the version in a target whose `command` writes
-it to a file. List that file in the `inputs:` of the targets that
-depend on the toolchain. When the version changes, the file's content
-changes, the cache keys shift, and everything downstream rebuilds.
+This works but is fragile - you have to remember to bump it, and nothing
+checks that the string matches the `go` actually on PATH. Prefer a toolchain
+target, which derives the identity from the real tool.

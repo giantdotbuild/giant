@@ -3,30 +3,57 @@ title: Tests with giant test
 description: Test targets, selection, and CI patterns.
 ---
 
-`giant test` is `giant build` for `test: true` targets. Same matcher,
-same renderer, same caching semantics. A test that's already passed
-on its current inputs doesn't run again until something changes.
+`giant test` is `giant build` restricted to `test: true` targets - same
+matcher, same renderer. The one difference from a build target is the cache
+default: **test targets run uncached by default**, so a plain test re-runs
+every time and needs no outputs. Opt into caching and a test that already
+passed on its current inputs is skipped until something changes.
 
 ## Marking a target as a test
+
+The minimal form: `test: true` and a command. No outputs, no caching - it
+runs whenever you ask.
 
 ```yaml
 # internal/auth/giant.yaml
 - name: "test"
   inputs:
     - "**/*.go"
+  test: true
+  tags: ["lang=go", "kind=test"]
+  cwd: "//"
+  command: "go test ./internal/auth"
+```
+
+The target's label is `//internal/auth:test`. `test: true` is the only thing
+separating it from a regular target: `giant build` skips it, `giant test`
+selects it, and it defaults to `cache: false` (so the "cacheable target needs
+outputs" rule doesn't apply - an uncached test needs none).
+
+## Caching test results
+
+To skip a test that can't have changed, opt it into the cache with
+`cache: true` and give it a **marker output** - a file the command touches
+only on success:
+
+```yaml
+- name: "test"
+  inputs:
+    - "**/*.go"
+  test: true
+  cache: true                       # opt in (tests are uncached by default)
   outputs:
     - "//test-cache/auth.ok"
-  test: true
   tags: ["lang=go", "kind=test"]
   cwd: "//"
   command: |
     go test ./internal/auth && touch test-cache/auth.ok
 ```
 
-The target's label is `//internal/auth:test`. The `test: true` field is
-the only thing that separates it from a regular target. The output file
-(`test-cache/auth.ok`) is what gets cached - its existence means "the
-test passed for these inputs."
+The marker (`test-cache/auth.ok`) is what gets cached - its existence is the
+recorded "the test passed for these inputs." (A cacheable target needs an
+output or an `exists:` check; the marker is the simplest output.) On unchanged
+inputs the marker is restored and `go test` is skipped.
 
 ## Selection
 
@@ -44,13 +71,9 @@ won't accidentally execute your test suite.
 
 ## Cache semantics
 
-A test target caches the same way a build target does. If the inputs
-are unchanged, the cache restores `test-cache/auth.ok` (the marker
-file) and `go test` is skipped.
-
-This is correct if and only if your test inputs cover everything the
-test reads. If `auth_test.go` reads a fixture file under
-`testdata/auth/`, list it (paths are package-relative):
+A cached test is correct only if its `inputs:` cover everything the test
+reads. If `auth_test.go` reads a fixture under `testdata/auth/`, list it
+(paths are package-relative):
 
 ```yaml
 inputs:
@@ -58,8 +81,10 @@ inputs:
   - "testdata/**/*"
 ```
 
-Otherwise an edit to the fixture won't invalidate the cache and you'll
-get a stale pass.
+Otherwise an edit to the fixture won't invalidate the cache and you'll get a
+stale pass. An uncached test (the default) has no such risk - it always runs -
+which is the safer choice for tests whose inputs are hard to pin down (ones
+that hit the network, the clock, or shared state).
 
 ## CI pattern: only affected tests
 

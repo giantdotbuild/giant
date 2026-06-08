@@ -36,6 +36,7 @@ export default defineConfig({
             { label: 'Quickstart', slug: 'start/quickstart' },
             { label: 'Install', slug: 'start/install' },
             { label: 'Your first build', slug: 'start/first-build' },
+            { label: 'How Giant compares', slug: 'compare' },
           ],
         },
         {
@@ -50,6 +51,7 @@ export default defineConfig({
         {
           label: 'Guides',
           items: [
+            { label: 'Controlling Giant (NDJSON)', slug: 'guides/controlling-giant' },
             { label: 'Generating config', slug: 'guides/generating-config' },
             { label: 'Docker images', slug: 'guides/docker' },
             { label: 'Tests with giant test', slug: 'guides/tests' },

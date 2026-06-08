@@ -1,203 +1,201 @@
 ---
 title: Architecture
-description: A tour of the engine internals.
+description: The small core, the NDJSON protocol, and the porcelains around them.
 ---
 
-Giant's whole engine is a small Rust crate - small enough to read in
-an afternoon, and meant to stay that way. This page is the map.
+Giant is built around one idea: **the core is a build engine you drive
+over a protocol, and everything else is a porcelain.** Get that idea and
+the rest of the system follows.
 
-## File layout
+## The core does three things
 
+The `giant` binary is small on purpose. It:
+
+1. **Builds and caches.** It reads static `giant.yaml` files, builds a
+   dependency graph, runs commands in parallel, and stores outputs in a
+   content-addressed cache (local, and optionally remote).
+2. **Speaks NDJSON.** Every build emits a stream of newline-delimited JSON
+   events. `giant session` turns that into a two-way channel: JSON commands
+   in on stdin, events out on stdout.
+3. **Dispatches.** `giant <name>` runs a `giant-<name>` binary if `<name>`
+   isn't built in.
+
+That is the whole core. Its only built-in subcommands are **`session`**
+(the engine over a pipe) and **`completions`** (shell completion for the
+dispatcher). Look at `giant --help` and you'll see the rest -
+`build`, `test`, `explain`, `graph`, `task` - but those are not in the
+binary. They are separate `giant-*` programs the dispatcher found on your
+PATH.
+
+## Everything you type is a porcelain
+
+A **porcelain** is a standalone binary named `giant-<name>`. When you run
+`giant build`, the core doesn't have a build command - it looks for
+`giant-build` (beside itself first, then on PATH) and execs it. The
+first-party set:
+
+| You type | Runs | What it is |
+| --- | --- | --- |
+| `giant build` / `test` / `verify` | `giant-build` | runs targets, renders progress |
+| `giant explain` | `giant-explain` | why a target's cache key is what it is |
+| `giant logs` | `giant-logs` | replay a target's captured output |
+| `giant affected` | `giant-affected` | list targets a change touches |
+| `giant clean` | `giant-clean` | prune the local cache |
+| `giant graph` | `giant-graph` | print the dependency graph |
+| `giant gen` | `giant-gen` | run config generators (offline) |
+| `giant task` | `giant-task` | named commands with build deps |
+| `giant tui` | `giant-tui` | interactive target browser |
+
+Some of these link the engine as a Rust library (the build family runs in
+process); others are pure [protocol clients](#two-ways-a-porcelain-talks-to-the-core)
+that spawn a `session` and render what comes back (`explain` over
+`query.explain`, `logs` over `logs.get`). From where you sit they are all
+just `giant <name>`. The boundary is real but invisible.
+
+An unknown name is an error:
+
+```console
+$ giant deploy
+no such subcommand 'deploy': not a built-in and no 'giant-deploy' found
+beside giant or on PATH.
+hint: to run a task named 'deploy', use `giant task deploy`.
 ```
-src/
-├── main.rs              # entry point; sets up tokio, dispatches to cli::run
-├── lib.rs               # crate root; re-exports the high-traffic types
-├── cli/                 # subcommand handlers
-│   ├── mod.rs
-│   ├── build.rs         # build/test → Command::Build on an in-process session
-│   ├── test.rs
-│   ├── session.rs       # the engine core: SessionState + the Command/Event loop
-│   ├── watch.rs         # shared watch mechanics (excludes, debouncer) - not a subcommand
-│   ├── affected.rs
-│   ├── graph.rs
-│   ├── explain.rs
-│   ├── clean.rs
-│   ├── external.rs      # porcelain dispatch (giant <name> → giant-<name>)
-│   └── prep.rs          # shared "load config + return graph"
-├── config.rs            # scan the tree for giant.yaml files, merge into one
-│                        #   graph, resolve package-relative paths + static validation
-├── model.rs             # core types: TargetSpec, CacheKey, ContentHash
-├── graph.rs             # build graph + topological sort
-├── selection.rs         # pattern language + affected detection
-├── executor.rs          # parallel dispatch, cache key composition
-├── cache.rs             # local content-addressed cache + LRU eviction
-├── remote.rs            # Bazel HTTP cache (feature-gated)
-├── watcher.rs           # notify-based file watcher
-├── renderer.rs          # event-to-line renderer
-├── events.rs            # NDJSON event types
-├── git.rs               # repo discovery for --affected --base
-├── paths.rs             # AbsPath / WsRelPath / OutputPath newtypes + mtime_ns helper
-└── types.rs             # GlobPattern newtype
-```
 
-## The data flow of one build
+## Tasks are just a porcelain
 
-The shape is: scan the tree for `giant.yaml` files → merge them into one
-graph (path-derived labels, package-relative paths resolved at load) →
-select → execute. There is no separate discovery or bootstrap pass; the
-config is whatever static files are checked in.
+Tasks are a good example of the model: named commands like `giant task fmt`
+are not a core feature at all. They live entirely in the `giant-task`
+porcelain.
+
+- The core has no `task` subcommand and no `tasks:` schema. It never reads
+  the `tasks:` block in your `giant.yaml`; `giant-task` does, with its own
+  parser, and ignores everything else.
+- Uninstall `giant-task` and the notion of a task is *gone*. `giant task`
+  errors like any unknown name, and `tasks:` in your config is inert text
+  the engine skips.
+- Nothing in the core changes either way. It was never involved.
+
+This is the design principle stated as a constraint: **new capability
+arrives as a porcelain.** The TUI, the task runner, config generation, the
+sandbox helper are opt-in software on your PATH; the engine carries none of
+their weight. The core stays small enough to read in an afternoon because the
+things that would grow it live outside it.
+
+## Two ways a porcelain talks to the core
+
+A porcelain that needs the engine has two transports, both the same
+[NDJSON protocol](/reference/events/):
+
+- **One-shot:** spawn `giant build --events ndjson`, read the event stream
+  off stdout. Simple, stateless. Good for a status line or a CI summary.
+- **Session:** spawn `giant session` once and speak commands on stdin
+  while parsing events on stdout. The engine loads config once and stays
+  warm. Good for a TUI, an IDE, or a web backend driving builds across many
+  requests.
+
+Because the protocol is the API, the client doesn't have to be a CLI at
+all. A desktop app, a web service, or an editor extension can spawn
+`giant session` and drive builds without linking a line of Giant's code.
+See **[Controlling Giant](/guides/controlling-giant/)** for worked
+examples.
+
+## How one build flows
 
 ```
 giant build //crates/giant:giant
-  │
+  │  (dispatch: exec giant-build)
   ▼
-[ cli/build.rs ]
-  config::load → scan + merge giant.yaml files → resolve paths → build graph
-  │
+[ giant-build ]  load config → scan + merge giant.yaml files → build graph
+  resolve selection (//crates/giant:giant) → run through the engine adapter
+  │  events stream back; the renderer prints them
   ▼
-[ selection ] resolve_patterns(//crates/giant:giant) → [//crates/giant:giant]
-  │
-  ▼
-[ cli/session.rs ] SessionState::handle_command(Command::Build{...})
-  the same in-process engine giant session / giant tui drive; the CLI
-  is just another protocol client. Events stream back to the tty
-  renderer, which reads pass/fail off build.finished.
-  │
-  ▼
-[ executor ] build(BuildJob)
-  for each target in topo order:
+[ engine ]  for each target in topological order:
+    compose cache key  = hash(command + cwd + env + file inputs + dep output hashes)
     │
-    ▼
-  [ executor::compose_cache_key ]
-    hash command + cwd + env + inputs + dep_outputs
-    (not the workspace name or target label - purely content-addressed)
-    │
-    ▼
-  [ cache::get_ac(key) ]
-    hit?  → restore outputs from CAS → emit target.finished{cache_hit}
-    miss? ↓
-    │
-    ▼
-  [ remote::get_ac(key) ]   (if --features remote)
-    hit?  → pull CAS blobs → write local AC → emit target.finished{remote_cache_hit}
-    miss? ↓
-    │
-    ▼
-  [ exists? ]
-    yes?  → emit target.finished{external_cache_hit}
-    no?   ↓
-    │
-    ▼
-  [ executor::run_command ]
-    spawn command via shell
-    capture stdout/stderr (stream to renderer as target.log events)
-    │
-    ▼
-  [ executor::fingerprint_outputs ]
-    hash every output file → put bytes in CAS → write AC entry
-    upload to remote cache in background (if --features remote)
-    │
-    ▼
-  emit target.finished{built}
+    ├─ local cache hit?   → restore outputs from the CAS        (cache_hit)
+    ├─ remote cache hit?  → pull blobs, write local entry        (remote_cache_hit)   [feature: remote]
+    ├─ declared `exists:`? → already present, skip               (external_cache_hit)
+    └─ miss → run the command, hash every output into the CAS,
+              write the action-cache entry, upload it (remote)   (built)
 ```
 
-## The cache key
+The cache key is a SHA-256 over a deterministic byte stream - command, cwd,
+environment, file-input hashes, and the output hashes of dependencies. It
+does **not** include the workspace name or the target label, so the same
+inputs hit the same entry across machines. See [The cache
+key](/concepts/cache-key/) for the full story.
 
-A SHA-256 over a deterministic byte stream. The composition is in
-`executor::compose_cache_key`. See [The cache key](/concepts/cache-key/)
-for the user-facing story; the source is the source of truth for the
-exact bytes.
+## The pieces
 
-## Output-based dep inference
-
-Targets don't have to list each other by label to express a dependency.
-Instead, a target declares the outputs it produces, and the engine links
-any target whose inputs match another target's outputs. That's how a
-static target picks up a generated artifact without naming the target
-that produced it. The graph builder runs this pass once after the package
-scan has merged every `giant.yaml`'s `targets:` into one set, before the
-topological sort. (Targets may still declare explicit `deps:` by label -
-the dogfood config does - but inference covers the common case.)
-
-Toolchain folding rides on the same pass: targets tagged `toolchain`
-are folded into their dependents' cache keys so a toolchain change
-invalidates everything built with it, without each target restating
-the dependency.
-
-## Watch loop
-
-`--watch` is a flag on `build`/`test`, not a subcommand. It dispatches
-`Command::WatchStart` to the same in-process `SessionState`; there is
-one build-watch loop and it lives in the engine (`cli/session.rs`),
-driven identically whether the client is the CLI or a TUI.
+The engine is one Rust crate (a library plus the `giant` binary). The wire
+protocol is a second small crate so porcelains can speak it without pulling
+in the engine. The porcelains are their own crates.
 
 ```
-session: watch_loop(selection)
-  build once
-  spawn notify watcher → mpsc channel of changed paths
-  loop:
-    debouncer.next_batch()       # quiet=100ms, max=500ms
-    affected_targets()           # intersect changed paths with selection
-    emit watch.affected{ids}     # empty = change touched nothing selected
-    if non-empty: build()
+crates/
+├── giant/             the engine: config scan, graph, selection, executor,
+│                      content-addressed cache, remote cache, file watcher,
+│                      the session loop - plus the `giant` binary
+│                      (session + completions + dispatch)
+├── giant-protocol/    the wire types: Command, Event, TargetId, and a small
+│                      client for spawning a session and collecting replies
+├── giant-build/       build / test / verify
+├── giant-explain/     explain          giant-logs/      logs
+├── giant-affected/    affected         giant-clean/     clean
+├── giant-graph/       graph            giant-gen/       config generators
+├── giant-task/        the task runner  giant-tui/       the interactive UI
+└── giant-sandbox/     the sandbox exec-wrapper helper
 ```
 
-The debouncer is a `tokio::select!` between a sleep, the channel, and
-a cancel token. The shared pieces - the exclude set, the debouncer,
-and the per-cycle affected step - live in `cli/watch.rs`; the loop that
-uses them is in `cli/session.rs`.
+Inside `giant/`, the modules that matter:
 
-## NDJSON event protocol
+- **`config`** - scan the tree for `giant.yaml`/`giant.json`, merge into one
+  graph, resolve package-relative paths, validate (a bad field fails the
+  load with a spanned error, never silently).
+- **`graph`** - the build graph and its topological sort.
+- **`selection`** - the pattern language (`//src/...`, `!exclusions`, tags)
+  and affected detection, shared by every selection-taking porcelain.
+- **`executor`** - parallel dispatch (a `tokio::JoinSet` bounded by CPU
+  count) and cache-key composition.
+- **`cache`** - the local content-addressed store (action cache + CAS) and
+  LRU eviction.
+- **`remote`** - the Bazel HTTP cache protocol, feature-gated.
+- **`watcher`** - the `notify`-based file watcher behind `--watch` and the
+  watch/affected subscriptions.
+- **`session`** - the `SessionState` and the command/event loop that *is*
+  the engine. The build family runs the identical loop in-process; the
+  difference is only who reads the events.
 
-Every part of the engine emits events through a `tokio::mpsc::Sender<Event>`.
-The renderer task pulls from the matching `Receiver` and either prints
-human-readable lines or serializes the raw event to NDJSON depending
-on mode.
+## Generation is offline, and outside the engine
 
-The same machinery backs every entry point. `giant session` fans the
-events out to its stdin/stdout client; `giant build` / `giant test`
-run the identical `Command::Build` through an in-process session and
-feed the stream to the tty renderer. The renderer and the NDJSON
-writer are two consumers of one engine dispatch - the CLI has no
-private build path.
-
-## Tokio task layout
-
-- **Main task**: runs `cli::run`, awaits the renderer task at the end.
-- **Renderer task**: consumes events from the mpsc, writes lines to
-  stdout. One per build.
-- **Executor**: uses `tokio::JoinSet` to spawn per-target tasks.
-  Bounded by `parallelism` (default = num CPUs). Each task does its
-  own cache lookup + (if needed) command execution.
-- **Remote upload task** (feature-gated): one background task that
-  drains an mpsc of "upload this AC entry + its blobs" requests.
-- **Watcher task**: the `notify` callback writes to an mpsc that the
-  watch loop reads.
-
-All tasks are async. No synchronous file I/O on the runtime -
-`spawn_blocking` wraps `std::fs` calls in `cache.rs`.
+The engine reads static config. It never computes targets at build time -
+no discovery pass, no matrix expansion, no language scanners. When a repo
+has too many targets to hand-write, you **generate** the `giant.yaml`
+files offline and check them in, exactly as you'd generate any other
+source. `giant gen` runs your generators; the engine just reads the files
+they wrote. See [Generating config](/guides/generating-config/).
 
 ## Why no daemon
 
-Two reasons. **Cost:** a build tool that needs to be running to be
-useful is a build tool you have to remember to start. **State:** a
-daemon owns shared state (graph, cache index) that needs sync, locks,
-and recovery semantics. Without a daemon, every `giant` invocation
-opens the cache directly, reads what it needs, exits.
+A build tool that has to be running to be useful is one you have to
+remember to start, and a daemon owns shared state (graph, cache index)
+that needs locks, sync, and recovery. Giant skips all of it: every
+invocation opens the cache directly, does its work, and exits. Watch mode
+is the one long-lived loop, and it is just the engine running in one
+process - when the process ends, the loop ends. No leftover state, nothing
+to clean up.
 
-Watch mode is the exception - it's the same engine in a loop, in one
-process. When the process ends, the loop ends. No leftover daemon to
-clean up.
+If you *want* a warm engine - to avoid re-reading config per command -
+that is exactly what `giant session` gives you, on demand, owned by
+whatever started it.
 
-## What's NOT in the engine
+## What is deliberately not here
 
-- Tasks (`giant-task` porcelain in `crates/giant-task/`; see
-  [its docs page](/extending/giant-task/)).
-- TUI (`giant-tui` porcelain in `crates/giant-tui/`; see
-  [its docs page](/extending/giant-tui/)).
-- Service supervision (process-compose / overmind / systemd-run).
-- Embedded scripting language.
-- Plugin DLLs (porcelains via subprocess, not loaded code).
-
-The pitch is a small, focused build engine. Anything that creeps the
-surface beyond the engine gets pushed out as a porcelain.
+- **Tasks** - `giant-task` (see above).
+- **A TUI** - `giant-tui`. The core never takes over your terminal.
+- **Service supervision** - use process-compose, overmind, or systemd-run.
+- **An embedded scripting language** - generation runs offline; the engine
+  reads the result.
+- **Plugin DLLs** - porcelains are subprocesses over a protocol; nothing is
+  loaded into the engine's address space. See [Why not plugin
+  DLLs](/extending/porcelains/#why-not-plugin-dlls).

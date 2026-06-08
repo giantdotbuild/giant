@@ -15,16 +15,22 @@ that users install if they want it.
 ## How dispatch works
 
 ```console
-$ giant build              # built-in
-$ giant test               # built-in
+$ giant session            # built-in (the engine over a pipe)
+$ giant build              # not built-in → execs giant-build
 $ giant task deploy        # not built-in → execs giant-task with [deploy]
-$ giant nope               # error: no such subcommand, no giant-nope on PATH
+$ giant nope               # error: no such subcommand, no giant-nope found
 ```
 
-On Unix the dispatch uses `exec(3)` so the porcelain replaces the
-giant process. Signals (Ctrl-C, SIGTERM) go directly to the porcelain;
-there's no parent in the middle to translate them. On non-Unix Giant
-spawns and waits, propagating the exit code.
+Only `session` and `completions` are built into the core binary.
+Everything else - including `build`, `test`, and `explain` - is a
+`giant-*` program the dispatcher finds and execs. An unknown name is an
+error, with a hint to try `giant task <name>`.
+
+Giant looks for `giant-<name>` **beside its own binary first** (the suite
+installs its porcelains in one directory), then on PATH. On Unix the
+dispatch uses `exec(3)` so the porcelain replaces the giant process -
+signals (Ctrl-C, SIGTERM) go straight to it, no parent in the middle. On
+non-Unix Giant spawns and waits, propagating the exit code.
 
 ## Writing a porcelain
 
@@ -76,37 +82,43 @@ Use lowercase, hyphen-separated names. `giant-task`, `giant-tui`,
 `giant-deploy`. The dispatch is case-sensitive on case-sensitive
 filesystems.
 
-Reserved built-in names (don't shadow these): `build`, `test`,
-`affected`, `explain`, `graph`, `clean`, `watch`, `session`,
-`completions`.
+Only two names are reserved (the core's built-ins): `session` and
+`completions`. Everything else is fair game - though if you name yours
+`giant-build` you'll shadow the first-party build porcelain, so pick
+something distinct.
 
 ## First-party porcelains
 
-Two ship with Giant today:
+The Giant suite ships these. Each is an ordinary `giant-*` binary; install
+the ones you want, skip the rest.
 
-- **`giant-task`** - task runner. `giant task fmt`, `giant task
-  deploy`. See [giant-task](/extending/giant-task/).
-- **`giant-tui`** - interactive target browser + build runner. See
-  [giant-tui](/extending/giant-tui/).
+| Command | Binary | Does |
+| --- | --- | --- |
+| `giant build` / `test` / `verify` | `giant-build` | run targets, render progress |
+| `giant explain` | `giant-explain` | what feeds a target's cache key |
+| `giant logs` | `giant-logs` | replay a target's last captured output |
+| `giant affected` | `giant-affected` | list targets a change touches |
+| `giant clean` | `giant-clean` | prune the local cache |
+| `giant graph` | `giant-graph` | print the dependency graph |
+| `giant gen` | `giant-gen` | run config [generators](/guides/generating-config/) |
+| `giant task` | `giant-task` | named commands - see [giant-task](/extending/giant-task/) |
+| `giant tui` | `giant-tui` | interactive browser - see [giant-tui](/extending/giant-tui/) |
+
+`giant-explain` and `giant-logs` are pure protocol clients: they spawn a
+`giant session`, send one read query, and render the reply. They're the
+worked example for the [Controlling Giant](/guides/controlling-giant/)
+guide: thin clients that render what the engine reports, with no build logic
+of their own.
 
 ## Communicating with the engine
 
-Two transport options, both speaking the same [NDJSON
-protocol](/reference/events/):
-
-### 1. Subprocess + stdout (the simple case)
-
-Your porcelain spawns `giant build --events ndjson` and consumes
-stdout. One-shot, easy, no shared state.
-
-### 2. Persistent session via `giant session`
-
-For interactive porcelains (a TUI controlling a watch session, an IDE
-driving builds across files), spawn `giant session` once and speak
-NDJSON commands on stdin while parsing events from stdout. The engine
-loads config once, then stays warm. See
-[`giant session`](/reference/cli/#giant-session) and the
-[Command channel](/reference/events/#command-channel) section.
+A porcelain that needs the engine talks to it over the [NDJSON
+protocol](/reference/events/), the same interface the CLI uses - either
+one-shot (`giant build --events ndjson`, read stdout) or a warm
+[`giant session`](/reference/cli/#giant-session) with a two-way command
+channel. **[Controlling Giant](/guides/controlling-giant/)** walks through
+both with runnable Node and Python clients. A porcelain is just such a
+client that happens to be named `giant-<name>`.
 
 ## Distribution
 

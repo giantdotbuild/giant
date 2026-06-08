@@ -4,20 +4,23 @@ description: Every subcommand and flag.
 ---
 
 ```
-giant [GLOBAL FLAGS] <subcommand> [ARGS]
+giant <subcommand> [ARGS]
 ```
 
-## Global flags
+## Core flags
 
-`--fresh` and `--log` are the true global flags - they work before or
-after the subcommand. `--config` is not global: it must appear *before*
-the subcommand (e.g. `giant --config path/giant.yaml build`).
+The `giant` binary is a thin dispatcher. Its built-ins (`session`,
+`completions`) take two flags of its own, *before* the subcommand:
 
 | Flag | Description |
 |---|---|
-| `--config <path>` | Path to `giant.yaml` / `giant.json`. Defaults to walking up from cwd. Must precede the subcommand. |
-| `--fresh` | Force a fresh build - bypass cache. |
+| `--config <path>` | Path to `giant.yaml` / `giant.json` for the core. Defaults to walking up from cwd. Must precede the subcommand. |
 | `--log <filter>` | Log filter (RUST_LOG syntax). Default: `error`. |
+
+Everything else is a [porcelain](/extending/porcelains/) with its own
+flags, passed *after* the subcommand - including `--config`, `--fresh`,
+and `--sandbox` on the build family. So it's `giant build --fresh`, not
+`giant --fresh build`.
 
 ## `giant build`
 
@@ -48,6 +51,9 @@ no target matches "//src/go/server:sever" - did you mean "//src/go/server:server
 
 | Flag | Default | Description |
 |---|---|---|
+| `--config <path>` | - | Path to `giant.yaml` / `giant.json`. Walks up from cwd by default. |
+| `--fresh` | off | Bypass the cache - rebuild every selected target. |
+| `--sandbox` | off | Run eligible targets through the `giant-sandbox` helper (Linux only; see [verify](#giant-verify)). |
 | `-j, --jobs <n>` | num CPUs | Number of parallel jobs. |
 | `--events <fmt>` | - | Emit structured events. `ndjson` is the only format in v1. |
 | `--affected` | off | Restrict to targets affected by changes. Requires `--base` or `--file`. |
@@ -84,6 +90,21 @@ giant test [PATTERNS...]
 
 Passing a non-test exact label (e.g. `giant test //src/go/server:server`)
 errors - catches the obvious typo.
+
+## `giant verify`
+
+The hermeticity audit. `verify` is `build` with the sandbox and a fresh
+build forced on, over every target (tests included): each target runs
+isolated, the cache is bypassed so everything actually runs, and a target
+that reads an undeclared file, depends on a scrubbed env var, or reaches
+the network fails. Same selection and output flags as `build`.
+
+```
+giant verify [PATTERNS...]
+```
+
+Linux only (it uses the `giant-sandbox` helper). Use it in CI to catch
+under-declared inputs before they cause a phantom cache hit.
 
 ## Watching
 
@@ -227,9 +248,9 @@ config edits without a restart. `config.reload` forces the same thing.
 
 `giant <name>` resolves in order: a built-in subcommand, then a
 `giant-<name>` binary (beside the giant binary, then on PATH). Everything
-after the name is passed through untouched (no `--` needed). There is no
-catch-all - an unknown name is an error, not a silent hand-off, so a typo
-of a command fails loudly instead of being treated as a task.
+after the name is passed through untouched (no `--` needed). An unknown name
+is an error (with a hint to try `giant task <name>`), so a typo fails loudly
+instead of running as something unexpected.
 
 ```
 giant tui                # → giant-tui binary

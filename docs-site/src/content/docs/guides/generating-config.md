@@ -1,119 +1,138 @@
 ---
 title: Generating config
-description: Produce giant.yaml files offline for repos too big to hand-write.
+description: Produce giant.yaml files offline with giant gen and the Starlark host.
 ---
 
-Giant reads **static** config - checked-in `giant.yaml` files, nothing
-more. The engine never computes config at build time; it reads the files
-as they are. When a repo has too many targets to hand-write (every Go
-package, every Dockerfile, every crate), you produce the config the same
-way you'd produce any other generated source: run a tool offline, write
-the files, check them in.
+Giant reads **static** config - checked-in `giant.yaml` files, nothing more.
+The engine never computes config at build time; it reads the files as they
+are. When a repo has too many targets to hand-write (every Go package, every
+Dockerfile, every crate), you **generate** the config offline and check it
+in, the same way you'd generate any other source.
 
-That tool is a **generator**. It is an ordinary script - in whatever
-language fits - that scans your sources and writes `giant.yaml` files into
-the tree. Giant then reads them via its normal [package scan](/concepts/packages/);
-it has no idea a generator was involved, exactly as it can't tell
-hand-written config from generated config.
+The tool that runs your generators is the `giant-gen` porcelain - `giant
+gen`. It writes static `giant.yaml` files; the engine then reads them via its
+normal [package scan](/concepts/packages/), unable to tell generated config
+from hand-written. This is the split Bazel uses (the engine reads `BUILD`
+files, Gazelle generates them) - discovery is not the engine's job.
 
-This is the same split Bazel uses: the build engine reads static `BUILD`
-files, and a separate tool (Gazelle) generates them. Discovery is not the
-engine's job.
+`giant gen` runs two kinds of generator: the built-in **Starlark host** (the
+integrated path), and **external commands** (any language, via a small
+contract). Most repos only need the first.
 
-## A Go-package generator
+## Authoring in Starlark
 
-This walks the module with `go list` and writes one `giant.yaml` per
-package, with a build target for `main` packages and a vet target for
-libraries - the natural way to produce config at scale.
+Drop a `giant.star` at the workspace root with a `generate(ws)` entry point.
+`giant gen` runs it through the built-in host; it has no separate config to
+declare (a root `giant.star` is picked up automatically).
+
+```python
+# giant.star - one release build+install target per Rust binary,
+# derived from `cargo metadata`.
+load("@std//cargo.star", "cargo_targets")
+
+def generate(ws):
+    cargo_targets(ws, deps = ["//:devenv"])
+```
+
+```console
+$ giant gen            # writes the giant.*.yaml files in place
+$ giant build //...    # the engine reads what was written
+```
+
+Giant ships a standard library of generators - `cargo.star`, `go.star` -
+that you `load(...)`. They're plain Starlark built on a generic host: a
+`ws` handle (`ws.exec`, `ws.glob`, `ws.read`, `ws.rel`), `parse_json` /
+`parse_yaml`, and a `target()` builtin that emits a target. The
+language-specific opinion lives in editable Starlark, leaving the engine
+generic - `cargo.star` derives targets from `cargo metadata` the same way
+`go.star`
+derives them from `go list`.
+
+To pin and edit a std generator, vendor it into your repo:
+
+```console
+$ giant gen vendor cargo.star      # copies it to star/cargo.star
+```
+
+then load it by its repo-local path instead of `@std//`:
+
+```python
+load("star/cargo.star", "cargo_targets")
+```
+
+## Keeping it fresh: `giant gen --check`
+
+A generated file goes stale when sources change (a new package, a new
+import). `giant gen --check` regenerates into a scratch dir and diffs against
+what's committed, exiting non-zero if they differ - the staleness gate, built
+in. Wire it into CI:
+
+```console
+$ giant gen --check
+cargo	ok
+docker	DRIFT
+error: a generator is stale; run `giant gen <name>` and commit the result
+```
+
+It reports each generator as `ok`, `DRIFT` (output would change), or
+`FAILED`, and exits non-zero if any drifted. This is the check Gazelle
+performs with `--mode=diff`, without the shell plumbing.
+
+## External generators (any language)
+
+A generator that isn't Starlark - a Go program, a script, an existing
+codegen tool - plugs in as an **external command**, declared in the root
+`giant.yaml`'s `generate:` list:
+
+```yaml
+generate:
+  - go                                   # sugar for { name: go, command: giant-gen-go }
+  - { name: docker, command: "./tools/gen-docker.sh" }
+  - { script: giant.star, infix: rust } # a Starlark generator, named explicitly
+```
+
+A bare name resolves to `giant-gen-<name>` on PATH; a value with a `/` is a
+path from the workspace root; anything with spaces runs via `sh -c`. Each
+generator owns one filename infix and writes only `giant.<name>.yaml` files.
+
+The **invocation contract**: `giant gen` runs the command with the
+workspace root as cwd and two env vars - `GIANT_GEN_OUT` (the directory to
+write under, mirroring the source tree) and `GIANT_WORKSPACE` (the root). The
+command writes its `giant.<name>.yaml` files and exits 0.
 
 ```bash
 #!/usr/bin/env bash
-# tools/gen-go.sh - write a giant.yaml into every Go package directory.
+# tools/gen-docker.sh - a `docker` generator: one image target per Dockerfile.
 set -euo pipefail
-
-go list -json ./... | jq -c '
-  {
-    dir: .Dir,
-    name: (.ImportPath | sub(".*/"; "")),
-    is_main: (.Name == "main"),
-    import: .ImportPath
-  }
-' | while read -r pkg; do
-  dir=$(jq -r '.dir' <<<"$pkg")
-  name=$(jq -r '.name' <<<"$pkg")
-  import=$(jq -r '.import' <<<"$pkg")
-
-  if [ "$(jq -r '.is_main' <<<"$pkg")" = "true" ]; then
-    cat >"$dir/giant.yaml" <<YAML
-# generated by tools/gen-go.sh - do not edit
+find . -name Dockerfile -printf '%h\n' | while read -r dir; do
+  mkdir -p "$GIANT_GEN_OUT/$dir"
+  cat > "$GIANT_GEN_OUT/$dir/giant.docker.yaml" <<YAML
 targets:
-  - name: "$name"
-    inputs: ["*.go", "//go.mod", "//go.sum"]
-    outputs: ["//bin/$name"]
-    cwd: "//"
-    command: "go build -o bin/$name ./$import"
-    tags: ["lang=go", "kind=bin"]
+  - name: image
+    inputs: ["Dockerfile", "**/*"]
+    outputs: ["//.build/$(basename "$dir").tar"]
+    command: "docker build -t $(basename "$dir") ."
 YAML
-  else
-    cat >"$dir/giant.yaml" <<YAML
-# generated by tools/gen-go.sh - do not edit
-targets:
-  - name: "vet"
-    inputs: ["*.go"]
-    outputs: []
-    cwd: "//"
-    command: "go vet ./$import"
-    tags: ["lang=go", "kind=lib"]
-YAML
-  fi
 done
 ```
 
-Run it, check the result in:
-
-```bash
-tools/gen-go.sh
-git add '**/giant.yaml'
-git commit -m "regenerate go targets"
-```
-
-Now `giant build //...` builds everything, `giant build --tag kind=bin`
-builds just the binaries, and a binary in `cmd/server/` is selectable as
-`//cmd/server:server`. The package-relative `*.go` inputs each stop at
-their own package boundary, so a parent package never claims a child's
-files - the generator gets one clean target per directory for free.
-
-## Keeping it fresh
-
-A generated file goes stale when sources change (a new package, a new
-import). The fix is the same as any generated artifact: regenerate and
-commit, and gate it in CI so a stale checkout fails the build.
-
-```bash
-# CI: fail if the checked-in config doesn't match a fresh generation.
-tools/gen-go.sh
-git diff --exit-code -- '**/giant.yaml' \
-  || { echo "giant.yaml is stale - run tools/gen-go.sh"; exit 1; }
-```
-
-This is exactly the staleness check Gazelle's `--mode=diff` performs.
+`giant gen --check` works for external generators too - it runs them into the
+scratch dir and diffs, same as the built-in host.
 
 ## Matrices and platforms
 
-"Build for `{arm, x86} × {mac, linux}`, minus a few combinations" is
-target multiplication - also generation. The engine has no matrix
-construct and never expands one; you author the matrix compactly in your
-generator (Jsonnet, CUE, Python, shell) and emit the expanded targets as
-ordinary config. The engine only ever sees the expanded result.
+"Build for `{arm, x86} × {mac, linux}`, minus a few combinations" is target
+multiplication - also generation. The engine has no matrix construct and
+never expands one; you write the matrix compactly in your generator (a loop
+in Starlark, or whatever your external generator uses) and emit the expanded
+targets as ordinary config. The engine only ever sees the result.
 
-## The planned `giant gen` runner
+## You're never locked in
 
-The pattern above works today with nothing but a script and `git diff`.
-A small built-in runner is designed to make it ergonomic
-([ADR-0026](https://github.com/johnae/giant)): you declare your
-generators in the root config, `giant gen` runs them all, and
-`giant gen --check` performs the scratch-regenerate-and-diff gate for you.
-Generators will own a per-generator filename (`giant.<name>.yaml`) so a
-Go generator and a proto generator can both contribute to one directory
-without colliding. None of that changes the model - a generator still just
-writes static config files that the engine scans.
+Because the engine only reads static files, nothing stops you from writing
+`giant.yaml` by hand, or with a one-off script you run yourself and commit -
+giant can't tell the difference. `giant gen` is the managed path (it owns its
+`giant.<name>.yaml` files, checks staleness, and links generated outputs into
+the graph); hand-authored config is just config. Most repos use `giant gen`
+for the bulk and hand-write the root `giant.yaml` (workspace settings,
+toolchains, tasks).

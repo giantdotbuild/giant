@@ -5,8 +5,12 @@ description: Machine-readable event stream for porcelains and IDE plugins.
 
 Every Giant build can emit a stream of newline-delimited JSON events
 on stdout. Each event is one line, one JSON object, terminated by `\n`.
-The protocol is the contract between core and any porcelain (a TUI,
-an IDE plugin, your CI dashboard).
+
+This protocol *is* Giant's public API. The core builds and caches;
+everything else - the TUI, the task runner, an IDE plugin, a CI dashboard,
+a desktop or web app - drives it over this stream. This page is the
+catalogue; for how to wire a client to it (spawn a session, send commands,
+parse replies), see [Controlling Giant](/guides/controlling-giant/).
 
 ## Enabling
 
@@ -34,14 +38,19 @@ The `t` field discriminates. All other fields are type-specific.
 ```jsonc
 { "t": "engine.hello",
   "version": "0.1.0",
-  "protocol": 1,
-  "workspace": "/home/me/project" }
+  "protocol": 2,
+  "workspace": "/home/me/project",
+  "capabilities": ["query.status", "logs.get", "query.explain"] }
 
 { "t": "engine.shutdown",
   "reason": "graceful",     // or "signal", "error"
   "error": "..."            // present only on error
 }
 ```
+
+`capabilities` lists the optional read queries this engine answers (see
+[Read queries](#read-queries)). A client checks it before sending one,
+rather than assuming a feature by protocol number.
 
 After `engine.hello`, a persistent session streams its catalog - one
 `target.described` per target in the graph - then `engine.ready`
@@ -188,6 +197,64 @@ The subscription is single-shot per session - a second
 `affected.subscribe` replaces the first, and `affected.unsubscribe`
 ends it.
 
+### Read queries
+
+A session answers read-only queries about the graph and cache without
+building anything. Each reply carries the `command_id` of the request that
+triggered it. These are advertised in `engine.hello.capabilities`.
+
+`query.status` (from a `query.status` command) - per-target cache state:
+
+```jsonc
+{ "t": "query.status",
+  "command_id": "q1",
+  "targets": [
+    { "id": "//src/go/server:server",
+      "state": "cached",          // cached | stale
+      "key": "3a7f9c…",
+      "last_duration_ms": 1240 }   // present when cached
+  ] }
+```
+
+`query.explained` (from a `query.explain` command) - what feeds a target's
+cache key, the structured form of `giant explain`:
+
+```jsonc
+{ "t": "query.explained",
+  "command_id": "e1",
+  "target": "//src/go/server:server",
+  "key": "3a7f9c…",
+  "cached": true,
+  "command": "go build -o bin/server ./cmd/server",
+  "cwd": "",
+  "file_inputs": [ { "path": "cmd/server/main.go", "hash": "…", "size": 812 } ],
+  "deps":        [ { "id": "//proto:gen", "output_hash": "…" } ],
+  "env":         [ { "key": "GOFLAGS", "value": "-mod=vendor", "built_in": false } ],
+  "cache_hit": {                  // present only when cached
+    "built_at": "2026-06-08T10:00:00Z",
+    "duration_ms": 1240,
+    "exit_code": 0,
+    "outputs": [ { "path": "bin/server", "hash": "…", "size": 9123840, "mode": "100755" } ],
+    "outputs_content_hash": "…" } }
+```
+
+`logs.line` / `logs.end` (from a `logs.get` command) - replay a target's
+captured output from its last cached build:
+
+```jsonc
+{ "t": "logs.line",
+  "command_id": "L1",
+  "target": "//src/go/server:server",
+  "stream": "stdout",            // or "stderr"
+  "line": "go: downloading …" }
+
+{ "t": "logs.end",
+  "command_id": "L1",
+  "target": "//src/go/server:server" }
+```
+
+`logs.end` is always sent, even when there were no captured logs.
+
 ### Backpressure
 
 If the consumer is slow, Giant drops log events first (build lifecycle
@@ -204,10 +271,12 @@ events are never dropped). After a drop, you'll see:
 
 `engine.hello.protocol` is bumped on breaking changes. Clients should
 check it at startup and refuse to talk to incompatible versions.
-Current: `1`.
+Current: `2`.
 
 Additive changes (new event types, new optional fields) don't bump the
 version. Clients should tolerate unknown event types by skipping them.
+Optional features are advertised in `engine.hello.capabilities` rather than
+gated on the version number - check the list before sending a read query.
 
 ## Command channel
 
@@ -261,9 +330,26 @@ Command shapes (full list in `crates/giant/src/commands.rs`):
 { "c": "config.reload",
   "command_id": "c_9" }
 
+{ "c": "query.status",
+  "command_id": "c_10",
+  "targets": ["//src/go/server:server"] }   // empty = every target
+
+{ "c": "query.explain",
+  "command_id": "c_11",
+  "target": "//src/go/server:server" }
+
+{ "c": "logs.get",
+  "command_id": "c_12",
+  "target": "//src/go/server:server",
+  "key": null }                              // null = the current cache key
+
 { "c": "shutdown",
-  "command_id": "c_10" }
+  "command_id": "c_13" }
 ```
+
+The three read queries (`query.status`, `query.explain`, `logs.get`) are
+answered by the events in [Read queries](#read-queries), correlated by
+`command_id`. They never build; they only inspect the graph and cache.
 
 `watch.subscribe` is notify-only - the engine replies with
 `watch.changed` events, never builds. `config.reload` forces a
