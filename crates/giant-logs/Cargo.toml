@@ -2,10 +2,12 @@
 name = "giant-logs"
 version = "0.1.0"
 edition = "2024"
+description = "Replay a target's captured logs. Dispatched via `giant logs`."
 
 [dependencies]
-# Reads a target's AC entry + its stdout/stderr CAS blobs (ADR-0034). Links the
-# giant lib for the workspace load, cache-key compute, and cache reads.
+# Engine: for the Command / Event protocol types and the session-query client
+# only. logs talks to a `giant session` subprocess (`logs.get`); it does not
+# read the cache itself (ADR-0034).
 giant = { path = "../giant" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"

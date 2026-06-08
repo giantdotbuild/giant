@@ -2,17 +2,16 @@
 //! invocation of a target. Answer "what did the build say?" without busting
 //! the cache.
 //!
-//! Porcelain (ADR-0034), dispatched as `giant logs`. Reads the AC entry by the
-//! target's current cache key, pulls the `stdout_blob` / `stderr_blob` CAS
-//! hashes, and streams the blob contents back. Honors the same
-//! `cache.capture_logs` policy: logs only exist if capture was on.
+//! Porcelain (ADR-0034), dispatched as `giant logs`. It does not read the cache
+//! itself: it asks a `giant session` over the protocol (`logs.get`) and writes
+//! the replayed `logs.line` events back out, honoring the stream filters.
 
 use std::io::Write;
 
 use anyhow::Result;
 use clap::Parser;
-use giant::executor::compute_cache_key_with_breakdown;
-use giant::{BuildGraph, CacheKey, ContentHash, LocalCache, TargetId, prepare};
+use giant::commands::Command;
+use giant::events::{Event, LogStream};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -23,8 +22,8 @@ struct Cli {
     /// Target ID to show logs for.
     target: String,
 
-    /// Inspect a specific AC entry by its cache-key hex. Defaults to the
-    /// target's current cache key.
+    /// Inspect a specific historical AC entry by its cache-key hex. Defaults to
+    /// the target's current cache key.
     #[arg(long, value_name = "HEX")]
     key: Option<String>,
 
@@ -55,107 +54,67 @@ async fn main() {
 
 async fn real_main() -> Result<()> {
     let cli = Cli::parse();
-    let prepared = prepare(cli.config.as_deref()).await?;
 
-    let target_id = TargetId::new(cli.target.clone());
-    let spec = prepared
-        .graph
-        .get(&target_id)
-        .ok_or_else(|| anyhow::anyhow!("unknown target: {}", target_id.as_str()))?
-        .clone();
-
-    let key = match cli.key {
-        Some(hex) => parse_cache_key(&hex)?,
-        None => {
-            let dep_outputs =
-                collect_dep_output_hashes(&prepared.graph, &target_id, &prepared.cache).await?;
-            let (key, _) = compute_cache_key_with_breakdown(
-                &spec,
-                &prepared.workspace_root,
-                &prepared.cache,
-                dep_outputs,
-            )
-            .await?;
-            key
-        }
+    let command = Command::LogsGet {
+        command_id: Some("L1".into()),
+        target: giant::TargetId::new(&cli.target),
+        follow: false,
+        key: cli.key.clone(),
     };
-
-    let entry = prepared.cache.get_ac(&key).await?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no cached AC entry for {} at key {}\n\
-             (run the target first, or check capture_logs is on)",
-            target_id.as_str(),
-            key.to_hex(),
-        )
-    })?;
+    let events = giant::query_session(
+        cli.config.as_deref(),
+        command,
+        |e| matches!(e, Event::LogsEnd { command_id, .. } if command_id.as_deref() == Some("L1")),
+    )
+    .await?;
 
     let want_stdout = !cli.stderr_only;
     let want_stderr = !cli.stdout_only;
-    if want_stdout && let Some(hex) = entry.stdout_blob.as_deref() {
-        write_blob(&prepared.cache, hex, cli.merged, false).await?;
+
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let mut out = stdout.lock();
+    let mut err = stderr.lock();
+    let mut wrote = false;
+
+    for event in events {
+        let Event::LogsLine {
+            command_id,
+            stream,
+            line,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        if command_id.as_deref() != Some("L1") {
+            continue;
+        }
+        match stream {
+            LogStream::Stdout if want_stdout => {
+                let _ = writeln!(out, "{line}");
+                wrote = true;
+            }
+            LogStream::Stderr if want_stderr => {
+                // --merged folds stderr into stdout, in arrival order (the
+                // session replays the stdout blob before the stderr blob).
+                if cli.merged {
+                    let _ = writeln!(out, "{line}");
+                } else {
+                    let _ = writeln!(err, "{line}");
+                }
+                wrote = true;
+            }
+            _ => {}
+        }
     }
-    if want_stderr && let Some(hex) = entry.stderr_blob.as_deref() {
-        write_blob(&prepared.cache, hex, cli.merged, true).await?;
-    }
-    if entry.stdout_blob.is_none() && entry.stderr_blob.is_none() {
+
+    if !wrote {
         eprintln!(
-            "no captured logs for {} (cache_key={}, exit_code={}). \
-             cache.capture_logs may have been off when this entry was written.",
-            target_id.as_str(),
-            key.to_hex(),
-            entry.exit_code,
+            "no captured logs for {} \
+             (run the target first, or check cache.capture_logs is on)",
+            cli.target
         );
     }
     Ok(())
-}
-
-async fn write_blob(cache: &LocalCache, hex: &str, merged: bool, is_stderr: bool) -> Result<()> {
-    let hash = ContentHash::from_hex(hex)
-        .ok_or_else(|| anyhow::anyhow!("malformed cache-key hex in AC entry: {hex}"))?;
-    let blob = cache
-        .get_cas(&hash)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("log blob {hex} missing from CAS (evicted?)"))?;
-    if merged || !is_stderr {
-        std::io::stdout().write_all(&blob)?;
-    } else {
-        std::io::stderr().write_all(&blob)?;
-    }
-    Ok(())
-}
-
-fn parse_cache_key(hex: &str) -> Result<CacheKey> {
-    let hash = ContentHash::from_hex(hex)
-        .ok_or_else(|| anyhow::anyhow!("--key must be 64 hex chars (32 bytes), got {hex:?}"))?;
-    Ok(CacheKey::new(hash))
-}
-
-/// Compute `dep_outputs` for `target_id` by reading each direct dep's AC entry
-/// (early-cutoff hash). Mirrors what the executor does at dispatch time.
-async fn collect_dep_output_hashes(
-    graph: &BuildGraph,
-    target_id: &TargetId,
-    cache: &LocalCache,
-) -> Result<std::collections::BTreeMap<TargetId, ContentHash>> {
-    let spec = graph
-        .get(target_id)
-        .ok_or_else(|| anyhow::anyhow!("missing target: {}", target_id.as_str()))?;
-
-    let mut out = std::collections::BTreeMap::new();
-    for dep_id in &spec.deps {
-        let dep_spec = graph
-            .get(dep_id)
-            .ok_or_else(|| anyhow::anyhow!("missing dep: {}", dep_id.as_str()))?
-            .clone();
-        let inner = Box::pin(collect_dep_output_hashes(graph, dep_id, cache)).await?;
-        let (dep_key, _) =
-            compute_cache_key_with_breakdown(&dep_spec, &cache.root().clone(), cache, inner)
-                .await?;
-        if let Some(entry) = cache.get_ac(&dep_key).await? {
-            let hash = ContentHash::from_hex(&entry.outputs_content_hash)
-                .ok_or_else(|| anyhow::anyhow!("bad outputs_content_hash in AC"))?;
-            out.insert(dep_id.clone(), hash);
-        }
-    }
-    Ok(out)
 }
