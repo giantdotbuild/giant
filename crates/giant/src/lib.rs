@@ -8,6 +8,7 @@
 
 pub mod cache;
 pub mod cli;
+pub mod client;
 pub mod commands;
 pub mod config;
 pub mod events;
@@ -25,6 +26,9 @@ pub mod watcher;
 
 // Re-export the most-used types at the crate root.
 pub use cache::LocalCache;
+// The session-query client read-query porcelains use to render engine-computed
+// data over the protocol (ADR-0034) instead of recomputing it.
+pub use client::query_session;
 // The workspace-load entry point porcelains link against (ADR-0034): scan
 // config, build the graph, open the cache.
 pub use cli::prep::{Prepared, prepare, resolve_cache_dir};
