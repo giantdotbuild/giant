@@ -44,14 +44,22 @@ pub enum RunError {
     Io(#[from] std::io::Error),
 }
 
+/// The post-name tokens of one `giant task <name> ...` invocation:
+/// `positionals` are the bare args, `arg_kvs` the `--arg name=value`
+/// overrides, and `passthrough` the args after a literal `--` (forwarded
+/// verbatim to the command as `$@`).
+#[derive(Default, Clone, Copy)]
+pub struct Invocation<'a> {
+    pub positionals: &'a [String],
+    pub arg_kvs: &'a [String],
+    pub passthrough: &'a [String],
+}
+
 /// Resolve + run. Returns the task command's exit code (0 on success).
-/// `positionals` are the bare args after the task name; `arg_kvs` are
-/// explicit `--arg name=value` overrides.
 pub async fn run(
     cfg: &TaskConfig,
     name: &str,
-    positionals: &[String],
-    arg_kvs: &[String],
+    inv: Invocation<'_>,
     workspace_root: &Path,
     verbose: bool,
 ) -> anyhow::Result<u8> {
@@ -59,7 +67,7 @@ pub async fn run(
         name: name.to_string(),
     })?;
 
-    let bound = bind_args(spec, positionals, arg_kvs)?;
+    let bound = bind_args(spec, inv.positionals, inv.arg_kvs, inv.passthrough)?;
 
     // 1. Build deps.
     if !spec.deps.is_empty() {
@@ -209,16 +217,22 @@ struct BoundArgs {
     variadic_name: Option<String>,
 }
 
-/// Bind `positionals` (bare args after the task name) and `--arg
-/// name=value` overrides against the task's declared `args:`. Positionals
-/// fill the scalar args in order; a trailing `variadic` arg collects the
-/// rest. `--arg` sets a named arg explicitly and conflicts with a
-/// positional for the same arg. Applies defaults, enforces `choices`, and
-/// errors on missing-required / too-many / unknown-name.
+/// Bind `positionals` (bare args after the task name), `--arg name=value`
+/// overrides, and `passthrough` (args after `--`) against the task's declared
+/// `args:`. Positionals fill the scalar args in order; a trailing `variadic`
+/// arg collects the rest. `--arg` sets a named arg explicitly and conflicts
+/// with a positional for the same arg. Applies defaults, enforces `choices`,
+/// and errors on missing-required / unknown-name.
+///
+/// Forwarding to `$@`: a task that declares **no** args forwards all positionals
+/// (it's a pass-through wrapper); a task that declares args rejects extras
+/// (typo-catching) unless a `variadic` arg absorbs them. `passthrough` (after
+/// `--`) always reaches `$@`, either way.
 fn bind_args(
     spec: &TaskSpec,
     positionals: &[String],
     kvs: &[String],
+    passthrough: &[String],
 ) -> Result<BoundArgs, RunError> {
     let scalar_count = spec.args.iter().filter(|a| !a.variadic).count();
 
@@ -238,15 +252,31 @@ fn bind_args(
         }
     }
     if pi < positionals.len() {
-        return Err(RunError::BadArg {
-            name: "<positional>".into(),
-            detail: format!(
-                "task takes {scalar_count} argument(s); got {} extra: {:?}",
-                positionals.len() - scalar_count,
-                &positionals[pi..],
-            ),
-        });
+        if spec.args.is_empty() {
+            // A task that declares no args is a pass-through wrapper: there is
+            // nothing to validate against, so forward everything to `$@`.
+            variadic.extend(positionals[pi..].iter().cloned());
+        } else {
+            // A task that *does* declare args is strict - an unexpected extra is
+            // probably a typo. Use `--` to forward on purpose.
+            return Err(RunError::BadArg {
+                name: "<positional>".into(),
+                detail: format!(
+                    "task takes {scalar_count} declared argument(s); got {} extra: {:?}. \
+                     To forward arguments to the command, put them after `--` \
+                     (e.g. `giant task <name> -- {}`).",
+                    positionals.len() - scalar_count,
+                    &positionals[pi..],
+                    positionals[pi..].join(" "),
+                ),
+            });
+        }
     }
+
+    // Args after `--` are forwarded verbatim to the command's `$@`, on top of
+    // whatever the variadic arg (or the no-args pass-through) collected. The
+    // universal escape hatch, available whether or not the task declares args.
+    variadic.extend(passthrough.iter().cloned());
 
     // 2. Apply `--arg name=value` overrides by name.
     for kv in kvs {
@@ -515,7 +545,7 @@ mod tests {
     #[test]
     fn positional_binds_by_order() {
         let s = task(vec![arg("env", None), arg("tag", Some("latest"))]);
-        let b = bind_args(&s, &["prod".into(), "v2".into()], &[]).unwrap();
+        let b = bind_args(&s, &["prod".into(), "v2".into()], &[], &[]).unwrap();
         assert_eq!(scalar(&b, "env"), Some("prod"));
         assert_eq!(scalar(&b, "tag"), Some("v2"));
     }
@@ -523,14 +553,14 @@ mod tests {
     #[test]
     fn default_applied_when_positional_omitted() {
         let s = task(vec![arg("env", None), arg("tag", Some("latest"))]);
-        let b = bind_args(&s, &["prod".into()], &[]).unwrap();
+        let b = bind_args(&s, &["prod".into()], &[], &[]).unwrap();
         assert_eq!(scalar(&b, "tag"), Some("latest"));
     }
 
     #[test]
     fn required_missing_errors() {
         let s = task(vec![arg("env", None)]);
-        let err = bind_args(&s, &[], &[]).unwrap_err();
+        let err = bind_args(&s, &[], &[], &[]).unwrap_err();
         assert!(format!("{err}").contains("required"));
     }
 
@@ -538,10 +568,10 @@ mod tests {
     fn explicit_arg_sets_and_conflicts() {
         let s = task(vec![arg("env", Some("staging"))]);
         // `--arg` sets it when no positional is given.
-        let b = bind_args(&s, &[], &["env=prod".into()]).unwrap();
+        let b = bind_args(&s, &[], &["env=prod".into()], &[]).unwrap();
         assert_eq!(scalar(&b, "env"), Some("prod"));
         // positional + `--arg` for the same arg → conflict.
-        let err = bind_args(&s, &["prod".into()], &["env=stg".into()]).unwrap_err();
+        let err = bind_args(&s, &["prod".into()], &["env=stg".into()], &[]).unwrap_err();
         assert!(format!("{err}").contains("both positionally and via --arg"));
     }
 
@@ -550,7 +580,7 @@ mod tests {
         let mut a = arg("env", Some("staging"));
         a.choices = Some(vec!["staging".into(), "prod".into()]);
         let s = task(vec![a]);
-        let err = bind_args(&s, &["nope".into()], &[]).unwrap_err();
+        let err = bind_args(&s, &["nope".into()], &[], &[]).unwrap_err();
         assert!(format!("{err}").contains("not one of"));
     }
 
@@ -559,7 +589,7 @@ mod tests {
         let mut v = arg("flags", None);
         v.variadic = true;
         let s = task(vec![arg("env", None), v]);
-        let b = bind_args(&s, &["prod".into(), "a".into(), "b".into()], &[]).unwrap();
+        let b = bind_args(&s, &["prod".into(), "a".into(), "b".into()], &[], &[]).unwrap();
         assert_eq!(scalar(&b, "env"), Some("prod"));
         assert_eq!(b.variadic, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(b.variadic_name.as_deref(), Some("flags"));
@@ -568,21 +598,34 @@ mod tests {
     #[test]
     fn too_many_positionals_without_variadic_errors() {
         let s = task(vec![arg("env", None)]);
-        let err = bind_args(&s, &["a".into(), "b".into()], &[]).unwrap_err();
+        let err = bind_args(&s, &["a".into(), "b".into()], &[], &[]).unwrap_err();
         assert!(format!("{err}").contains("extra"));
+    }
+
+    #[test]
+    fn no_declared_args_forwards_everything_to_variadic() {
+        // A task that declares no args is a pass-through wrapper: bare args
+        // (flags included) reach the command as `$@`, no `--` or `variadic`
+        // declaration needed.
+        let s = task(vec![]);
+        let b = bind_args(&s, &["--host".into(), "0.0.0.0".into()], &[], &[]).unwrap();
+        assert_eq!(
+            b.variadic,
+            vec!["--host".to_string(), "0.0.0.0".to_string()]
+        );
     }
 
     #[test]
     fn unknown_arg_name_errors() {
         let s = task(vec![]);
-        let err = bind_args(&s, &[], &["nope=1".into()]).unwrap_err();
+        let err = bind_args(&s, &[], &["nope=1".into()], &[]).unwrap_err();
         assert!(format!("{err}").contains("no such declared arg"));
     }
 
     #[test]
     fn malformed_kv_errors() {
         let s = task(vec![]);
-        let err = bind_args(&s, &[], &["nosep".into()]).unwrap_err();
+        let err = bind_args(&s, &[], &["nosep".into()], &[]).unwrap_err();
         assert!(format!("{err}").contains("--arg name=value"));
     }
 }

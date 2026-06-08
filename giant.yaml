@@ -111,8 +111,8 @@ tasks:
     deps: ["//docs-site:build"]
 
   docs-dev:
-    # "$@" forwards anything after `giant task docs-dev --` to astro,
-    # so e.g. `giant task docs-dev -- --host` binds on all interfaces.
+    # No declared args, so everything is forwarded to astro via `$@`:
+    # `giant task docs-dev --host` (or `... -- --host`) binds all interfaces.
     command: 'npx astro dev "$@"'
     description: "serve the docs site at localhost:4321 (blocks)"
     deps: ["//docs-site:install"]

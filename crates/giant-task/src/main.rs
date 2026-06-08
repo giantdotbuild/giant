@@ -88,26 +88,33 @@ pub(crate) struct Cli {
 }
 
 /// The post-name tokens, split into the task's positional args, `--arg`
-/// overrides, and a `--help` request.
+/// overrides, a `--help` request, and any pass-through args after `--`.
 #[derive(Default)]
 struct TaskArgs {
     positionals: Vec<String>,
     arg_kvs: Vec<String>,
     want_help: bool,
+    /// Everything after a literal `--`, verbatim. These are forwarded to the
+    /// command as its positional parameters (`$@`), uninterpreted.
+    passthrough: Vec<String>,
 }
 
-/// Split the raw tokens after the task name. `--help`/`-h` requests the
-/// task signature, `--arg name=value` sets a named arg, and everything
-/// else - including flag-like values such as `--release`, which bind to
-/// the task's `variadic` arg and reach the command as `$@` - is a
-/// positional. (A literal `--` is consumed by the arg parser, so to
-/// forward arbitrary args, declare a `variadic` arg.)
+/// Split the raw tokens after the task name. A literal `--` ends parsing: every
+/// token after it is pass-through, forwarded verbatim to the command as `$@`
+/// (the cargo / npm idiom - `giant task docs-dev -- --host`). Before `--`:
+/// `--help`/`-h` requests the task signature, `--arg name=value` sets a named
+/// arg, and everything else is a positional (it binds to declared args, or to a
+/// `variadic` arg, in order).
 fn parse_task_args(rest: &[OsString]) -> anyhow::Result<TaskArgs> {
     let mut out = TaskArgs::default();
     let mut it = rest.iter();
     while let Some(tok) = it.next() {
         let s = tok.to_string_lossy();
         match s.as_ref() {
+            "--" => {
+                out.passthrough
+                    .extend(it.by_ref().map(|t| t.to_string_lossy().into_owned()));
+            }
             "--help" | "-h" => out.want_help = true,
             "--arg" => {
                 let v = it
@@ -201,29 +208,18 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?
         .to_path_buf();
 
+    let inv = runner::Invocation {
+        positionals: &parsed.positionals,
+        arg_kvs: &parsed.arg_kvs,
+        passthrough: &parsed.passthrough,
+    };
+
     if cli.watch {
         // Watching now happens in the engine session, which owns the
         // debouncer; `--quiet-ms` / `--max-delay-ms` are no longer wired
         // through (see TDD-0019). They stay accepted for compatibility.
-        watch::loop_forever(
-            cfg,
-            &cfg_path,
-            &workspace_root,
-            &name,
-            &parsed.positionals,
-            &parsed.arg_kvs,
-            cli.verbose,
-        )
-        .await
+        watch::loop_forever(cfg, &cfg_path, &workspace_root, &name, inv, cli.verbose).await
     } else {
-        runner::run(
-            &cfg,
-            &name,
-            &parsed.positionals,
-            &parsed.arg_kvs,
-            &workspace_root,
-            cli.verbose,
-        )
-        .await
+        runner::run(&cfg, &name, inv, &workspace_root, cli.verbose).await
     }
 }

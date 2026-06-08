@@ -31,8 +31,7 @@ pub async fn loop_forever(
     cfg_path: &Path,
     workspace_root: &Path,
     name: &str,
-    positionals: &[String],
-    arg_kvs: &[String],
+    inv: runner::Invocation<'_>,
     verbose: bool,
 ) -> anyhow::Result<u8> {
     let mut task = cfg
@@ -43,7 +42,7 @@ pub async fn loop_forever(
 
     // Run once up front, like the old watcher did.
     println!("· initial run");
-    let _ = runner::run(&cfg, name, positionals, arg_kvs, workspace_root, verbose).await;
+    let _ = runner::run(&cfg, name, inv, workspace_root, verbose).await;
 
     // Spawn the engine session: it loads config + discovery once, then
     // streams events. We hold its stdin to send the subscribe command.
@@ -85,7 +84,7 @@ pub async fn loop_forever(
                     }
                     Event::WatchChanged { paths } => {
                         announce(&paths);
-                        let _ = runner::run(&cfg, name, positionals, arg_kvs, workspace_root, verbose).await;
+                        let _ = runner::run(&cfg, name, inv, workspace_root, verbose).await;
                     }
                     Event::CatalogReady => {
                         // Config / discovery changed. Reload our task config so
@@ -102,7 +101,7 @@ pub async fn loop_forever(
                                 if scope_moved {
                                     subscribe(&mut stdin, &task).await?;
                                     println!("· deps/inputs changed, re-running");
-                                    let _ = runner::run(&cfg, name, positionals, arg_kvs, workspace_root, verbose).await;
+                                    let _ = runner::run(&cfg, name, inv, workspace_root, verbose).await;
                                 }
                             }
                             Err(e) => {

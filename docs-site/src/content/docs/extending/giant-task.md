@@ -7,7 +7,7 @@ description: Run named commands with build deps, args, and pass-through.
 binary that adds named commands ("tasks") on top of Giant's build
 engine. Dispatched automatically via `giant task <name>` (Giant
 itself doesn't ship a `task` subcommand; the dispatcher execs
-`giant-task` on PATH per [ADR-0010](https://github.com/johnae/giant/blob/main/docs/adr/0010-tasks-live-in-porcelain.md)).
+`giant-task` on PATH).
 
 ```console
 $ giant task deploy
@@ -147,7 +147,7 @@ What gets watched:
   noisy; declare `deps:` / `inputs:` where you can.
 
 Because the watching lives in core, a task and a `giant build --watch`
-see the same change signal - one file-watching implementation, not two.
+see the same change signal from one shared file-watching implementation.
 
 Task names follow the same rules as workspace names (alphanumeric,
 hyphen, underscore; no leading digit). Any valid name is allowed - a task
@@ -207,7 +207,7 @@ tasks:
 ```
 
 ```console
-$ giant dev
+$ giant task dev
 · starting services: db, api, worker
 [db]     listening on 5432
 [api]    serving on :8080
@@ -245,8 +245,9 @@ If a step fails:
 
 ### Signals
 
-`finally` and service teardown run on **SIGINT or SIGTERM**, not just a
-terminal Ctrl-C. When a task has services or a `finally`, giant-task
+`finally` and service teardown run on **SIGINT or SIGTERM**, so a terminal
+Ctrl-C, a `pkill`, or a `systemctl stop` all trigger them. When a task
+has services or a `finally`, giant-task
 installs a handler: a signal - whether from Ctrl-C, `pkill`, `systemctl
 stop`, or a parent supervisor - interrupts the running command (forwarded
 to its process group), then the lifecycle falls through to `finally` and
@@ -303,63 +304,78 @@ $ giant task run-test
 
 ## Arguments
 
-`args:` is an ordered list. Values are bound **positionally** in
-declaration order - `giant deploy prod` binds `prod` to the first arg.
-An arg with no `default` is **required**; one with a `default` is
-optional. A trailing arg may be `variadic: true` to collect the rest.
+Tasks support **named, validated args** *and* **arbitrary forwarding** - you
+don't have to choose. Named args make a task discoverable (they show up in
+`--list`, per-task `--help`, and completions) and validated (`choices`,
+required). Anything you don't declare can still be forwarded to the command.
 
-Each scalar arg is exported two ways before the command runs:
-`GIANT_ARG_<NAME>` (uppercased, unambiguous) and a plain `$name`. A
-variadic arg becomes the command's positional parameters (`$@`).
+`args:` is an ordered list. Values bind **positionally** in declaration
+order. An arg with no `default` is **required**; one with a `default` is
+optional; `choices` constrains it; a trailing arg may be `variadic: true` to
+collect the rest. Each scalar arg is exported before the command runs as
+`GIANT_ARG_<NAME>` (uppercased) and a plain `$name`; the variadic arg, and
+anything forwarded, becomes the command's positional parameters (`$@`). Set
+an arg by name with `--arg name=value` (the scriptable form).
+
+### Forwarding args to the command
+
+Whether leftover args reach `$@` depends on what the task declares. Three
+example tasks cover every case:
 
 ```yaml
 tasks:
-  deploy:
-    command: "kubectl apply -f k8s/$env/ $@"
+  serve:                                   # no args → pass-through wrapper
+    command: 'npx astro dev "$@"'
+
+  deploy:                                  # one validated arg, no variadic → strict
+    command: 'kubectl apply -f k8s/$env/ $@'
     args:
-      - name: env
-        choices: ["staging", "prod"]   # required (no default)
-        description: "Target environment"
-      - name: flags
-        variadic: true                 # the rest → $@
+      - { name: env, choices: ["staging", "prod"] }
+
+  test:                                    # named arg + variadic tail
+    command: 'cargo test -p $pkg $@'
+    args:
+      - { name: pkg }
+      - { name: flags, variadic: true }
 ```
 
 ```console
-$ giant deploy prod --server-side
-▶ deploy
-deployed to prod with: --server-side
+# `serve` declares no args, so it forwards everything (flags included):
+$ giant task serve --host --port 4321      #  → npx astro dev --host --port 4321
 
-$ giant deploy            # missing required arg
-giant-task: argument 'env': required (no value supplied and no default)
+# `deploy` is strict: the named arg binds, a stray extra is treated as a typo…
+$ giant task deploy prod                    #  env=prod
+$ giant task deploy nowhere                 #  error: not one of [staging, prod]
+$ giant task deploy prod --force            #  error: 1 extra ["--force"], use --
+$ giant task deploy prod -- --force         #  env=prod, and kubectl also gets --force
 
-$ giant deploy nowhere
-giant-task: argument 'env': value "nowhere" is not one of ["staging", "prod"]
+# `test` has a variadic tail, so extras land in $@ with no `--` needed:
+$ giant task test core --nocapture          #  pkg=core, $@=[--nocapture]
+$ giant task test core -- --nocapture       #  same (the `--` is optional here)
 ```
 
-You can also set an arg by name with `--arg name=value` (the scriptable
-form); it conflicts with a positional for the same arg.
+The rules in one line each:
 
-**Everything after the task name belongs to the task** - including
-flag-like values, which bind to the variadic arg and reach the command
-as `$@`, no `--` needed:
+- **No declared `args:`** → the task is a pass-through wrapper; *all* args
+  forward to `$@`. (This is why `docs-dev` / `docs-preview` need no `args:`.)
+- **Declared args, no variadic** → strict; an unexpected extra is rejected as
+  a likely typo. Add a `variadic: true` arg to accept extras on purpose.
+- **`--`** → forwards everything after it to `$@` verbatim, from *any* task,
+  the cargo / npm idiom. Use it when a flag you're forwarding could be mistaken
+  for one of giant-task's own.
 
-```console
-$ giant test --release --nocapture     # forwarded to the test task's $@
-```
-
-Giant-task's own flags (`--watch`, `--config`, …) therefore come
-*before* the task name (`giant task --watch deploy`), the same rule git
-and cargo use.
+Giant-task's own flags (`--watch`, `--config`, …) come *before* the task
+name (`giant task --watch deploy`), the same rule git and cargo use.
 
 ## Per-task help
 
-`giant <task> --help` prints that task's signature - its arguments,
+`giant task <name> --help` prints that task's signature - its arguments,
 which are required, their defaults and choices:
 
 ```console
-$ giant deploy --help
+$ giant task deploy --help
 deploy - deploy the app
-  usage: giant deploy <env> [tag=latest]
+  usage: giant task deploy <env> [tag=latest]
 
     env  staging|prod  target environment
     tag  =latest

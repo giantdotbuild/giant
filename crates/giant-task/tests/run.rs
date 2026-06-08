@@ -291,6 +291,68 @@ fn bare_help_shows_giant_task_help() {
 }
 
 #[test]
+fn args_after_dashdash_forward_to_the_command_without_declared_args() {
+    // The user's `giant task docs-preview -- --host` case: a task with NO
+    // declared args still forwards everything after `--` to the command as
+    // `$@`, verbatim (flags included, no stray `--`).
+    let dir = tempfile::tempdir().unwrap();
+    write_config(
+        dir.path(),
+        r#"
+workspace: { name: pt }
+tasks:
+  wrap:
+    command: 'printf "%s\n" "$@" > out.txt'
+"#,
+    );
+    let out = Command::new(giant_task_bin())
+        .args(["wrap", "--", "--host", "0.0.0.0", "--port=4321"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+        "--host\n0.0.0.0\n--port=4321\n"
+    );
+}
+
+#[test]
+fn bare_args_forward_when_the_task_declares_none() {
+    // The user's `giant task docs-preview --host` case: a task with no declared
+    // args is a pass-through wrapper, so bare args (flags included) reach the
+    // command as `$@` without `--` or a variadic declaration.
+    let dir = tempfile::tempdir().unwrap();
+    write_config(
+        dir.path(),
+        r#"
+workspace: { name: pt }
+tasks:
+  wrap:
+    command: 'printf "%s\n" "$@" > out.txt'
+"#,
+    );
+    let out = Command::new(giant_task_bin())
+        .args(["wrap", "--host", "0.0.0.0"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+        "--host\n0.0.0.0\n"
+    );
+}
+
+#[test]
 fn variadic_arg_becomes_positional_params() {
     let dir = tempfile::tempdir().unwrap();
     write_config(
