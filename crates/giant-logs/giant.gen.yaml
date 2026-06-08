@@ -1,0 +1,17 @@
+targets:
+- name: giant-logs
+  inputs:
+  - src/**/*.rs
+  - Cargo.toml
+  - //Cargo.toml
+  - //Cargo.lock
+  outputs:
+  - //bin/giant-logs
+  deps:
+  - //:devenv
+  command: cargo build --release -p giant-logs --bin giant-logs && install -m 0755 target/release/giant-logs bin/giant-logs
+  cwd: //
+  timeout_secs: 600
+  tags:
+  - bin
+  - rust

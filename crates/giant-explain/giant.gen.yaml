@@ -1,0 +1,17 @@
+targets:
+- name: giant-explain
+  inputs:
+  - src/**/*.rs
+  - Cargo.toml
+  - //Cargo.toml
+  - //Cargo.lock
+  outputs:
+  - //bin/giant-explain
+  deps:
+  - //:devenv
+  command: cargo build --release -p giant-explain --bin giant-explain && install -m 0755 target/release/giant-explain bin/giant-explain
+  cwd: //
+  timeout_secs: 600
+  tags:
+  - bin
+  - rust

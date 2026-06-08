@@ -1,0 +1,49 @@
+targets:
+- name: giant-build
+  inputs:
+  - src/**/*.rs
+  - Cargo.toml
+  - //Cargo.toml
+  - //Cargo.lock
+  outputs:
+  - //bin/giant-build
+  deps:
+  - //:devenv
+  command: cargo build --release -p giant-build --bin giant-build && install -m 0755 target/release/giant-build bin/giant-build
+  cwd: //
+  timeout_secs: 600
+  tags:
+  - bin
+  - rust
+- name: giant-test
+  inputs:
+  - src/**/*.rs
+  - Cargo.toml
+  - //Cargo.toml
+  - //Cargo.lock
+  outputs:
+  - //bin/giant-test
+  deps:
+  - //:devenv
+  command: cargo build --release -p giant-build --bin giant-test && install -m 0755 target/release/giant-test bin/giant-test
+  cwd: //
+  timeout_secs: 600
+  tags:
+  - bin
+  - rust
+- name: giant-verify
+  inputs:
+  - src/**/*.rs
+  - Cargo.toml
+  - //Cargo.toml
+  - //Cargo.lock
+  outputs:
+  - //bin/giant-verify
+  deps:
+  - //:devenv
+  command: cargo build --release -p giant-build --bin giant-verify && install -m 0755 target/release/giant-verify bin/giant-verify
+  cwd: //
+  timeout_secs: 600
+  tags:
+  - bin
+  - rust

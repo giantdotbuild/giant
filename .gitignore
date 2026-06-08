@@ -11,7 +11,7 @@ devenv.local.yaml
 
 # Build outputs
 result
-bin
+/bin
 
 # Giant runtime state
 .giant/

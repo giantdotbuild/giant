@@ -100,11 +100,23 @@ there. `test` is build with a test selection; `verify` is build --sandbox
     protocol gains additive fields: `query.explained` carries the cache-hit detail
     (built-at, duration, exit, outputs, `outputs_content_hash`) and `logs.get`
     takes an optional `key` to inspect a specific historical AC entry.
-- **Phase B (the renderer move):** `build`, `test`, `verify` into one
-  `giant-build` crate. These are category 1 (build progress is engine-computed),
-  but the in-process build adapter is the heavy lift; the renderer and the
-  build/event plumbing move there. After this the binary has only `session` +
-  `completions`.
+- **Phase B (the renderer move): Done.** `build` / `test` / `verify` move into one
+  `giant-build` crate (three bins sharing `BuildArgs` + a `run` fn). The renderer
+  moves with them; the engine keeps the in-process build adapter and exposes it
+  (`giant::run_one_build` / `run_watch_command` / `resolve_sandbox` + the prep
+  helpers), so the porcelain links the engine and renders the event stream rather
+  than recomputing - these are category 1, but a subprocess-protocol build is
+  deferred (the in-process path avoids a subprocess for the most common command).
+  `format_duration` (shared with the task renderer) drops into a tiny
+  `giant::fmt`. After this the binary has only `session` + `completions`.
+
+  Two follow-on changes fell out of the move: (1) dispatch now looks for
+  `giant-<name>` *next to the giant binary* before PATH, so the co-installed
+  suite (and a dev `target/<profile>` tree) resolves porcelains without PATH
+  fiddling; (2) the giant-level `--fresh` / `--sandbox` global flags are removed -
+  with build/test/verify gone they had no reader, and as `global` flags they
+  swallowed a porcelain's own `--fresh` / `--sandbox` before dispatch. Clients
+  pass `fresh` per build over the protocol; `--sandbox` is giant-build's flag.
 
 ## Consequences
 

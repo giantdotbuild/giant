@@ -22,9 +22,11 @@ pub fn dispatch(args: Vec<OsString>) -> anyhow::Result<()> {
     };
     let name = name_os.to_string_lossy();
 
-    // 1. An explicit `giant-<name>` binary wins (ADR-0010).
+    // 1. An explicit `giant-<name>` binary wins (ADR-0010). Look beside the
+    //    giant binary first - the suite ships its porcelains in the same
+    //    directory - then fall back to PATH.
     let prog = format!("giant-{name}");
-    if let Some(path) = find_on_path(&prog) {
+    if let Some(path) = find_sibling(&prog).or_else(|| find_on_path(&prog)) {
         return exec_or_spawn(&path, rest);
     }
 
@@ -56,6 +58,15 @@ pub fn dispatch(args: Vec<OsString>) -> anyhow::Result<()> {
     routed.push(name_os.clone());
     routed.extend_from_slice(rest);
     exec_or_spawn(&to_path, &routed)
+}
+
+/// Look for `name` next to the running `giant` binary. The first-party
+/// porcelains install alongside it (the giant-suite package, or `target/<profile>`
+/// in a dev tree), so this resolves them without relying on PATH order.
+fn find_sibling(name: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let candidate = exe.parent()?.join(name);
+    is_executable(&candidate).then_some(candidate)
 }
 
 /// Look up `name` in each `PATH` entry. Returns the first executable

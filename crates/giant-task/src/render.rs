@@ -7,7 +7,7 @@ use crate::config::TaskConfig;
 use crate::schema::TaskSpec;
 use anstyle::{AnsiColor, Color, Style};
 use giant::events::TargetCounts;
-use giant::renderer::format_duration;
+use giant::format_duration;
 use std::io::IsTerminal;
 
 fn enabled() -> bool {

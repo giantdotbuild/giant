@@ -11,13 +11,13 @@ pub mod cli;
 pub mod config;
 pub mod executor;
 pub mod explain;
+pub mod fmt;
 pub mod git;
 pub mod graph;
 pub mod model;
 pub mod paths;
 #[cfg(feature = "remote")]
 pub mod remote;
-pub mod renderer;
 pub mod selection;
 pub mod types;
 pub mod watcher;
@@ -34,9 +34,16 @@ pub use cache::LocalCache;
 pub use giant_protocol::query_session;
 // The workspace-load entry point porcelains link against (ADR-0034): scan
 // config, build the graph, open the cache.
-pub use cli::prep::{Prepared, prepare, resolve_cache_dir};
+pub use cli::prep::{
+    Prepared, last_failures_path, num_cpus_estimate, prepare, read_last_failures, resolve_cache_dir,
+};
+// The in-process build adapter the `giant-build` porcelain drives (ADR-0034
+// phase B): one build / a watch loop, plus sandbox-policy resolution.
+pub use cli::resolve_sandbox;
+pub use cli::session::{run_one_build, run_watch_command};
 pub use config::Config;
-pub use executor::{BuildJob, BuildSummary, build};
+pub use executor::{BuildJob, BuildSummary, SandboxPolicy, build};
+pub use fmt::format_duration;
 pub use giant_protocol::{Event, EventSender};
 pub use graph::BuildGraph;
 pub use model::{CacheKey, ContentHash, TargetId, TargetSpec};

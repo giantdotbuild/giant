@@ -1,0 +1,30 @@
+[package]
+name = "giant-build"
+version = "0.1.0"
+edition = "2024"
+description = "Build / test / verify porcelains: run targets through the engine and render progress. Dispatched via `giant build`, `giant test`, `giant verify`."
+
+[[bin]]
+name = "giant-build"
+path = "src/bin/giant-build.rs"
+
+[[bin]]
+name = "giant-test"
+path = "src/bin/giant-test.rs"
+
+[[bin]]
+name = "giant-verify"
+path = "src/bin/giant-verify.rs"
+
+[dependencies]
+# Links the engine: build / test / verify run targets in-process via the
+# engine's build adapter and render the event stream (ADR-0034 phase B).
+giant = { path = "../giant" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "time"] }
+anstyle = "1"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

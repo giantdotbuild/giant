@@ -9,14 +9,10 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-mod build;
 mod completions;
-pub(crate) mod dynamic;
 mod external;
 pub mod prep;
-mod session;
-mod test;
-mod verify;
+pub mod session;
 mod watch;
 
 #[derive(Parser, Debug)]
@@ -39,35 +35,18 @@ pub struct Cli {
     #[arg(long, overrides_with = "config")]
     pub config: Option<std::path::PathBuf>,
 
-    /// Force a fresh build (bypass cache).
-    #[arg(long, global = true)]
-    pub fresh: bool,
-
-    /// Enforce declared inputs/outputs by running each eligible target through
-    /// the `giant-sandbox` helper (Linux only; ADR-0030). Off by default.
-    #[arg(long, global = true)]
-    pub sandbox: bool,
-
     /// Log filter (RUST_LOG syntax). Defaults to errors only - pass
     /// `--log warn` (or set `RUST_LOG=giant=warn`) when debugging.
-    #[arg(long, global = true, default_value = "error")]
+    ///
+    /// Not `global` for the same reason as `--config`: build/test/verify and the
+    /// other porcelains own their flags now (ADR-0034), so a global here would
+    /// swallow a porcelain's `--fresh` / `--sandbox` before dispatch.
+    #[arg(long, default_value = "error")]
     pub log: String,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Build targets.
-    Build(build::BuildArgs),
-
-    /// Run test targets. Same flags as `build`, but the selection is
-    /// restricted to targets with `test: true`.
-    Test(test::TestArgs),
-
-    /// Audit hermeticity: build every target sandboxed with the cache
-    /// bypassed, so any undeclared input/output/network use fails. This is
-    /// `build --sandbox --fresh` over all targets (Linux only; ADR-0030).
-    Verify(verify::VerifyArgs),
-
     /// Persistent engine over stdio. Loads config and builds the graph
     /// once, then reads JSON commands on stdin and emits NDJSON events
     /// on stdout. The protocol porcelains (the TUI in particular) drive
@@ -150,33 +129,26 @@ pub async fn run() -> anyhow::Result<()> {
 
     let global = GlobalFlags {
         config: cli.config.clone(),
-        fresh: cli.fresh,
-        sandbox: cli.sandbox,
     };
 
     match cli.command {
-        Commands::Build(args) => build::execute(args, &global).await,
-        Commands::Test(args) => test::execute(args, &global).await,
-        Commands::Verify(args) => verify::execute(args, &global).await,
         Commands::Session(args) => session::execute(args, &global).await,
         Commands::Completions(args) => completions::execute(args),
         Commands::External(args) => external::dispatch(args),
     }
 }
 
-/// Subset of CLI args that subcommands need to consult.
+/// Subset of CLI args the remaining built-in subcommands consult.
 #[derive(Debug, Clone)]
 pub struct GlobalFlags {
     pub config: Option<std::path::PathBuf>,
-    pub fresh: bool,
-    pub sandbox: bool,
 }
 
 /// Resolve the `--sandbox` flag into a policy (ADR-0030, TDD-0025). Returns
 /// `None` when the flag is off (run normally). When on, finds the
 /// `giant-sandbox` helper on PATH and errors loudly if it is absent or the
 /// host is not Linux - never silently degrades to an unsandboxed run.
-pub(crate) fn resolve_sandbox(
+pub fn resolve_sandbox(
     enabled: bool,
     cfg: &crate::config::SandboxConfig,
     workspace_root: &std::path::Path,
@@ -313,7 +285,7 @@ impl std::error::Error for SilentExit {}
 /// Subcommand names that clap already knows about - porcelain
 /// detection skips these so we don't end up listing `giant-clean` as
 /// a porcelain alongside the built-in `clean`.
-const BUILTIN_SUBCOMMANDS: &[&str] = &["build", "test", "session", "completions"];
+const BUILTIN_SUBCOMMANDS: &[&str] = &["session", "completions"];
 
 /// True iff the user is asking for help - explicitly via `--help`,
 /// `-h`, or `help`, or implicitly by running `giant` with no
@@ -328,9 +300,8 @@ fn is_help_invocation() -> bool {
     if args.is_empty() {
         return true;
     }
-    // No positional that could be a subcommand → clap still renders
-    // help. Treat global flags only (--config, --fresh, --log) as
-    // not-a-subcommand.
+    // No positional that could be a subcommand → clap still renders help. Treat
+    // the giant-level flags (--config, --log) as not-a-subcommand.
     let mut iter = args.iter().take_while(|a| a.as_str() != "--");
     let mut has_subcommand = false;
     while let Some(a) = iter.next() {
@@ -345,7 +316,7 @@ fn is_help_invocation() -> bool {
             }
             continue;
         }
-        if a == "--fresh" || a.starts_with('-') {
+        if a.starts_with('-') {
             continue;
         }
         has_subcommand = true;

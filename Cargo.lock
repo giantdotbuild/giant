@@ -1262,6 +1262,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "giant-build"
+version = "0.1.0"
+dependencies = [
+ "anstyle",
+ "anyhow",
+ "clap",
+ "giant",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "giant-clean"
 version = "0.1.0"
 dependencies = [

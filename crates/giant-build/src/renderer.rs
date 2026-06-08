@@ -16,9 +16,9 @@
 //! `--color always|never|auto` overrides; `NO_COLOR=1` always wins
 //! against `auto` per the de-facto standard.
 
-use crate::events::{Event, TargetCounts, TargetResultKind};
-use crate::model::TargetId;
 use anstyle::{AnsiColor, Color, Style};
+use giant::TargetId;
+use giant::events::{Event, TargetCounts, TargetResultKind};
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::sync::{Arc, Mutex};
@@ -357,7 +357,7 @@ impl Renderer {
         );
         let id_str = id.as_str();
         let id_padded = format!("{id_str:<width$}", width = self.id_width);
-        let dur = format_duration(elapsed.as_millis() as u64);
+        let dur = giant::format_duration(elapsed.as_millis() as u64);
         let dur_dim = paint(self.theme.enabled, self.theme.dim, &dur);
         format!("{painted_verb}  {id_padded}  {dur_dim}\n")
     }
@@ -384,7 +384,7 @@ impl Renderer {
         let painted_verb = paint(self.theme.enabled, style, &format!("{verb:<VERB_WIDTH$}"));
         let id_str = id.as_str();
         let id_padded = format!("{id_str:<width$}", width = self.id_width);
-        let dur = format_duration(ms);
+        let dur = giant::format_duration(ms);
         let dur_dim = paint(self.theme.enabled, self.theme.dim, &dur);
         match err {
             Some(e) => format!("{painted_verb}  {id_padded}  {dur_dim}  {e}\n"),
@@ -400,7 +400,7 @@ impl Renderer {
             self.theme.summary_fail
         };
         let painted_head = paint(self.theme.enabled, head_style, head);
-        let dur = format_duration(ms);
+        let dur = giant::format_duration(ms);
         let mut s = String::with_capacity(96);
         s.push('\n');
         s.push_str(&format!(
@@ -452,16 +452,6 @@ fn paint(enabled: bool, style: Style, text: &str) -> String {
     }
 }
 
-pub fn format_duration(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{ms}ms")
-    } else if ms < 60_000 {
-        format!("{:.2}s", ms as f64 / 1000.0)
-    } else {
-        format!("{:.1}m", ms as f64 / 60_000.0)
-    }
-}
-
 /// Computed once from the selection so the duration column lines up
 /// across all rendered finish lines.
 pub fn id_width<'a, I: IntoIterator<Item = &'a TargetId>>(ids: I) -> usize {
@@ -474,7 +464,7 @@ pub fn id_width<'a, I: IntoIterator<Item = &'a TargetId>>(ids: I) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{LogStream, TargetCounts};
+    use giant::events::{LogStream, TargetCounts};
 
     fn ev_finished(id: &str, result: TargetResultKind, ms: u64) -> Event {
         Event::TargetFinished {
@@ -510,18 +500,6 @@ mod tests {
                 skipped: 0,
             },
         }
-    }
-
-    #[test]
-    fn format_duration_chooses_right_unit() {
-        assert_eq!(format_duration(0), "0ms");
-        assert_eq!(format_duration(7), "7ms");
-        assert_eq!(format_duration(999), "999ms");
-        assert_eq!(format_duration(1_000), "1.00s");
-        assert_eq!(format_duration(1_240), "1.24s");
-        assert_eq!(format_duration(59_999), "60.00s");
-        assert_eq!(format_duration(60_000), "1.0m");
-        assert_eq!(format_duration(192_000), "3.2m");
     }
 
     #[test]

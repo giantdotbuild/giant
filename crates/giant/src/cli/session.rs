@@ -102,7 +102,9 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
     let mut state = SessionState::new(
         prepared,
         event_tx.clone(),
-        global.fresh,
+        // The session never forces fresh globally; clients pass `fresh` per
+        // build via the protocol (ADR-0034 dropped the giant-level --fresh).
+        false,
         global.config.clone(),
         parallelism,
     );
@@ -169,7 +171,7 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
 /// flow to `event_tx` so the caller can render them, and the remote-cache
 /// uploader is opened and drained here. Pass/fail is read off the event
 /// stream by the caller (the renderer captures `build.finished`).
-pub(super) async fn run_one_build(
+pub async fn run_one_build(
     prepared: prep::Prepared,
     event_tx: EventSender,
     config_path: Option<std::path::PathBuf>,
@@ -225,7 +227,7 @@ pub(super) async fn run_one_build(
 /// stops the watch and drains. Watch rebuilds deliberately do **not**
 /// upload to the remote cache - rapid local iteration shouldn't pollute
 /// the shared cache; the one-shot `giant build` still uploads.
-pub(super) async fn run_watch_command(
+pub async fn run_watch_command(
     prepared: prep::Prepared,
     event_tx: EventSender,
     config_path: Option<std::path::PathBuf>,
