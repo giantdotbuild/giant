@@ -9,15 +9,12 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-mod affected;
 mod build;
-mod clean;
 mod completions;
 pub(crate) mod dynamic;
 mod explain;
 mod external;
-mod logs;
-pub(crate) mod prep;
+pub mod prep;
 mod session;
 mod test;
 mod verify;
@@ -72,21 +69,9 @@ pub enum Commands {
     /// `build --sandbox --fresh` over all targets (Linux only; ADR-0030).
     Verify(verify::VerifyArgs),
 
-    /// List targets that would rebuild given a set of changed files.
-    /// Doesn't actually run anything.
-    Affected(affected::AffectedArgs),
-
     /// Show what feeds a target's cache key - the first thing to reach
     /// for when "why did this rebuild?" comes up.
     Explain(explain::ExplainArgs),
-
-    /// Replay the captured stdout/stderr from the last cached
-    /// invocation of a target - answer "what did the build say?"
-    /// without busting the cache.
-    Logs(logs::LogsArgs),
-
-    /// Clear the local cache.
-    Clean(clean::CleanArgs),
 
     /// Persistent engine over stdio. Loads config and builds the graph
     /// once, then reads JSON commands on stdin and emits NDJSON events
@@ -178,10 +163,7 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Build(args) => build::execute(args, &global).await,
         Commands::Test(args) => test::execute(args, &global).await,
         Commands::Verify(args) => verify::execute(args, &global).await,
-        Commands::Affected(args) => affected::execute(args, &global).await,
         Commands::Explain(args) => explain::execute(args, &global).await,
-        Commands::Logs(args) => logs::execute(args, &global).await,
-        Commands::Clean(args) => clean::execute(args, &global).await,
         Commands::Session(args) => session::execute(args, &global).await,
         Commands::Completions(args) => completions::execute(args),
         Commands::External(args) => external::dispatch(args),
@@ -337,16 +319,7 @@ impl std::error::Error for SilentExit {}
 /// Subcommand names that clap already knows about - porcelain
 /// detection skips these so we don't end up listing `giant-clean` as
 /// a porcelain alongside the built-in `clean`.
-const BUILTIN_SUBCOMMANDS: &[&str] = &[
-    "build",
-    "test",
-    "affected",
-    "explain",
-    "clean",
-    "watch",
-    "session",
-    "completions",
-];
+const BUILTIN_SUBCOMMANDS: &[&str] = &["build", "test", "explain", "session", "completions"];
 
 /// True iff the user is asking for help - explicitly via `--help`,
 /// `-h`, or `help`, or implicitly by running `giant` with no

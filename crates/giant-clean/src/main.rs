@@ -1,44 +1,46 @@
-//! `giant clean` - clear the local cache.
+//! giant-clean - clear the local cache.
 //!
-//! Two modes:
+//! Porcelain (ADR-0034), dispatched as `giant clean`. Two modes:
+//! - **All** (`giant clean`): wipe the whole cache directory after a summary +
+//!   confirmation (`-y` skips).
+//! - **Selective**: filter AC entries by target-id glob and/or `--older-than`;
+//!   both compose. Orphaned CAS blobs get GC'd by the next build's eviction.
 //!
-//! - **All** (`giant clean`): wipe the whole cache directory. Prints
-//!   size + entry counts first, asks for confirmation (`-y` skips).
-//! - **Selective**: filter by target-ID pattern (`giant clean go:test:*`),
-//!   by age (`giant clean --older-than 7d`), or both. Both filters
-//!   compose - pattern AND age - and only AC entries matching both
-//!   are deleted. Orphaned CAS blobs (referenced only by deleted AC
-//!   entries) get GC'd via the existing eviction pass.
-//!
-//! Doesn't build the graph - just reads cache.dir from the config and
-//! scans `ac/`.
+//! Doesn't build the graph - just reads cache.dir from the config and scans
+//! `ac/`. Links the giant library for config load + cache-dir resolution.
 
-use clap::Args;
 use std::io::{IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use super::prep;
+use anyhow::Result;
+use clap::Parser;
+use giant::{Config, resolve_cache_dir};
 
-#[derive(Args, Debug)]
-pub struct CleanArgs {
-    /// Restrict to AC entries whose `target_id` matches this glob.
-    /// Repeatable; matches are unioned. Empty = all entries.
+#[derive(Parser, Debug)]
+#[command(name = "giant-clean", about = "Clear the local cache")]
+struct Cli {
+    /// Restrict to AC entries whose `target_id` matches this glob. Repeatable;
+    /// matches are unioned. Empty = all entries.
     #[arg(value_name = "PATTERN")]
-    pub patterns: Vec<String>,
+    patterns: Vec<String>,
 
-    /// Restrict to AC entries older than this duration. Accepts
-    /// `30s` / `5m` / `2h` / `7d` (default unit: seconds if bare integer).
+    /// Restrict to AC entries older than this duration (`30s`/`5m`/`2h`/`7d`;
+    /// bare integer = seconds).
     #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
-    pub older_than: Option<Duration>,
+    older_than: Option<Duration>,
 
     /// Skip the confirmation prompt.
     #[arg(short = 'y', long)]
-    pub yes: bool,
+    yes: bool,
 
     /// Print what would be deleted, then exit without touching anything.
     #[arg(long)]
-    pub dry_run: bool,
+    dry_run: bool,
+
+    /// Path to giant.yaml (defaults to walking up from the current directory).
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 fn parse_duration(s: &str) -> Result<Duration, String> {
@@ -57,20 +59,27 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
     Ok(Duration::from_secs(secs))
 }
 
-pub async fn execute(args: CleanArgs, global: &super::GlobalFlags) -> anyhow::Result<()> {
-    let (config, _workspace_root) = crate::config::Config::load_root(global.config.as_deref())?;
-    let cache_root = prep::resolve_cache_dir(&config.cache.dir)?;
+fn main() {
+    if let Err(e) = real_main() {
+        eprintln!("giant clean: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn real_main() -> Result<()> {
+    let cli = Cli::parse();
+    let (config, _workspace_root) = Config::load_root(cli.config.as_deref())?;
+    let cache_root = resolve_cache_dir(&config.cache.dir)?;
 
     // Selective mode if either filter is set; otherwise full wipe.
-    let selective = !args.patterns.is_empty() || args.older_than.is_some();
-    if selective {
-        return execute_selective(&cache_root, &args).await;
+    if !cli.patterns.is_empty() || cli.older_than.is_some() {
+        return clean_selective(&cache_root, &cli);
     }
 
     let stats = collect_stats(&cache_root);
     print_summary(&cache_root, &stats);
 
-    if args.dry_run {
+    if cli.dry_run {
         println!("\nDry run - nothing deleted.");
         return Ok(());
     }
@@ -78,8 +87,7 @@ pub async fn execute(args: CleanArgs, global: &super::GlobalFlags) -> anyhow::Re
         println!("\nNothing to clean.");
         return Ok(());
     }
-
-    if !args.yes && !confirm("Delete?")? {
+    if !cli.yes && !confirm("Delete?")? {
         return Ok(());
     }
 
@@ -89,32 +97,30 @@ pub async fn execute(args: CleanArgs, global: &super::GlobalFlags) -> anyhow::Re
         Err(e) => anyhow::bail!("failed to clean {}: {e}", cache_root.display()),
     }
     std::fs::create_dir_all(&cache_root)?;
-
     println!(
         "Cleared {} ({}).",
         cache_root.display(),
         human_bytes(stats.total_bytes)
     );
-
     Ok(())
 }
 
-async fn execute_selective(cache_root: &Path, args: &CleanArgs) -> anyhow::Result<()> {
-    let patterns: Vec<glob::Pattern> = args
+fn clean_selective(cache_root: &Path, cli: &Cli) -> Result<()> {
+    let patterns: Vec<glob::Pattern> = cli
         .patterns
         .iter()
         .map(|p| glob::Pattern::new(p))
         .collect::<Result<_, _>>()
         .map_err(|e| anyhow::anyhow!("bad pattern: {e}"))?;
 
-    let cutoff = args.older_than.map(|d| SystemTime::now() - d);
+    let cutoff = cli.older_than.map(|d| SystemTime::now() - d);
     let ac_dir = cache_root.join("ac");
     if !ac_dir.is_dir() {
         println!("Nothing to clean (no AC entries at {}).", ac_dir.display());
         return Ok(());
     }
 
-    let mut matches: Vec<(std::path::PathBuf, String, u64)> = Vec::new();
+    let mut matches: Vec<(PathBuf, String, u64)> = Vec::new();
     let mut bytes_total: u64 = 0;
     for entry in walkdir::WalkDir::new(&ac_dir).min_depth(2).max_depth(2) {
         let Ok(entry) = entry else { continue };
@@ -122,25 +128,19 @@ async fn execute_selective(cache_root: &Path, args: &CleanArgs) -> anyhow::Resul
             continue;
         }
         let path = entry.path().to_path_buf();
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+        let Ok(meta) = entry.metadata() else { continue };
 
         if let Some(cutoff) = cutoff
             && meta.modified().map(|t| t > cutoff).unwrap_or(true)
         {
             continue;
         }
-
-        let target_id = match read_target_id(&path) {
-            Some(s) => s,
-            None => continue,
+        let Some(target_id) = read_target_id(&path) else {
+            continue;
         };
         if !patterns.is_empty() && !patterns.iter().any(|p| p.matches(&target_id)) {
             continue;
         }
-
         let size = meta.len();
         bytes_total += size;
         matches.push((path, target_id, size));
@@ -166,18 +166,18 @@ async fn execute_selective(cache_root: &Path, args: &CleanArgs) -> anyhow::Resul
     }
     println!("\nReferenced CAS blobs become eligible for eviction; run a build to GC them.");
 
-    if args.dry_run {
+    if cli.dry_run {
         println!("\nDry run - nothing deleted.");
         return Ok(());
     }
-    if !args.yes && !confirm("Delete?")? {
+    if !cli.yes && !confirm("Delete?")? {
         return Ok(());
     }
 
     let mut errs = 0;
     for (path, _, _) in &matches {
         if let Err(e) = std::fs::remove_file(path) {
-            tracing::warn!(error = %e, path = %path.display(), "failed to delete AC entry");
+            eprintln!("warning: failed to delete {}: {e}", path.display());
             errs += 1;
         }
     }
@@ -190,7 +190,7 @@ async fn execute_selective(cache_root: &Path, args: &CleanArgs) -> anyhow::Resul
     Ok(())
 }
 
-fn confirm(prompt: &str) -> anyhow::Result<bool> {
+fn confirm(prompt: &str) -> Result<bool> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!("stdin is not a terminal; pass -y to skip the confirmation prompt");
     }
@@ -205,9 +205,8 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
     Ok(yes)
 }
 
-/// Read just the `target_id` field from an AC entry JSON without
-/// deserialising the whole thing. Returns None on parse error so the
-/// scan keeps going.
+/// Read just the `target_id` field from an AC entry JSON. None on parse error
+/// so the scan keeps going.
 fn read_target_id(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
@@ -228,9 +227,6 @@ fn collect_stats(root: &Path) -> Stats {
     if !root.is_dir() {
         return s;
     }
-    // Walk each of the known subdirs, summing entry counts and bytes.
-    // Anything else under the root (version file, tmp/) gets bytes-only
-    // accounting.
     for entry in walkdir::WalkDir::new(root)
         .min_depth(1)
         .into_iter()

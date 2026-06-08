@@ -1250,6 +1250,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "giant-affected"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "giant",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "giant-clean"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "giant",
+ "glob",
+ "serde_json",
+ "tempfile",
+ "walkdir",
+]
+
+[[package]]
 name = "giant-gen"
 version = "0.1.0"
 dependencies = [
@@ -1277,6 +1301,17 @@ dependencies = [
  "giant",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "giant-logs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "giant",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

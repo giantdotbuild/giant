@@ -1,0 +1,17 @@
+[package]
+name = "giant-clean"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Reads only cache.dir from the config + scans the cache dir; no graph, no
+# engine run (ADR-0034). Links the giant lib for config load + cache-dir resolve.
+giant = { path = "../giant" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+glob = "0.3"
+walkdir = "2"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

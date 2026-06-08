@@ -25,6 +25,9 @@ pub mod watcher;
 
 // Re-export the most-used types at the crate root.
 pub use cache::LocalCache;
+// The workspace-load entry point porcelains link against (ADR-0034): scan
+// config, build the graph, open the cache.
+pub use cli::prep::{Prepared, prepare, resolve_cache_dir};
 pub use config::Config;
 pub use events::{Event, EventSender};
 pub use executor::{BuildJob, BuildSummary, build};
