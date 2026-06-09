@@ -170,7 +170,7 @@ A short tour of what's where:
 - `crates/giant/src/cli/` - subcommand handlers.
 - `crates/giant-task/` - task-runner porcelain ([docs](docs-site/src/content/docs/extending/giant-task.md)).
 
-Design decisions are recorded in `docs/adr/`.
+The design is described in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Dogfood
 

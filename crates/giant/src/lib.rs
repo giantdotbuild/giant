@@ -4,7 +4,7 @@
 //! Config is static `giant.yaml`/`giant.json`; producing it (discovery,
 //! matrices) is an offline generator's job, not the engine's.
 //!
-//! See `docs/adr/` and `docs/tdd/` for the design.
+//! See `docs/ARCHITECTURE.md` for the design.
 
 pub mod cache;
 pub mod cli;
