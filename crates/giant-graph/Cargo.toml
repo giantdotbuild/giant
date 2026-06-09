@@ -1,8 +1,13 @@
 [package]
 name = "giant-graph"
-version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Print the Giant dependency graph as JSON. Dispatched via `giant graph`."
 
 [dependencies]
 # The engine as a library, for config scan + graph construction only. The

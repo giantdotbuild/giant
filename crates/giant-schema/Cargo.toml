@@ -1,8 +1,12 @@
 [package]
 name = "giant-schema"
-version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
 description = "The giant.yaml wire schema: the typed config contract shared by the engine and its generators"
 
 [dependencies]

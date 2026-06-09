@@ -81,7 +81,7 @@
                 meta = {
                   description = "Part of the Giant build-orchestration suite";
                   homepage = "https://github.com/johnae/giant";
-                  license = pkgs.lib.licenses.mit;
+                  license = pkgs.lib.licenses.asl20;
                   mainProgram = name;
                 };
               }
@@ -139,7 +139,7 @@
                 meta = {
                   description = "Part of the Giant build-orchestration suite";
                   homepage = "https://github.com/johnae/giant";
-                  license = pkgs.lib.licenses.mit;
+                  license = pkgs.lib.licenses.asl20;
                   mainProgram = "giant-gen";
                 };
               }

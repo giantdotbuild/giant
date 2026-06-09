@@ -1,8 +1,13 @@
 [package]
 name = "giant-clean"
-version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Clear the local Giant cache. Dispatched via `giant clean`."
 
 [dependencies]
 # Reads only cache.dir from the config + scans the cache dir; no graph, no

@@ -1,8 +1,16 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-package.version = "0.1.0"
 metadata.crane.name = "giant"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/johnae/giant"
+homepage = "https://giant.build"
+readme = "README.md"
+rust-version = "1.95"
 
 [profile.release]
 lto = "fat"

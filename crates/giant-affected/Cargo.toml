@@ -1,8 +1,13 @@
 [package]
 name = "giant-affected"
-version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "List targets affected by changes since a git base. Dispatched via `giant affected`."
 
 [dependencies]
 # The engine as a library: workspace load + selection + git. No

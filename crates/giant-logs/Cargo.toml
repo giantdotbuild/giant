@@ -1,8 +1,12 @@
 [package]
 name = "giant-logs"
-version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
 description = "Replay a target's captured logs. Dispatched via `giant logs`."
 
 [dependencies]
