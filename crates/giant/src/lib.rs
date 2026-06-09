@@ -45,7 +45,7 @@ pub use cli::session::{BuildOptions, run_one_build, run_watch_command};
 pub use config::Config;
 pub use executor::{BuildJob, BuildSummary, SandboxPolicy, build};
 pub use fmt::format_duration;
-pub use giant_protocol::{Event, EventSender};
+pub use giant_protocol::{Event, EventSender, PROTOCOL_VERSION};
 pub use graph::BuildGraph;
 pub use model::{CacheKey, ContentHash, TargetId, TargetSpec};
 pub use paths::{AbsPath, OutputPath, WsRelPath};

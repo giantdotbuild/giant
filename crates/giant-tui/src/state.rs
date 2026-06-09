@@ -318,8 +318,21 @@ impl State {
                     },
                 );
             }
-            Event::EngineHello { workspace, .. } if !workspace.is_empty() => {
-                self.workspace_root = Some(std::path::PathBuf::from(workspace));
+            Event::EngineHello {
+                workspace,
+                protocol,
+                ..
+            } => {
+                if protocol != giant::PROTOCOL_VERSION {
+                    self.last_error = Some(format!(
+                        "engine speaks protocol {protocol}, giant-tui speaks {}; \
+                         upgrade the older of the two",
+                        giant::PROTOCOL_VERSION
+                    ));
+                }
+                if !workspace.is_empty() {
+                    self.workspace_root = Some(std::path::PathBuf::from(workspace));
+                }
             }
             Event::EngineReady if self.screen == Screen::Loading => {
                 self.screen = Screen::Browser;
@@ -1121,6 +1134,36 @@ mod tests {
             reason: "unknown target: x".into(),
         });
         assert_eq!(s.last_error.as_deref(), Some("unknown target: x"));
+    }
+
+    #[test]
+    fn protocol_mismatch_sets_last_error() {
+        let mut s = State::default();
+        s.apply(Event::EngineHello {
+            version: "9.9.9".into(),
+            protocol: giant::PROTOCOL_VERSION + 1,
+            workspace: "/ws".into(),
+            capabilities: vec![],
+        });
+        assert!(
+            s.last_error.as_deref().unwrap().contains("protocol"),
+            "{:?}",
+            s.last_error
+        );
+        // The rest of the hello is still applied.
+        assert!(s.workspace_root.is_some());
+    }
+
+    #[test]
+    fn matching_protocol_is_not_an_error() {
+        let mut s = State::default();
+        s.apply(Event::EngineHello {
+            version: "9.9.9".into(),
+            protocol: giant::PROTOCOL_VERSION,
+            workspace: "/ws".into(),
+            capabilities: vec![],
+        });
+        assert!(s.last_error.is_none());
     }
 
     #[test]

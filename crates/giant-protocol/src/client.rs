@@ -67,6 +67,13 @@ pub async fn query_session(
                     continue; // tolerate any non-event lines
                 };
                 match &event {
+                    Event::EngineHello { protocol, .. } if *protocol != crate::PROTOCOL_VERSION => {
+                        break Err(anyhow!(
+                            "engine speaks protocol {protocol}, this client speaks {}; \
+                             upgrade the older of the two",
+                            crate::PROTOCOL_VERSION
+                        ));
+                    }
                     Event::CommandRejected { command_id, reason }
                         if Some(command_id.as_str()) == our_id.as_deref() =>
                     {

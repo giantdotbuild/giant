@@ -13,6 +13,11 @@ pub use client::query_session;
 pub use commands::Command;
 pub use events::{Event, EventSender};
 
+/// The protocol version this crate speaks. The engine advertises its own in
+/// `engine.hello`; a client that sees a different number rejects the session
+/// instead of misreading the stream.
+pub const PROTOCOL_VERSION: u32 = 2;
+
 use serde::{Deserialize, Serialize};
 
 /// Path-derived target label `//<package>:<name>`.

@@ -72,7 +72,7 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
     let _ = event_tx
         .send(Event::EngineHello {
             version: env!("CARGO_PKG_VERSION").into(),
-            protocol: 2,
+            protocol: giant_protocol::PROTOCOL_VERSION,
             workspace: workspace_hint(global).unwrap_or_default(),
             capabilities: CAPABILITIES.iter().map(|s| (*s).to_string()).collect(),
         })
