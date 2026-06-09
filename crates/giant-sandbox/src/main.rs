@@ -1,4 +1,4 @@
-//! `giant-sandbox` - the per-target exec-wrapper porcelain (ADR-0030, TDD-0025).
+//! `giant-sandbox` - the per-target exec-wrapper porcelain.
 //!
 //! The engine resolves a target's bind set, writes it as a `SandboxSpec` JSON,
 //! and prepends `giant-sandbox run --spec <file> --` to the target's argv. We
@@ -7,7 +7,7 @@
 //! as it forks the child. stdio is inherited straight through and the child's
 //! exit code is propagated, so the engine sees one transparent child.
 //!
-//! This is a third porcelain shape (ADR-0030 §2): not a dispatched subcommand
+//! This is a third porcelain shape: not a dispatched subcommand
 //! like `giant gen`, not an event consumer like `giant tui`, but a per-target
 //! exec wrapper in the spirit of `env` / `nice`.
 
@@ -24,7 +24,7 @@ mod sandbox;
 
 /// Reserved exit code for a sandbox *setup* failure, distinct from the child's
 /// own exit status so the engine can tell "could not sandbox" from "build
-/// failed" (TDD-0025; matches the `env`/`docker` 125 convention).
+/// failed" (matches the `env`/`docker` 125 convention).
 const SETUP_FAILURE: u8 = 125;
 
 #[derive(Parser)]

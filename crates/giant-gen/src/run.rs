@@ -1,6 +1,6 @@
-//! Producing a generator's output: the built-in Starlark host in-process
-//! (ADR-0029 §4), or an external command under the invocation contract
-//! (TDD-0022 §C - cwd is the workspace root, `GIANT_GEN_OUT` the output root,
+//! Producing a generator's output: the built-in Starlark host in-process,
+//! or an external command under the invocation contract
+//! (cwd is the workspace root, `GIANT_GEN_OUT` the output root,
 //! `GIANT_WORKSPACE` the root for generators that prefer not to rely on cwd).
 
 use crate::config::Generator;

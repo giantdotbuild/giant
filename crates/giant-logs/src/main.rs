@@ -2,7 +2,7 @@
 //! invocation of a target. Answer "what did the build say?" without busting
 //! the cache.
 //!
-//! Porcelain (ADR-0034), dispatched as `giant logs`. It does not read the cache
+//! Porcelain, dispatched as `giant logs`. It does not read the cache
 //! itself: it asks a `giant session` over the protocol (`logs.get`) and writes
 //! the replayed `logs.line` events back out, honoring the stream filters.
 

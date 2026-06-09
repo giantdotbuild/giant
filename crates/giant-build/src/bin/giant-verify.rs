@@ -1,4 +1,4 @@
-//! `giant verify` - hermeticity audit (ADR-0030, ADR-0036): `build` with the
+//! `giant verify` - hermeticity audit: `build` with the
 //! sandbox and a fresh build forced on, over every target (tests included), in
 //! a disposable worktree of the committed state. Porcelain.
 

@@ -1,8 +1,8 @@
 //! Build graph backed by `petgraph`.
 //!
 //! Holds the merged set of targets and their explicit `deps:` edges.
-//! See ADR-0032 for why dep edges come from `deps:` only (output-based
-//! inference moved to generation), TDD-0001 for the schema and merge.
+//! Dep edges come from `deps:` only; output-based inference moved to
+//! generation.
 
 use crate::model::{TargetId, TargetSpec};
 use petgraph::Direction;
@@ -71,7 +71,7 @@ impl BuildGraph {
     }
 
     /// Ids of every target carrying `tag`. The renderer uses this to fold
-    /// `toolchain`-tagged targets out of the default view (TDD-0017).
+    /// `toolchain`-tagged targets out of the default view.
     pub fn ids_with_tag(&self, tag: &str) -> HashSet<TargetId> {
         self.iter()
             .filter(|(_, spec)| spec.tags.contains(tag))
@@ -86,8 +86,7 @@ impl BuildGraph {
     /// 2. Validate output uniqueness (two targets, same output is a config bug).
     /// 3. Validate acyclic.
     ///
-    /// Dependency inference is no longer done here (ADR-0032 supersedes
-    /// ADR-0004): deps are resolved at generation time and read from `deps:`,
+    /// Dependency inference is no longer done here: deps are resolved at generation time and read from `deps:`,
     /// so `direct_deps()` returns the explicit deps.
     pub fn build_edges_and_validate(&mut self) -> Result<(), GraphError> {
         self.g.clear_edges();
@@ -126,7 +125,7 @@ impl BuildGraph {
 
     /// Two targets declaring the same output path is a config bug, not an
     /// ambiguity we can resolve. O(n) over all outputs. The generation link
-    /// pass also checks this (ADR-0032); the engine keeps it as a backstop, and
+    /// pass also checks this; the engine keeps it as a backstop, and
     /// it covers hand-written-only workspaces that never run generation.
     fn validate_output_uniqueness(&self) -> Result<(), GraphError> {
         let mut producer: HashMap<String, TargetId> = HashMap::new();
@@ -317,7 +316,7 @@ mod tests {
     #[test]
     fn explicit_dep_links() {
         // Edges come from explicit `deps:` only; output-based inference moved to
-        // generation (ADR-0032). The glob-vs-output matching lives in giant-gen's
+        // generation. The glob-vs-output matching lives in giant-gen's
         // link pass tests now.
         let g = build(vec![
             spec("a", &[], &["bin/a"], &[]),

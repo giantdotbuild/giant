@@ -1,4 +1,4 @@
-//! Sandbox wiring (ADR-0030, TDD-0025).
+//! Sandbox wiring.
 //!
 //! When `--sandbox` mode is on, the executor runs an eligible target's command
 //! through the `giant-sandbox` porcelain instead of directly. This module
@@ -19,7 +19,7 @@ use crate::paths::AbsPath;
 
 /// Resolved sandbox configuration for a build, present only under `--sandbox`.
 /// The helper path is found once at the CLI boundary so a missing
-/// `giant-sandbox` fails before any target runs (ADR-0030 §6).
+/// `giant-sandbox` fails before any target runs.
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
     /// Absolute path to the `giant-sandbox` helper.

@@ -1,6 +1,6 @@
 # go.star - Go target generation over the host primitives.
 #
-# Part of giant's official Starlark std collection (ADR-0031). Shipped as a file
+# Part of giant's official Starlark std collection. Shipped as a file
 # alongside the binary, not embedded: reach it with `load("@std//go.star", ...)`,
 # or `giant gen vendor go.star` to copy it into your repo's `star/` for editing
 # and load("star/go.star"). Built entirely on the generic host capabilities

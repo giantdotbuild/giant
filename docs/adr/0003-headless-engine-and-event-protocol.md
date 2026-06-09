@@ -34,7 +34,7 @@ binaries that connect to the socket or spawn `giant build --events ndjson`
 and parse stdout. They are not part of the core distribution.
 
 The event protocol is the contract. ~12 event types, ~6 commands.
-Versioned. Documented separately ([TDD-0004](../tdd/0004-event-protocol.md)).
+Versioned. Documented separately.
 
 ## Consequences
 
@@ -108,4 +108,4 @@ a BES exporter later if anyone asks for it.
 
 ## References
 
-- [TDD-0004 - Event protocol](../tdd/0004-event-protocol.md)
+- TDD-0004 - Event protocol

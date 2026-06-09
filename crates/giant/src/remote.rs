@@ -4,7 +4,7 @@
 //!   GET/PUT/HEAD  /ac/<sha256_hex>    Action Cache entries (our JSON schema)
 //!   GET/PUT/HEAD  /cas/<sha256_hex>   Content-Addressed Storage blobs
 //!
-//! See TDD-0006. Feature-gated behind `--features remote`; the
+//! Feature-gated behind `--features remote`; the
 //! engine builds and runs without it.
 //!
 //! Failure mode: any error from the remote degrades gracefully. The

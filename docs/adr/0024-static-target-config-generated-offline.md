@@ -3,17 +3,10 @@
 - **Status**: Accepted
 - **Date**: 2026-06-02
 - **Deciders**: Mr 9k
-- **Supersedes**: [ADR-0001](0001-discovery-as-a-target.md).
-- **Retires**: [ADR-0017](0017-discovery-accepts-declared-inputs.md) (and
-  with it the already-superseded ADR-0013), plus the dynamic-bootstrap
-  portions of TDD-0003 and TDD-0015.
-- **Reopens**: [ADR-0018](0018-structural-inputs-stay-first-class.md) -
-  structural inputs lose their primary consumer; retiring `kind:
-  structural` is deferred to its own ADR.
 
 ## Context
 
-[ADR-0001](0001-discovery-as-a-target.md) made dynamic config a build
+ADR-0001 made dynamic config a build
 target: `include:` entries are commands the engine runs in a bootstrap
 pass before the main graph, and their JSON output is merged in. It was
 the right call against the alternative on the table at the time -
@@ -22,8 +15,8 @@ its input-tracking out of the engine.
 
 But it still pulled a sizeable, stateful subsystem *into* the engine:
 the discovery worklist and its generation/chain-depth handling, the
-recorded-reads cache that keeps discovery cache keys correct
-(ADR-0013), the declared-inputs handling for discovery (ADR-0017), and
+recorded-reads cache that keeps discovery cache keys correct, the
+declared-inputs handling for discovery, and
 the fsmonitor narrowing that exists largely to make discovery
 re-verification cheap. This is the most intricate, most stateful code
 in the core, and it runs on the hot path of every cold build. A lean
@@ -39,7 +32,7 @@ macros*: functions that compute a command line from attributes, expand
 one declaration into many, and propagate typed information along the
 dependency graph. Giant declined that entire axis. The `command:`
 string is the rule, written inline. Dependencies come from output-based
-inference (ADR-0004), not typed providers. Repetition is meant to come
+inference, not typed providers. Repetition is meant to come
 from generation, not in-config functions. So the work a language would
 do does not exist here, and nothing about reading static config gives
 anything up.
@@ -120,7 +113,7 @@ decide *whether* the set or its contents changed. What is deleted is the
 dynamic-*execution* machinery: the bootstrap worklist, the recorded-reads
 verifier, and per-target `force_fresh`.
 
-The always-on config watcher (TDD-0014) broadens from "the root
+The always-on config watcher broadens from "the root
 `giant.yaml` changed" to "any tracked config file was added, removed, or
 edited," re-running the scan + merge and re-emitting the catalog. Live
 reload in `giant session` / `giant tui` keeps working unchanged from the
@@ -150,7 +143,7 @@ existing `test:` flag. Selection then splits cleanly: by *location* via
 path patterns (`//src/go/...`), and by *role* via tags (`giant test`,
 `--tag kind=bin`). This is the Bazel split - label for identity, tags for
 selection - and the machinery is already half-present in giant. It ripples
-into [TDD-0011](../tdd/0011-target-selection.md): selection gains path
+into TDD-0011: selection gains path
 patterns and leans on tags for cross-cutting picks.
 
 **Path references are package-relative; `//` means workspace root.** Every
@@ -169,7 +162,7 @@ traversal. `outputs:` follow the same rule: package-relative by default
 for a workspace-level artifact (`//bin/server`). Root-anchored outputs are
 expected to be common - a top-level `bin/`, `dist/`, or generated-source
 tree - so the `//` form is first-class, not an escape hatch.
-[TDD-0001](../tdd/0001-target-model-and-config-schema.md) owns the exact
+TDD-0001 owns the exact
 canonicalisation.
 
 **Output-based inference uses the same rule.** Matching happens on the
@@ -313,9 +306,9 @@ scanned-and-generated, path-derived labels were the cohesive choice.
 
 ## Structural inputs: the primary consumer leaves
 
-[ADR-0018](0018-structural-inputs-stay-first-class.md) kept `kind:
+ADR-0018 kept `kind:
 structural` as a first-class input kind, but conceded the point its
-predecessor [ADR-0014](0014-structural-inputs-discovery-only.md) pressed:
+predecessor ADR-0014 pressed:
 the only practical consumer is discovery. Targets that *transform* source
 - compile, lint, test, codegen - depend on full file content, not a
 line-pattern slice. Moving discovery out of the engine therefore removes
@@ -347,26 +340,26 @@ removal itself.
 
 ## What stays the same
 
-- **Output-based dep inference (ADR-0004)** still links targets by output
+- **Output-based dep inference** still links targets by output
   path without coupling to producer IDs. Its *resolution* now follows the
   package-relative / `//` rule and its glob-driven form is package-scoped
   (see *Namespace*), but the mechanism and the decoupling are unchanged.
-- **YAML is sugar, JSON is the contract (ADR-0007)**: still one schema,
+- **YAML is sugar, JSON is the contract**: still one schema,
   two surface syntaxes. Generators may emit either.
-- **Live reload (TDD-0014)** and the event protocol (ADR-0003) keep
+- **Live reload** and the event protocol keep
   their shape; only the reload trigger set broadens.
 
 ## References
 
-- [ADR-0001 - Discovery is a target](0001-discovery-as-a-target.md)
+- ADR-0001 - Discovery is a target
   (superseded by this ADR)
-- [ADR-0004 - Output-based dep inference stays](0004-output-based-dep-inference-stays.md)
+- ADR-0004 - Output-based dep inference stays
 - [ADR-0007 - YAML as sugar, JSON internal](0007-yaml-as-sugar-json-internal.md)
-- [ADR-0013 - Discovery cache key and recorded reads](0013-discovery-cache-key-and-recorded-reads.md)
+- ADR-0013 - Discovery cache key and recorded reads
   (retired by this ADR)
-- [ADR-0017 - Discovery accepts declared inputs](0017-discovery-accepts-declared-inputs.md)
+- ADR-0017 - Discovery accepts declared inputs
   (retired by this ADR)
-- [ADR-0018 - Structural inputs remain first-class](0018-structural-inputs-stay-first-class.md)
+- ADR-0018 - Structural inputs remain first-class
   (reopened - see *Structural inputs* above)
-- [TDD-0003 - Discovery bootstrap and merge](../tdd/0003-discovery-bootstrap-and-merge.md)
-- [TDD-0014 - Engine session mode](../tdd/0014-engine-session-mode.md)
+- TDD-0003 - Discovery bootstrap and merge
+- TDD-0014 - Engine session mode

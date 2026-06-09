@@ -4,11 +4,10 @@
 //! - `Human` - one line per finished target with colored verb +
 //!   right-padded id + dimmed duration; log lines prefixed with
 //!   `[target-id]` in a deterministic per-target color.
-//! - `Ndjson` - raw event passthrough for porcelains and pipes
-//!   (TDD-0004).
+//! - `Ndjson` - raw event passthrough for porcelains and pipes.
 //!
-//! The live-region / in-place-update design in TDD-0010 is deferred to
-//! a future porcelain (`giant-tui`, ADR-0010). v1 is line-streaming
+//! A live-region / in-place-update renderer is left to a future
+//! porcelain (`giant-tui`). v1 is line-streaming
 //! only - safe to redirect to a file, no cursor tricks, no frame
 //! coalescing.
 //!
@@ -169,7 +168,7 @@ pub struct Renderer {
     /// long-runners so the user gets feedback during slow builds.
     running: HashMap<TargetId, RunningInfo>,
     /// Target ids folded out of the human view (e.g. `toolchain`-tagged
-    /// targets - TDD-0017). Shared so the caller can populate it once the
+    /// targets). Shared so the caller can populate it once the
     /// merged graph is known, after the renderer task has already started.
     /// Hidden targets still surface on failure.
     hidden: Arc<Mutex<HashSet<TargetId>>>,

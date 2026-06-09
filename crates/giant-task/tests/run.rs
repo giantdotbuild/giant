@@ -721,7 +721,7 @@ tasks:
 
 #[test]
 fn task_named_after_a_giant_command_is_allowed() {
-    // Tasks are reached only as `giant task <name>` (ADR-0035), so a task named
+    // Tasks are reached only as `giant task <name>`, so a task named
     // `build` is unambiguous and loads fine - it does not collide with the
     // `giant build` porcelain.
     let dir = tempfile::tempdir().unwrap();
@@ -925,7 +925,7 @@ tasks:
     assert_eq!(status.code(), Some(143), "expected 128 + SIGTERM exit code");
 }
 
-/// The whole point of ADR-0022/TDD-0019: `--watch` reruns the task when a
+/// The point of `--watch`: it reruns the task when a
 /// *dependency's* source changes, not just the task's own `inputs:`. The
 /// engine session expands `deps:` through the graph; the porcelain only
 /// subscribes and reacts. End-to-end through a real `giant session`.

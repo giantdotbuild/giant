@@ -1,7 +1,7 @@
-//! The Linux birdcage backend (ADR-0030 §2a). Translates a [`SandboxSpec`] into
+//! The Linux birdcage backend. Translates a [`SandboxSpec`] into
 //! birdcage exceptions and spawns the build command under them.
 //!
-//! Mechanism choice is deliberate (ADR-0030 §2a): for *enforcement* - catching
+//! Mechanism choice is deliberate: for *enforcement* - catching
 //! a target that reads an undeclared file or reaches the network - filesystem
 //! deny plus network on/off is exactly enough. birdcage gives that as a
 //! pure-Rust library (seccomp + Landlock + namespaces under the hood), so the
@@ -43,8 +43,7 @@ pub fn run(spec: &SandboxSpec, command: &[OsString]) -> Result<u8> {
     }
     // birdcage scrubs the environment by default. An empty allowlist means the
     // engine wants the whole ambient env (back-compat); otherwise grant exactly
-    // the listed names - PATH + toolchain essentials + declared `env:`
-    // (ADR-0030 §4).
+    // the listed names - PATH + toolchain essentials + declared `env:`.
     if spec.env.is_empty() {
         cage.add_exception(Exception::FullEnvironment)
             .context("granting environment access")?;

@@ -1,7 +1,7 @@
 //! TUI state. Pure data + a single `apply(Event)` entry point.
 //!
 //! State is driven by the events stream coming out of a `giant
-//! session` subprocess (TDD-0014). The state machine has four
+//! session` subprocess. The state machine has four
 //! visible screens; transitions are triggered by both engine events
 //! (catalog ready, build finished) and key actions (Enter, Esc).
 
@@ -33,7 +33,7 @@ pub enum Screen {
     /// The build just finished; hold on the summary.
     BuildFinished,
     /// Full-screen log viewer for one target, fed by `logs.get` replay
-    /// (ADR-0033). Opened from the browser; Esc returns.
+    /// Opened from the browser; Esc returns.
     Logs,
 }
 
@@ -108,7 +108,7 @@ pub enum Mode {
     /// query is cleared (Esc or empty + Enter).
     LogSearch,
     /// "Why did this run / why cached" overlay for the selected target,
-    /// fed by `query.explain` (ADR-0033). Any key closes it.
+    /// fed by `query.explain`. Any key closes it.
     Explain,
 }
 
@@ -184,7 +184,7 @@ pub struct LogLine {
 }
 
 /// Cache-key breakdown for the explain overlay, from `query.explain`
-/// (ADR-0033). None of these are computed locally - they are what the engine
+/// None of these are computed locally - they are what the engine
 /// reported feeds the target's key.
 #[derive(Debug, Clone)]
 pub struct ExplainView {
@@ -274,17 +274,17 @@ pub struct State {
     /// tail; bumped up by k, down by j.
     pub log_scroll_back: usize,
 
-    /// Per-target cache state from `query.status` (ADR-0033): true = cached
+    /// Per-target cache state from `query.status`: true = cached
     /// (an action-cache hit at the current key), false = stale. Absent = not
     /// yet queried. Refreshed on catalog ready and after each build.
     pub cache_status: HashMap<TargetId, bool>,
 
     /// The target whose logs the `Screen::Logs` viewer is showing, fed by a
-    /// `logs.get` replay (ADR-0033). None when not in the log viewer.
+    /// `logs.get` replay. None when not in the log viewer.
     pub log_view_target: Option<TargetId>,
 
     /// Cache-key breakdown for the `Mode::Explain` overlay, from
-    /// `query.explain` (ADR-0033). None while the reply is in flight.
+    /// `query.explain`. None while the reply is in flight.
     pub explain: Option<ExplainView>,
 }
 

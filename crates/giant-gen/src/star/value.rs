@@ -1,5 +1,5 @@
 //! The Starlark-facing surface: the `ws` handle and its capability methods,
-//! the `target()` constructor, and the `parse_*` data builtins (TDD-0024 §C/§D).
+//! the `target()` constructor, and the `parse_*` data builtins.
 //!
 //! The host exposes *capabilities* (filesystem, process, parsing) only. Every
 //! language- or domain-specific opinion (what a Go package is, hierarchical
@@ -115,7 +115,7 @@ fn ws_methods(builder: &mut MethodsBuilder) {
 }
 
 /// One constructed target with the package whose `giant.<infix>.yaml` it lands
-/// in (TDD-0024 §E).
+/// in.
 #[derive(Debug)]
 pub(crate) struct Emitted {
     pub(crate) package: String,
@@ -241,7 +241,7 @@ fn toml_to_json(_s: &str) -> anyhow::Result<serde_json::Value> {
     anyhow::bail!("parse_toml is not yet wired in this skeleton")
 }
 
-/// Owning package for a target (TDD-0024 §E): an explicit `package=`, else the
+/// Owning package for a target: an explicit `package=`, else the
 /// directory of a relative `cwd`, else the root package.
 fn resolve_package(package: Option<String>, cwd: Option<&str>) -> String {
     if let Some(p) = package {

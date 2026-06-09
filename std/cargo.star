@@ -1,6 +1,6 @@
 # cargo.star - Cargo/Rust target generation over the host primitives.
 #
-# Part of giant's official Starlark std collection (ADR-0031). Derives build
+# Part of giant's official Starlark std collection. Derives build
 # targets from `cargo metadata`, the same way go.star derives from `go list`.
 # Built entirely on the generic host (ws.exec + parse_json + target()), so the
 # Rust-specific opinion lives here in editable Starlark, not in the host.

@@ -1,12 +1,12 @@
 //! Session-mode command channel.
 //!
-//! The engine's stdio protocol (TDD-0014) accepts JSON commands on
+//! The engine's stdio protocol accepts JSON commands on
 //! stdin. Each command is one JSON object per line, with a `c` field
 //! naming the type. Commands optionally carry a `command_id` that the
 //! engine echoes back on `command.accepted` / `command.rejected` so
 //! the client can correlate the response with the request.
 //!
-//! See TDD-0004 §Command types for the full wire schema.
+//! types for the full wire schema.
 
 use crate::TargetId;
 use serde::{Deserialize, Serialize};
@@ -114,7 +114,7 @@ pub enum Command {
         command_id: Option<String>,
     },
 
-    /// Read query: per-target cache state (ADR-0033). Computes each target's
+    /// Read query: per-target cache state. Computes each target's
     /// cache key and consults the action cache. Empty `targets` means every
     /// target (may be slow on a large graph). Answered with `query.status`.
     #[serde(rename = "query.status")]
@@ -126,7 +126,7 @@ pub enum Command {
     },
 
     /// Read query: replay a target's captured logs from the last cached build
-    /// (ADR-0033). Streams `logs.line` events then `logs.end`. `follow` (live
+    /// Streams `logs.line` events then `logs.end`. `follow` (live
     /// tail of a running target) is not yet implemented; it replays regardless.
     #[serde(rename = "logs.get")]
     LogsGet {
@@ -142,7 +142,7 @@ pub enum Command {
     },
 
     /// Read query: what feeds a target's cache key, and whether it is cached
-    /// (ADR-0033). Answered with `query.explained` - the structured form of
+    /// Answered with `query.explained` - the structured form of
     /// `giant explain`.
     #[serde(rename = "query.explain")]
     QueryExplain {

@@ -2,10 +2,11 @@
 name = "giant-graph"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 
 [dependencies]
 # The engine as a library, for config scan + graph construction only. The
-# graph is fully static on disk (ADR-0032), so this porcelain needs no engine
+# graph is fully static on disk, so this porcelain needs no engine
 # execution, cache, or protocol - just the loader and BuildGraph.
 giant = { path = "../giant" }
 clap = { version = "4", features = ["derive"] }

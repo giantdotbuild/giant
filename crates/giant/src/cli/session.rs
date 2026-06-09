@@ -1,4 +1,4 @@
-//! `giant session` - persistent engine over stdio (TDD-0014).
+//! `giant session` - persistent engine over stdio.
 //!
 //! Lifecycle:
 //!   1. Refuse if stdout is a TTY (would corrupt the protocol).
@@ -13,7 +13,7 @@
 //! `affected.subscribe`/`unsubscribe`, `watch.subscribe`/`unsubscribe`,
 //! `config.reload`, and `shutdown`. An always-on watcher also triggers a
 //! reload on a `giant.yaml` / `giant.json` change, so the catalog stays
-//! live without a restart (TDD-0014).
+//! live without a restart.
 
 use crate::cache::LocalCache;
 use crate::cli::prep;
@@ -43,7 +43,7 @@ pub struct SessionArgs {
 }
 
 /// Read/query capabilities this engine advertises in `engine.hello`
-/// (ADR-0033). Extend as queries are added.
+/// Extend as queries are added.
 const CAPABILITIES: &[&str] = &["query.status", "logs.get", "query.explain"];
 
 pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<()> {
@@ -61,8 +61,8 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
     }
 
     // Event channel: every event the engine emits goes through here
-    // and out via the writer task. Bounded buffer per TDD-0004
-    // §Event delivery; drops are reported via protocol.dropped.
+    // and out via the writer task. Bounded buffer; drops are
+    // reported via protocol.dropped.
     let (event_tx, event_rx) = mpsc::channel::<Event>(2048);
 
     // Writer task owns stdout. Only this task writes to stdout, ever.
@@ -103,7 +103,7 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
         prepared,
         event_tx.clone(),
         // The session never forces fresh globally; clients pass `fresh` per
-        // build via the protocol (ADR-0034 dropped the giant-level --fresh).
+        // build via the protocol.
         false,
         global.config.clone(),
         parallelism,
@@ -170,15 +170,15 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
 pub struct BuildOptions {
     /// Bypass the cache - force every selected target to run.
     pub fresh: bool,
-    /// Sandbox policy, or `None` to run commands directly (ADR-0030).
+    /// Sandbox policy, or `None` to run commands directly.
     pub sandbox: Option<crate::executor::SandboxPolicy>,
     /// Build in a disposable worktree of the committed state - `giant verify`
-    /// (ADR-0036). Requires a git/jj repo; errors otherwise.
+    /// Requires a git/jj repo; errors otherwise.
     pub isolate: bool,
 }
 
 /// Run one build through the engine and wait for it to finish - the
-/// in-process adapter behind `giant build` / `test` (TDD-0021). The same
+/// in-process adapter behind `giant build` / `test`. The same
 /// `Command::Build` → `start_build` path the stdio session uses; events
 /// flow to `event_tx` so the caller can render them, and the remote-cache
 /// uploader is opened and drained here. Pass/fail is read off the event
@@ -198,7 +198,7 @@ pub async fn run_one_build(
     } = opts;
 
     // `giant verify` (isolate) builds in a throwaway worktree of the committed
-    // state so a sandboxed audit can never touch the live tree (ADR-0036).
+    // state so a sandboxed audit can never touch the live tree.
     // Failing here - no git repo - is a clean setup error, before any target
     // runs. The guard removes the worktree when this function returns.
     let _worktree = if isolate {
@@ -252,7 +252,7 @@ pub async fn run_one_build(
 }
 
 /// Run a watch session through the engine - `build --watch` /
-/// `test --watch` (TDD-0021). Dispatches `watch.start`, lets the caller
+/// `test --watch`. Dispatches `watch.start`, lets the caller
 /// render the event stream off `event_tx`, and runs until Ctrl-C, then
 /// stops the watch and drains. Watch rebuilds deliberately do **not**
 /// upload to the remote cache - rapid local iteration shouldn't pollute
@@ -336,11 +336,11 @@ struct SessionState {
     config_path: Option<std::path::PathBuf>,
     parallelism: usize,
     /// Sandbox policy for the build path. `None` unless `--sandbox` is on;
-    /// set by the one-shot CLI helpers via `with_sandbox` (ADR-0030).
+    /// set by the one-shot CLI helpers via `with_sandbox`.
     sandbox: Option<crate::executor::SandboxPolicy>,
     /// Remote-cache handles for the build path. The stdio session leaves
     /// these `None` today; the in-process CLI adapter sets them so
-    /// `giant build` keeps using the remote cache (TDD-0021).
+    /// `giant build` keeps using the remote cache.
     #[cfg(feature = "remote")]
     remote: Option<crate::remote::RemoteCache>,
     #[cfg(feature = "remote")]
@@ -435,7 +435,7 @@ impl SessionState {
     }
 
     /// Attach a sandbox policy to the build path (one-shot `giant build` /
-    /// `giant test --sandbox`). Unset = run commands directly (ADR-0030).
+    /// `giant test --sandbox`). Unset = run commands directly.
     fn with_sandbox(mut self, sandbox: Option<crate::executor::SandboxPolicy>) -> Self {
         self.sandbox = sandbox;
         self
@@ -608,7 +608,7 @@ impl SessionState {
         false
     }
 
-    /// Answer `query.explain` (ADR-0033): the structured cache-key breakdown for
+    /// Answer `query.explain`: the structured cache-key breakdown for
     /// a target, plus whether it is currently cached. Reuses the same
     /// `breakdown_for_target` walk `giant explain` uses.
     async fn query_explain(&self, command_id: Option<String>, target: TargetId) {
@@ -701,7 +701,7 @@ impl SessionState {
             .await;
     }
 
-    /// Answer `logs.get` (ADR-0033): replay a target's captured logs from its
+    /// Answer `logs.get`: replay a target's captured logs from its
     /// last cached build as `logs.line` events, then `logs.end`. Reuses the
     /// cache-key walk + the AC entry's stdout/stderr blobs (the same data
     /// `giant logs` reads). `follow` (live tail of a running target) is not yet
@@ -798,7 +798,7 @@ impl SessionState {
         }
     }
 
-    /// Answer `query.status` (ADR-0033): per-target cache state. Recomputes each
+    /// Answer `query.status`: per-target cache state. Recomputes each
     /// target's cache key (the same walk `giant explain` uses) and consults the
     /// action cache. Read-only; safe to run alongside or between builds.
     async fn query_status(&self, command_id: Option<String>, targets: Vec<TargetId>) {
@@ -935,7 +935,7 @@ impl SessionState {
     /// restart any active subscriptions against the new graph. Triggered
     /// by `config.reload` or a `giant.yaml` / `giant.json` change. A
     /// build in flight keeps its own graph `Arc`, so reloading is safe
-    /// to do alongside it (deviating from TDD-0014's "queue until the
+    /// to do alongside it (deviating from the documented "queue until the
     /// build finishes" - simpler, and the running build is unaffected).
     async fn reload(&mut self) {
         let _ = self.event_tx.send(Event::CatalogInvalidating).await;
@@ -1652,7 +1652,7 @@ async fn watch_subscribe_loop(
 ///   dependency counts - or matches a glob.
 ///
 /// v1 reports the whole batch on a hit (the paths are advisory; the
-/// client's signal is the event). See TDD-0019 for per-path attribution.
+/// client's signal is the event). for per-path attribution.
 fn relevant(
     graph: &BuildGraph,
     requested: &std::collections::HashSet<TargetId>,

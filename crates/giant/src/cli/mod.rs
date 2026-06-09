@@ -2,7 +2,7 @@
 //!
 //! Built-in subcommands are matched first. Unknown subcommands fall
 //! through to porcelain dispatch: `giant <name>` looks for `giant-<name>`
-//! on PATH and execs it (git/cargo/kubectl model - see ADR-0010).
+//! on PATH and execs it (the git/cargo/kubectl model).
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::collections::BTreeMap;
@@ -39,7 +39,7 @@ pub struct Cli {
     /// `--log warn` (or set `RUST_LOG=giant=warn`) when debugging.
     ///
     /// Not `global` for the same reason as `--config`: build/test/verify and the
-    /// other porcelains own their flags now (ADR-0034), so a global here would
+    /// other porcelains own their flags now, so a global here would
     /// swallow a porcelain's `--fresh` / `--sandbox` before dispatch.
     #[arg(long, default_value = "error")]
     pub log: String,
@@ -50,8 +50,7 @@ pub enum Commands {
     /// Persistent engine over stdio. Loads config and builds the graph
     /// once, then reads JSON commands on stdin and emits NDJSON events
     /// on stdout. The protocol porcelains (the TUI in particular) drive
-    /// against. Refuses to run with stdout on a TTY - pipe it. See
-    /// TDD-0014.
+    /// against. Refuses to run with stdout on a TTY - pipe it.
     Session(session::SessionArgs),
 
     /// Generate a shell completion script for bash / zsh / fish /
@@ -60,7 +59,7 @@ pub enum Commands {
     Completions(completions::CompletionsArgs),
 
     /// Unknown subcommand → dispatch to `giant-<name>` on PATH if
-    /// available, else error with a helpful hint (ADR-0010).
+    /// available, else error with a helpful hint.
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }
@@ -147,7 +146,7 @@ pub struct GlobalFlags {
     pub config: Option<std::path::PathBuf>,
 }
 
-/// Resolve the `--sandbox` flag into a policy (ADR-0030, TDD-0025). Returns
+/// Resolve the `--sandbox` flag into a policy. Returns
 /// `None` when the flag is off (run normally). When on, finds the
 /// `giant-sandbox` helper on PATH and errors loudly if it is absent or the
 /// host is not Linux - never silently degrades to an unsandboxed run.
@@ -168,8 +167,8 @@ pub fn resolve_sandbox(
 
     // Generic FHS roots (read-only + executable). Anything scheme-specific - a
     // Nix `/nix/store`, an asdf `~/.asdf`, a vendored `bin/` - is added by the
-    // workspace's `sandbox.roots`. Core assumes no toolchain manager (ADR-0030
-    // §3). Filtered to those present; enforcement still bites on the workspace.
+    // workspace's `sandbox.roots`. Core assumes no toolchain manager.
+    // Filtered to those present; enforcement still bites on the workspace.
     const DEFAULT_ROOTS: &[&str] = &["/usr", "/bin", "/lib", "/lib64", "/etc"];
     let toolchain = DEFAULT_ROOTS
         .iter()
@@ -205,7 +204,7 @@ pub fn resolve_sandbox(
 
     // Generic env allowlist. Scheme-specific families (e.g. `NIX_*`) come from
     // `sandbox.env`. A trailing `*` is a prefix; birdcage grants exact names,
-    // so we expand against the ambient environment here (ADR-0030 §4).
+    // so we expand against the ambient environment here.
     const DEFAULT_ENV: &[&str] = &[
         "PATH",
         "HOME",

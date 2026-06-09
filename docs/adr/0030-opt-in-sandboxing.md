@@ -1,15 +1,12 @@
-# ADR-0030 - Opt-in sandboxing (enforcement, not a cache input)
+# ADR-0030 - Opt-in sandboxing for enforcement
 
 - **Status**: Accepted
 - **Date**: 2026-06-06
 - **Deciders**: Mr 9k
-- **Supersedes**: [ADR-0008](0008-optional-sandbox-and-verify.md) (which was
-  parked as "not pursued"; its closing note pointed at exactly this shape)
 
 ## Context
 
-[ADR-0008](0008-optional-sandbox-and-verify.md) settled that isolation, if it
-returned, would be **opt-in** and shaped as "a wrapper command the user
+Isolation, if it returns, is **opt-in** and shaped as "a wrapper command the user
 prepends (`bwrap ...`) or a separate `giant-sandbox` shim invoked the same way,
 not a core feature." It removed the dead `sandbox: bool` hashing bit and parked
 the rest. We now want the real thing, with a concrete mechanism and a clear
@@ -190,7 +187,7 @@ per-target flags like `sandbox`/`network`), never to emit the mechanism.
   `NIX_*`), and the target's declared `env:` - everything else (random user/CI
   vars) is dropped. Unlike Bazel's fixed `PATH=/bin:/usr/bin`, giant keeps the
   ambient `PATH` because under a manager like devenv it *is* the toolchain
-  (ADR-0028). The engine resolves the name list (expanding `prefix*` patterns
+ The engine resolves the name list (expanding `prefix*` patterns
   against the ambient env, since the sandbox grants exact names);
   `giant-sandbox` grants exactly those (an empty list means "pass the whole
   ambient env", the back-compat default).
@@ -316,7 +313,7 @@ run, because a silent downgrade would defeat the enforcement guarantee.
 
 Tempting and core-free - the generator already knows a target's
 inputs/outputs/toolchain, so it could emit the wrapped command, and sandboxing
-would become "just generation" (ADR-0024). Rejected on three counts: it is **not
+would become "just generation". Rejected on three counts: it is **not
 a per-machine opt-in** (the wrapper is baked into committed `giant.*.yaml`, runs
 for everyone, and breaks on non-Linux); it **cannot audit-everything at runtime**
 (the sandbox is frozen at generation time); and it **pollutes the cache key**
@@ -360,17 +357,17 @@ stays available as a backend if we ever want to drop the birdcage dependency.
 
 ## References
 
-- [ADR-0008 - Optional sandbox + verify](0008-optional-sandbox-and-verify.md)
+- ADR-0008 - Optional sandbox + verify
   (parked; revived and superseded here - its closing note named the
   `giant-sandbox` shim this ADR specifies)
-- [ADR-0016 - Toolchains are targets](0016-toolchains-are-targets.md)
+- ADR-0016 - Toolchains are targets
   (the identity half; toolchain deps contribute sandbox bind paths)
-- [ADR-0028 - Execution environments](0028-execution-environments.md)
+- ADR-0028 - Execution environments
   (availability vs identity; giant runs inside devenv, so PATH and the toolchain
   closure are already in place)
 - [ADR-0006 - Remote cache over HTTP](0006-no-bazel-reapi.md)
   (the read-only/read-write access control behind the cache-trust model)
 - [ADR-0024 - Target config is static and generated offline](0024-static-target-config-generated-offline.md)
   (why sandboxing is *not* generation)
-- [TDD-0009 - Executor](../tdd/0009-executor.md) (cache-key composition; the
+- TDD-0009 - Executor (cache-key composition; the
   command hash the sandbox must stay out of)

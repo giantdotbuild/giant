@@ -195,7 +195,7 @@ def generate(ws):
 
 #[test]
 fn legacy_giant_alias_still_resolves() {
-    // `@giant//` stays a deprecated alias for `@std//` (ADR-0031).
+    // `@giant//` stays a deprecated alias for `@std//`.
     let tmp = TempDir::new().unwrap();
     let s = script(
         tmp.path(),

@@ -2,7 +2,7 @@
 //!
 //! Two surfaces live here:
 //! 1. **Pattern resolution** ([`resolve_patterns`]) - the user-facing
-//!    selection language from TDD-0011: glob/exclusion patterns, tag
+//!    selection language: glob/exclusion patterns, tag
 //!    filters via [`SelectionOpts`], and test/non-test filtering via
 //!    [`TestMode`]. Used by `giant build`, `giant test` (incl. their
 //!    `--watch` loop), `giant affected`, and the NDJSON command channel.
@@ -82,7 +82,7 @@ impl SelectionOpts {
 /// Resolve a list of user-supplied label patterns against the graph into
 /// a concrete, sorted set of target labels.
 ///
-/// Syntax (TDD-0011), matched against `//package:name` labels:
+/// Syntax, matched against `//package:name` labels:
 /// - Empty patterns → all targets (subject to test mode + tag filter).
 /// - Exact label (`//pkg:name`, or `//pkg/name` shorthand) → one target.
 ///   A literal miss is an error.
@@ -184,14 +184,14 @@ pub fn resolve_patterns(
 
 /// `require_literal_separator = true` makes `*` stop at `/`, so a package
 /// glob like `//src/*:bin` matches one path segment, while `...` is the
-/// only construct that crosses package boundaries (TDD-0011).
+/// only construct that crosses package boundaries.
 const MATCH_OPTS: glob::MatchOptions = glob::MatchOptions {
     case_sensitive: true,
     require_literal_separator: true,
     require_literal_leading_dot: false,
 };
 
-/// A parsed label pattern (TDD-0011 §Pattern syntax). Matches against
+/// A parsed label pattern. Matches against
 /// `//<package>:<name>` labels.
 #[derive(Debug, Clone)]
 enum LabelPattern {
@@ -287,7 +287,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 /// A compiled single-pattern matcher that porcelains can use to apply
-/// the same label-selection rules as `giant build` (TDD-0011).
+/// the same label-selection rules as `giant build`.
 #[derive(Debug, Clone)]
 pub struct PatternMatcher {
     inner: LabelPattern,
@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(aff, [TargetId::new("a")].into());
     }
 
-    // -------- pattern resolution (TDD-0011) --------
+    // -------- pattern resolution --------
 
     fn sample_graph() -> BuildGraph {
         graph_with(vec![

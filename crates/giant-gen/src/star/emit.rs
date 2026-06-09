@@ -1,4 +1,4 @@
-//! Grouping and deterministic emit (TDD-0024 §E/§F): a flat list of targets is
+//! Grouping and deterministic emit: a flat list of targets is
 //! grouped into one `giant.<infix>.yaml` per package, written under the output
 //! root, and files the generator no longer produces are pruned.
 

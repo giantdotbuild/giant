@@ -3,11 +3,10 @@
 - **Status**: Proposed
 - **Date**: 2026-06-05
 - **Deciders**: Mr 9k
-- **Amends**: [ADR-0027](0027-bundled-reference-generators-and-helper-library.md)
 
 ## Context
 
-[ADR-0027](0027-bundled-reference-generators-and-helper-library.md) shipped
+ADR-0027 shipped
 reference generators (`giant-gen-go`, `giant-gen-docker`) written in the
 language of the ecosystem they serve, a per-language helper library, and a
 single workspace-root `giant-gen.yaml` carrying declarative policy. It drew a
@@ -170,7 +169,7 @@ The host is built in Rust and lives in the giant workspace, embedded directly in
 the `giant gen` runner (`crates/giant-gen`) rather than as a separate binary.
 `giant gen` finds `giant.star` by convention at the root and runs it; it can
 still invoke external generator commands, so the "generators are external tools"
-path (ADR-0026) is preserved and the Starlark host is just the built-in one. A
+path is preserved and the Starlark host is just the built-in one. A
 `generate:`-in-root escape (a list of generator commands in root `giant.yaml`)
 covers repos that want multiple or external generators; the default entry runs
 the built-in host on `giant.star`.
@@ -313,25 +312,25 @@ properties that motivate decision 4.
 
 ## References
 
-- [ADR-0027 - Bundled reference generators and the generator helper library](0027-bundled-reference-generators-and-helper-library.md)
+- ADR-0027 - Bundled reference generators and the generator helper library
   (amended here: §3 ecosystem-native authoring, §4 `giant-gen.yaml` policy, §6
   no config language)
-- [ADR-0026 - `giant-gen` is a thin generator runner, not a framework](0026-giant-gen-thin-generator-runner.md)
+- ADR-0026 - `giant-gen` is a thin generator runner, not a framework
   (the runner; external generators stay supported alongside the built-in host)
 - [ADR-0024 - Target config is static and generated offline](0024-static-target-config-generated-offline.md)
   (the engine evaluates no language; output stays static and checked-in)
 - [ADR-0007 - YAML is sugar, JSON is the contract](0007-yaml-as-sugar-json-internal.md)
   (the wire contract `giant-schema` makes a typed artifact)
-- [ADR-0021 - Configurable subcommand routing](0021-configurable-subcommand-routing.md)
+- ADR-0021 - Configurable subcommand routing
   (how `giant gen` and external generators resolve)
 - [ADR-0010 - Tasks live in porcelain](0010-tasks-live-in-porcelain.md)
   (the host is porcelain, never engine code)
-- [ADR-0028 - Execution environments](0028-execution-environments.md)
+- ADR-0028 - Execution environments
   (ambient environment; the single-binary host avoids reintroducing runtime
   provisioning)
-- [TDD-0001 - Target model and config schema](../tdd/0001-target-model-and-config-schema.md)
+- TDD-0001 - Target model and config schema
   (the spec `WireTarget` aligns to)
-- [TDD-0022 - giant-gen: the generator runner and staleness gate](../tdd/0022-giant-gen-generator-runner.md)
+- TDD-0022 - giant-gen: the generator runner and staleness gate
   (the runner the host embeds into)
 - Prior art: `starlark-rust` and Buck2 (Starlark at scale), `jrsonnet`
   (the Jsonnet runner-up).

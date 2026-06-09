@@ -1,4 +1,4 @@
-//! `giant session` live config reload (TDD-0014). Drives the engine over
+//! `giant session` live config reload. Drives the engine over
 //! stdio: read the initial catalog, edit `giant.yaml`, force a reload,
 //! and assert the re-emitted catalog reflects the change.
 

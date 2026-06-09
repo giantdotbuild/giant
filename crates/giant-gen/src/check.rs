@@ -1,7 +1,7 @@
-//! `giant gen --check` - the staleness gate (TDD-0022 §E, revised by TDD-0026).
+//! `giant gen --check` - the staleness gate.
 //!
 //! A fresh `giant gen` is two phases: every generator emits, then a global link
-//! pass fills inferred `deps:` into the generated files (ADR-0032). So `--check`
+//! pass fills inferred `deps:` into the generated files. So `--check`
 //! must reproduce *both* before diffing. It mirrors the committed config tree
 //! into a merged scratch root, overlays each selected generator's freshly
 //! produced output, runs the link pass over the whole mirror, then diffs each

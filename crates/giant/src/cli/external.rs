@@ -21,10 +21,10 @@ pub fn dispatch(args: Vec<OsString>) -> anyhow::Result<()> {
     };
     let name = name_os.to_string_lossy();
 
-    // A `giant-<name>` binary handles it (ADR-0010, ADR-0035). Look beside the
+    // A `giant-<name>` binary handles it. Look beside the
     // giant binary first - the suite ships its porcelains in the same directory
     // - then fall back to PATH. There is no catch-all: an unknown name errors
-    // (ADR-0035) instead of being quietly handed to a task runner.
+    // instead of being quietly handed to a task runner.
     let prog = format!("giant-{name}");
     if let Some(path) = find_sibling(&prog).or_else(|| find_on_path(&prog)) {
         return exec_or_spawn(&path, rest);

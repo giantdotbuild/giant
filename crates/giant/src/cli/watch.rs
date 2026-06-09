@@ -1,7 +1,7 @@
 //! Shared file-watch mechanics for the engine's watch loops.
 //!
 //! `build --watch` / `test --watch` and the stdio session's `watch.start`
-//! both run *inside the engine* now (TDD-0021): the CLI dispatches
+//! both run *inside the engine* now: the CLI dispatches
 //! `watch.start` to an in-process `SessionState`, exactly like the TUI.
 //! This module holds the pieces that loop shares - the exclude set, the
 //! debouncer, and the per-cycle "what's affected" step.

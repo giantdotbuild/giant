@@ -1,8 +1,8 @@
-# ADR-0036 - Sandboxed runs execute in a disposable worktree
+# ADR-0036 - Verify runs in a disposable worktree
 
 - **Status**: Accepted
 - **Date**: 2026-06-08
-- **Amends**: [ADR-0030](0030-optional-sandbox-and-verify.md) (sandbox + verify)
+- **Amends**: [ADR-0030](0030-opt-in-sandboxing.md)
 
 > **Revised** 2026-06-09: scoped the worktree to `giant verify` (the audit that
 > must be safe on every target). `giant build --sandbox` keeps enforcing against

@@ -2,7 +2,7 @@
 name = "giant-task"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
 description = "Task runner porcelain for Giant - dispatched via `giant task <name>`"
 
 [[bin]]
@@ -13,7 +13,7 @@ path = "src/main.rs"
 # The giant engine, used as a Rust library for the parts we don't want
 # to re-implement: config loading + workspace-root walk + path types.
 # We do NOT touch internals (executor, cache, etc.) - builds happen via
-# `giant build` subprocess, the documented porcelain contract (ADR-0010).
+# `giant build` subprocess, the documented porcelain contract.
 giant = { path = "../giant" }
 
 # Async runtime - Command::status is fine sync, but we use tokio so we

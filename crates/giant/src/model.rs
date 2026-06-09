@@ -1,7 +1,4 @@
 //! Core types: `TargetId`, `ContentHash`, `CacheKey`, `TargetSpec`.
-//!
-//! See TDD-0001 for the schema, TDD-0009 for cache-key composition,
-//! ADR-0007 for the YAML-as-sugar input forms.
 
 use crate::paths::{OutputPath, WsRelPath};
 use serde::{Deserialize, Serialize};
@@ -17,7 +14,7 @@ pub use giant_schema::Input;
 /// Content-addressed hash (sha256, 32 bytes). 64 hex chars when stringified.
 ///
 /// sha256 chosen for ecosystem alignment with bazel-remote, sccache, and
-/// `sha256sum` (debuggability via shell). See ADR-0006.
+/// `sha256sum` (debuggability via shell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContentHash([u8; 32]);
 
@@ -101,11 +98,11 @@ impl CacheKey {
 }
 
 /// `TargetId` is the shared protocol vocabulary, so it lives in giant-protocol
-/// (ADR-0034). Re-exported here so `crate::model::TargetId` and `giant::TargetId`
+/// Re-exported here so `crate::model::TargetId` and `giant::TargetId`
 /// stay stable.
 pub use giant_protocol::TargetId;
 
-/// A target - the unit of work. Schema in TDD-0001.
+/// A target - the unit of work.
 ///
 /// The engine's *resolved* form. It is built from a
 /// [`giant_schema::WireTarget`] on load (the `From` impl below; that is the
@@ -145,11 +142,11 @@ pub struct TargetSpec {
     pub cache: Option<bool>,
     pub remote_cache: bool,
 
-    /// Network allowed when sandboxed (ADR-0030 §4a). Inert unless `--sandbox`
+    /// Network allowed when sandboxed. Inert unless `--sandbox`
     /// mode is on; never contributes to the cache key.
     pub network: bool,
 
-    /// Sandbox eligibility (ADR-0030 §4a); `false` exempts the target from
+    /// Sandbox eligibility; `false` exempts the target from
     /// `--sandbox`. Never contributes to the cache key.
     pub sandbox: bool,
 
@@ -161,7 +158,7 @@ pub struct TargetSpec {
 
     /// Runtime-only: workspace-relative directories of subpackages (nested
     /// `giant.yaml` files) that this target's globs must not cross into,
-    /// so no two packages claim the same file (TDD-0001 §Path resolution).
+    /// so no two packages claim the same file.
     /// Computed by the loader from the full package set.
     pub prune_dirs: Vec<WsRelPath>,
 }
@@ -199,7 +196,7 @@ impl From<giant_schema::WireTarget> for TargetSpec {
 impl TargetSpec {
     /// Whether this target participates in the content-addressed cache.
     /// Build targets default to cached, `test:` targets to uncached; an
-    /// explicit `cache:` overrides either way. See TDD-0009.
+    /// explicit `cache:` overrides either way.
     pub fn is_cacheable(&self) -> bool {
         self.cache.unwrap_or(!self.test)
     }

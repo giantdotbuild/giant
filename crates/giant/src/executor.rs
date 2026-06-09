@@ -3,8 +3,7 @@
 //! Dispatches targets in topological order, up to a parallelism budget,
 //! via a `JoinSet`. Each target computes a cache key, consults the cache
 //! (local AC → remote AC → `exists:` check), and restores on a hit or
-//! runs the command and stores outputs on a miss. The shape matches
-//! TDD-0009.
+//! runs the command and stores outputs on a miss.
 
 mod key;
 mod run;
@@ -62,7 +61,7 @@ pub struct BuildJob {
     /// cache hits, 5 MiB per stream.
     pub log_capture: LogCapture,
     /// Sandbox policy, set by the CLI when `--sandbox` is on. `None` = run
-    /// commands directly, exactly as today (ADR-0030).
+    /// commands directly, exactly as today.
     pub sandbox: Option<SandboxPolicy>,
     /// Optional remote cache. Inserted by the CLI when configured;
     /// always `None` when the `remote` feature is off.
@@ -182,7 +181,7 @@ struct TargetCtx {
     cancel: CancellationToken,
     build_id: String,
     log_capture: LogCapture,
-    /// Sandbox policy; `None` runs commands directly (ADR-0030).
+    /// Sandbox policy; `None` runs commands directly.
     sandbox: Option<SandboxPolicy>,
     /// Optional remote cache. `None` when the binary is built without
     /// the `remote` feature or when the user has it disabled. Lookup
@@ -200,8 +199,7 @@ struct CompletionMsg {
     id: TargetId,
     cache_key: CacheKey,
     result: TargetResult,
-    /// `outputs_content_hash` for downstream dep keys (TDD-0009 §Early
-    /// cutoff). `None` only when the target failed.
+    /// `outputs_content_hash` for downstream dep keys (early cutoff). `None` only when the target failed.
     output_hash: Option<ContentHash>,
 }
 

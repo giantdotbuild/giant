@@ -3,7 +3,7 @@
 //!
 //! This is what the read-query porcelains (`giant explain`, `giant logs`) use
 //! instead of recomputing anything themselves. Core does the work and emits
-//! events; the porcelain renders them (ADR-0034). The same protocol feeds the
+//! events; the porcelain renders them. The same protocol feeds the
 //! TUI, and a future warm daemon answers without a per-call graph rebuild.
 
 use std::ffi::OsString;

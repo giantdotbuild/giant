@@ -172,7 +172,7 @@ fn catalog_row<'a>(
     cached: Option<bool>,
     selected: bool,
 ) -> Line<'a> {
-    // Cache state glyph (ADR-0033 query.status): filled green = cached, hollow
+    // Cache state glyph (query.status): filled green = cached, hollow
     // yellow = stale, dim dot = not yet known.
     let (glyph, color) = match cached {
         Some(true) => ("●", Color::Green),
@@ -431,7 +431,7 @@ fn log_window<'a>(state: &State, logs: &'a [LogLine], height: usize) -> (Vec<&'a
 }
 
 /// Full-screen log viewer for one target (`Screen::Logs`), fed by a `logs.get`
-/// replay (ADR-0033). Search reuses `Mode::LogSearch`; j/k scroll; Esc returns.
+/// replay. Search reuses `Mode::LogSearch`; j/k scroll; Esc returns.
 fn draw_logs(frame: &mut Frame, area: Rect, state: &State) {
     let height = area.height.saturating_sub(2) as usize;
     let logs = state.log_view_logs();
@@ -823,7 +823,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
     frame.render_widget(para, rect);
 }
 
-/// "Why did this run / why cached" overlay (ADR-0033 query.explain). Shows the
+/// "Why did this run / why cached" overlay (query.explain). Shows the
 /// cache key, cache state, and what feeds the key. Renders a loading line until
 /// the `query.explained` reply arrives.
 fn draw_explain_overlay(frame: &mut Frame, area: Rect, state: &State) {

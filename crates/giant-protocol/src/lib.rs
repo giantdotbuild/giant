@@ -1,9 +1,9 @@
 //! Giant's wire protocol: the `Command` / `Event` NDJSON types the engine speaks
-//! over `giant session` (ADR-0003), the `TargetId` vocabulary they share, and a
+//! over `giant session`, the `TargetId` vocabulary they share, and a
 //! reference [`client`] that drives a session subprocess.
 //!
 //! This crate carries no engine logic - it is the contract a porcelain links to
-//! render engine-computed data without compiling the engine itself (ADR-0034).
+//! render engine-computed data without compiling the engine itself.
 
 pub mod client;
 pub mod commands;
@@ -15,7 +15,7 @@ pub use events::{Event, EventSender};
 
 use serde::{Deserialize, Serialize};
 
-/// Path-derived target label `//<package>:<name>` (TDD-0001, ADR-0024).
+/// Path-derived target label `//<package>:<name>`.
 ///
 /// The package is the workspace-relative directory of the target's
 /// `giant.yaml`; the root package is empty, so a root target is

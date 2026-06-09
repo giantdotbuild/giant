@@ -28,10 +28,10 @@ pub enum Action {
     RefreshAffectedAgain,
     /// Drop the affected filter; tear down the file watcher.
     ClearAffected,
-    /// Open the log viewer for a target: send `logs.get` for it (ADR-0033).
+    /// Open the log viewer for a target: send `logs.get` for it.
     /// The state transition to `Screen::Logs` is already done.
     ViewLogs(TargetId),
-    /// Open the explain overlay for a target: send `query.explain` (ADR-0033).
+    /// Open the explain overlay for a target: send `query.explain`.
     /// The overlay (`Mode::Explain`) is already showing.
     Explain(TargetId),
     /// Key consumed but no UI effect.
@@ -133,7 +133,7 @@ fn handle_browser(state: &mut State, key: KeyEvent) -> Action {
         KeyCode::Char('e') => match state.selected_browser_target() {
             Some(target) => {
                 // Show the overlay immediately (with a loading state); the
-                // query.explained reply fills it in (ADR-0033).
+                // query.explained reply fills it in.
                 state.explain = None;
                 state.mode = Mode::Explain;
                 Action::Explain(target)
@@ -351,7 +351,7 @@ fn handle_help(state: &mut State, _key: KeyEvent) -> Action {
     Action::Redraw
 }
 
-/// Any key dismisses the explain overlay (ADR-0033).
+/// Any key dismisses the explain overlay.
 fn handle_explain(state: &mut State, _key: KeyEvent) -> Action {
     state.mode = Mode::Normal;
     state.explain = None;

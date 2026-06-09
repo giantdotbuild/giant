@@ -1,9 +1,9 @@
 //! The slice of the workspace's root `giant.yaml` the runner reads: the
-//! `generate:` declaration (ADR-0029 §6, which retired the separate
+//! `generate:` declaration (which retired the separate
 //! `giant-gen.yaml`). Each entry is either the built-in Starlark host on a
-//! `giant.star` script, or an external generator command (TDD-0022's model).
+//! `giant.star` script, or an external generator command.
 //! Other top-level sections belong to the engine and other porcelains and are
-//! ignored here (ADR-0010).
+//! ignored here.
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -36,10 +36,10 @@ enum Decl {
 }
 
 /// A resolved generator: the built-in host on a script, or an external command.
-/// Both own `giant.<name()>.yaml` files and only those (TDD-0022 §C).
+/// Both own `giant.<name()>.yaml` files and only those.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Generator {
-    /// The embedded Starlark host (ADR-0029): run `script`, emit `giant.<infix>.yaml`.
+    /// The embedded Starlark host: run `script`, emit `giant.<infix>.yaml`.
     Builtin { infix: String, script: PathBuf },
     /// An external program writing `giant.<name>.yaml` under `GIANT_GEN_OUT`.
     External { name: String, command: String },

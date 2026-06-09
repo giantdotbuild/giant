@@ -34,7 +34,7 @@
 
         # crane's `cleanCargoSource` keeps only Rust/Cargo files, which would
         # drop the Starlark std collection (`std/*.star`) that giant-gen ships
-        # (ADR-0031) and the `.star` fixtures its tests read. Keep `.star` files.
+        # and the `.star` fixtures its tests read. Keep `.star` files.
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           name = "giant-source";
@@ -120,7 +120,7 @@
         giant-build = mkBin { name = "giant-build"; };
 
         # giant-gen ships the official Starlark std collection as files (not
-        # embedded in the binary; ADR-0031). The library lands in
+        # embedded in the binary). The library lands in
         # share/giant/std and GIANT_STD points the `@std//` loader and
         # `giant gen vendor` at it.
         giant-gen =

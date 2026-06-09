@@ -1,6 +1,6 @@
 //! Host-owned I/O: the impure operations the `ws` methods delegate to. Keeping
 //! every side effect here (filesystem, process) is what lets the host normalize
-//! for determinism in one place (TDD-0024 §F).
+//! for determinism in one place.
 
 use std::path::Path;
 use std::process::Command;

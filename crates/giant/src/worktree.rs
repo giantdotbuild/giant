@@ -1,4 +1,4 @@
-//! Disposable git worktree for `giant verify` (ADR-0036).
+//! Disposable git worktree for `giant verify`.
 //!
 //! A verify run builds in a throwaway checkout of the committed state rather
 //! than the live tree, so a sandboxed command can never mutate or delete the

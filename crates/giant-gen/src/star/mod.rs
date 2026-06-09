@@ -1,4 +1,4 @@
-//! The embedded Starlark generator host (ADR-0029, TDD-0024).
+//! The embedded Starlark generator host.
 //!
 //! Runs a workspace's `giant.star` in-process: it evaluates the script, calls
 //! `generate(ws)`, collects the `target()` values it returns, groups them by

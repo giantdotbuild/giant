@@ -5,9 +5,8 @@
 
 ## Context
 
-Now that the engine has no embedded scripting language
-([ADR-0001](0001-discovery-as-a-target.md)), we need to decide what
-config format it actually consumes. The choices: YAML, JSON, TOML, or
+Now that the engine has no embedded scripting language, we need to
+decide what config format it actually consumes. The choices: YAML, JSON, TOML, or
 a structured schema language (CUE, Dhall). Discovery scripts also
 need a format to emit.
 
@@ -78,4 +77,4 @@ enough and universally tooled.
 ## References
 
 - [JSON Schema](https://json-schema.org/)
-- [TDD-0001 - Target model and config schema](../tdd/0001-target-model-and-config-schema.md)
+- TDD-0001 - Target model and config schema

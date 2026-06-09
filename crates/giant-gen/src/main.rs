@@ -1,12 +1,12 @@
-//! giant-gen - the generator runner porcelain (TDD-0022).
+//! giant-gen - the generator runner porcelain.
 //!
-//! Reached as `giant gen` via core's PATH dispatch (ADR-0021), like
+//! Reached as `giant gen` via core's PATH dispatch, like
 //! `giant-task`. It reads the workspace root `giant.yaml`'s `generate:` list
-//! (ADR-0029 §6) and runs each entry - the built-in Starlark host on a
-//! `giant.star` (ADR-0029), or an external generator command - writing in
+//! and runs each entry - the built-in Starlark host on a
+//! `giant.star`, or an external generator command - writing in
 //! place, or with `--check` into a scratch dir to diff against the committed
 //! tree. It never inspects output beyond enforcing `giant.<name>.yaml`
-//! filename ownership. The engine has no part in any of this (ADR-0024).
+//! filename ownership. The engine has no part in any of this.
 
 mod check;
 mod config;
@@ -75,7 +75,7 @@ async fn real_main() -> Result<i32> {
 
 /// Copy stdlib modules from giant's std collection into the workspace's `star/`
 /// dir so they can be edited and pinned in-repo, then loaded with
-/// `load("star/<name>")` (ADR-0031).
+/// `load("star/<name>")`.
 fn vendor(names: &[String]) -> Result<i32> {
     if names.is_empty() {
         anyhow::bail!("giant gen vendor: name a module, e.g. `giant gen vendor go.star`");
@@ -134,7 +134,7 @@ async fn run_all(selected: &[Generator], root: &Path) -> Result<i32> {
     }
 
     // Phase 2: resolve deps over the whole emitted tree and write them into the
-    // generated files (TDD-0026). Skipped above on any generator failure, since
+    // generated files. Skipped above on any generator failure, since
     // the tree would be partial.
     let root = root.to_path_buf();
     match tokio::task::spawn_blocking(move || link::run(&root)).await? {

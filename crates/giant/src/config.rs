@@ -1,6 +1,4 @@
 //! Config loading and validation.
-//!
-//! See TDD-0001 for the schema, ADR-0007 for YAML-as-sugar policy.
 
 use crate::model::{Input, TargetId, TargetSpec};
 use crate::paths::{OutputPath, WsRelPath};
@@ -30,7 +28,7 @@ pub enum ConfigError {
 /// Top-level config. NOT `deny_unknown_fields` - porcelains (giant-task,
 /// future giant-deploy, etc.) own their own top-level sections like
 /// `tasks:`. Core silently accepts them; the porcelain re-parses the
-/// same file with its own schema. (ADR-0010.)
+/// same file with its own schema.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
     #[serde(default = "default_schema_version")]
@@ -86,7 +84,7 @@ fn default_state_dir() -> String {
 }
 
 /// Extra paths and env names a sandboxed build may access, on top of the
-/// generic FHS defaults the engine grants (ADR-0030 §3). This is how a
+/// generic FHS defaults the engine grants. This is how a
 /// non-FHS toolchain - Nix, asdf, a vendored `bin/` - extends the sandbox
 /// without giant assuming any particular scheme. Additive: the defaults
 /// always apply; these are added to them. Inert unless `--sandbox` is used.
@@ -272,7 +270,7 @@ impl Config {
 
     /// Assign each target its `//<package>:<name>` label, resolve its dep
     /// references, and rewrite its package-relative `inputs`/`outputs`/`cwd`
-    /// to workspace-relative form (TDD-0001 §Path resolution). `package` is
+    /// to workspace-relative form. `package` is
     /// this file's directory, workspace-relative (`""` for the root).
     fn finalize_package(&mut self, package: &str) -> Result<(), ConfigError> {
         for t in &mut self.targets {
@@ -317,7 +315,7 @@ impl Config {
     }
 
     /// Static validation: things checkable on a single config file.
-    /// (TDD-0001 §Validation.)
+    ///
     pub fn validate_static(&self) -> Result<(), ConfigError> {
         // workspace.name
         if self.workspace.name.is_empty() {
@@ -380,9 +378,9 @@ impl Config {
     }
 
     /// Scan the workspace rooted at `root_dir` and merge every config file
-    /// into one config (TDD-0001 §scan and merge). A package directory may
+    /// into one config. A package directory may
     /// hold a primary `giant.yaml` plus any number of generator-owned
-    /// `giant.<infix>.yaml` files (ADR-0026); all of them contribute targets
+    /// `giant.<infix>.yaml` files; all of them contribute targets
     /// to that package and are merged together. The primary root config
     /// supplies workspace-global settings and its own root-package targets;
     /// every other file is targets-only, scoped to its directory's package.
@@ -425,7 +423,7 @@ impl Config {
     }
 
     /// Record, per target, the subpackage directories its globs must not
-    /// cross into (TDD-0001 §Path resolution). A file belongs to exactly
+    /// cross into. A file belongs to exactly
     /// one package - its deepest enclosing `giant.yaml` - so a parent
     /// package's glob stops at any nested package. `package_dirs` is every
     /// scanned package directory (a `giant.yaml`'s dir), even ones with no
@@ -462,7 +460,7 @@ impl Config {
     }
 
     /// Whole-graph check after the scan: target-label uniqueness across
-    /// every package (TDD-0001 §scan and merge conflict rules). Output
+    /// every package. Output
     /// collisions are caught when the graph builds its inferred edges
     /// (`graph::BuildGraph`, `GraphError::OutputCollision`).
     fn validate_merged(&self) -> Result<(), ConfigError> {
@@ -509,7 +507,7 @@ fn find_workspace_root(explicit: Option<&Path>) -> Result<PathBuf, ConfigError> 
 /// A package config may carry only `targets:` (plus the porcelain-reserved
 /// `tasks:`/`services:`, which the engine passes over). Reject any
 /// workspace-global section so a copied root config fails loudly instead
-/// of being silently ignored (TDD-0001 §Root config vs package config).
+/// of being silently ignored.
 fn reject_root_only_sections(path: &Path) -> Result<(), ConfigError> {
     const ROOT_ONLY: &[&str] = &[
         "workspace",
@@ -565,7 +563,7 @@ fn find_config_in_dir(dir: &Path) -> Option<PathBuf> {
 
 /// Whether `name` is a giant config filename: the primary `giant.yaml` /
 /// `.yml` / `.json`, or a generator-owned `giant.<infix>.yaml` variant
-/// (ADR-0026), where `<infix>` is a non-empty filename-safe identifier
+///, where `<infix>` is a non-empty filename-safe identifier
 /// (ASCII alphanumeric, `-`, `_`). Several files may share one directory;
 /// the scan merges them all into that package.
 fn is_config_filename(name: &str) -> bool {
@@ -606,8 +604,7 @@ fn is_valid_workspace_name(s: &str) -> bool {
 }
 
 /// Resolve a `deps:` reference to a full `//pkg:name` label. `//pkg:name`
-/// is already absolute; `:name` (and a bare `name`) are same-package
-/// (TDD-0001 §Path resolution).
+/// is already absolute; `:name` (and a bare `name`) are same-package.
 fn resolve_dep_label(package: &str, dep: &str) -> TargetId {
     if dep.starts_with("//") {
         TargetId::new(dep)
@@ -630,8 +627,7 @@ fn is_subpackage(pkg: &str, of: &str) -> bool {
 }
 
 /// Resolve a package-relative or `//`-rooted config path (input glob,
-/// output, cwd) to its workspace-relative form (TDD-0001 §Path
-/// resolution). `package` is the target's package directory.
+/// output, cwd) to its workspace-relative form. `package` is the target's package directory.
 ///
 /// - `//x` → `x` (workspace root).
 /// - `.` → the package directory.
@@ -851,7 +847,7 @@ sandbox:
         assert_eq!(cfg.sandbox.env, vec!["NIX_*", "GOPATH"]);
     }
 
-    // --- scan + merge + package-relative paths (TDD-0001, M2) ---
+    // --- scan + merge + package-relative paths ---
 
     #[test]
     fn resolve_in_package_rules() {
@@ -914,7 +910,7 @@ sandbox:
     fn scan_merges_infix_files_into_one_package() {
         // A generator-owned `giant.bundle.yaml` co-exists with the primary
         // `giant.yaml` in the same directory; both contribute targets to that
-        // package (ADR-0026 filename ownership).
+        // package (filename ownership).
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("giant.yaml"), "workspace:\n  name: w\n").unwrap();

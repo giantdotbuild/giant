@@ -129,7 +129,7 @@ pub fn open_remote(config: &Config) -> anyhow::Result<OpenedRemote> {
 pub fn open_remote(config: &Config) -> anyhow::Result<(Option<()>, Option<()>, Option<()>)> {
     // When the user has cache.remote.enabled: true in config but the
     // binary was built without the `remote` feature, log once and
-    // proceed with local-only behaviour (TDD-0006).
+    // proceed with local-only behaviour.
     let _ = config;
     Ok((None, None, None))
 }

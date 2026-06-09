@@ -321,7 +321,7 @@ targets:
 
 #[test]
 fn early_cutoff_byte_identical_upstream_doesnt_invalidate_downstream() {
-    // Property under test (TDD-0009 §Early-cutoff): if an upstream target
+    // Property under test (early cutoff): if an upstream target
     // rebuilds because its inputs changed, but its outputs come out
     // byte-identical, downstream should *not* rebuild - its cache key is
     // computed from upstream's output content hash, not upstream's cache

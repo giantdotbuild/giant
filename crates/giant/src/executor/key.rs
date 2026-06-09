@@ -1,4 +1,4 @@
-//! Cache-key composition (TDD-0009). Computes a target's content-addressed
+//! Cache-key composition. Computes a target's content-addressed
 //! cache key from command, cwd, env, file inputs, and dep output hashes.
 //! `giant explain` reaches in via the `_with_breakdown` variant to show
 //! users what fed the hash.
@@ -10,12 +10,12 @@ use crate::paths::{AbsPath, WsRelPath};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Built-in env contributions for the cache key (see TDD-0007).
+/// Built-in env contributions for the cache key.
 const GIANT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TARGET_TRIPLE: &str = env!("GIANT_TARGET_TRIPLE");
 
 /// Schema version for the cache-key composition. Bump on any change.
-/// v2: dropped the `structural_inputs` section (ADR-0025).
+/// v2: dropped the `structural_inputs` section.
 const KEY_SCHEMA: &str = "v2";
 
 /// Breakdown of what went into a target's cache key. Populated when the
@@ -43,7 +43,7 @@ pub struct FileInputContribution {
     pub size: u64,
 }
 
-/// Compute the cache key for a target. See TDD-0009 §Cache key composition.
+/// Compute the cache key for a target. key composition.
 ///
 /// `dep_output_hashes` is each direct dep's output content hash - *not* its
 /// cache key. This is the early-cutoff property: byte-identical upstream
@@ -204,7 +204,7 @@ fn compose_cache_key_blocking(
 
 /// Absolute paths of a target's declared file inputs, expanded from its
 /// globs using the exact same walk as `file_inputs_hash`. The sandbox `ro`
-/// set is built from this (TDD-0025) so what the sandbox permits and what the
+/// set is built from this so what the sandbox permits and what the
 /// cache key hashes come from one source - a complete key implies a complete
 /// sandbox.
 pub(super) fn resolve_input_paths(
@@ -277,7 +277,7 @@ fn compute_file_inputs(
 ///
 /// The shared walk also prunes known noise (`.git`, `.giant`, the
 /// configured cache directory) and any `prune` directory - a subpackage
-/// boundary the glob must not cross (TDD-0001 §Path resolution) - to keep
+/// boundary the glob must not cross - to keep
 /// the visit budget bounded and the file-ownership one-package-per-file.
 fn expand_globs_batched(
     workspace_root: &Path,

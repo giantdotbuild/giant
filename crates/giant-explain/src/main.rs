@@ -2,7 +2,7 @@
 //! currently cached. The first thing to reach for when "why did this rebuild?"
 //! comes up.
 //!
-//! Porcelain (ADR-0034), dispatched as `giant explain`. It does not recompute
+//! Porcelain, dispatched as `giant explain`. It does not recompute
 //! anything: it asks a `giant session` over the protocol (`query.explain`) and
 //! renders the `query.explained` reply. `--diff` runs two queries and compares
 //! them client-side.

@@ -1,8 +1,8 @@
 //! giant-graph - the dependency-graph inspection porcelain.
 //!
-//! Reached as `giant graph` via core's PATH dispatch (ADR-0021), like
-//! `giant-gen` / `giant-task`. The build graph is fully static on disk since
-//! ADR-0032 (explicit `deps:`, no engine inference), so this tool needs nothing
+//! Reached as `giant graph` via core's PATH dispatch, like
+//! `giant-gen` / `giant-task`. The build graph is fully static on disk
+//! (explicit `deps:`, no engine inference), so this tool needs nothing
 //! from the engine at runtime: it scans the workspace config, builds the same
 //! `BuildGraph` the engine would, and renders it. Text modes (list / tree /
 //! compact) plus `--format dot|mermaid|json` for external renderers.

@@ -1,5 +1,5 @@
 //! End-to-end: `giant build --sandbox` enforces a target's declared inputs
-//! (TDD-0025). The mechanism is proven in giant-sandbox's own tests; here we
+//! The mechanism is proven in giant-sandbox's own tests; here we
 //! prove the *wiring* - that the engine wraps eligible targets and that an
 //! undeclared read fails under the mode and passes without it.
 //!
@@ -78,7 +78,7 @@ fn verify(ws: &Path) -> Output {
         .expect("spawn giant verify")
 }
 
-/// `giant verify` builds in a worktree of the committed state (ADR-0036), so the
+/// `giant verify` builds in a worktree of the committed state, so the
 /// workspace has to be a git repo with the files committed. Initialise one and
 /// commit everything present.
 fn git_init_commit(ws: &Path) {
@@ -163,7 +163,7 @@ fn verify_audits_without_an_explicit_flag() {
         "verify must catch an undeclared read with no flag; stderr:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // The failure is annotated with the likely cause (ADR-0036), not just a
+    // The failure is annotated with the likely cause, not just a
     // bare exit code, so the user knows the sandbox denied an access.
     let rendered = format!(
         "{}{}",
@@ -176,7 +176,7 @@ fn verify_audits_without_an_explicit_flag() {
     );
 }
 
-/// The core ADR-0036 guarantee: a verify run cannot touch the live working tree.
+/// The core guarantee: a verify run cannot touch the live working tree.
 /// A command that deletes a tracked file runs in the disposable worktree, so the
 /// real file survives whether or not the host can sandbox.
 #[test]

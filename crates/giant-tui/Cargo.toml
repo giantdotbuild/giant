@@ -2,7 +2,7 @@
 name = "giant-tui"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
 description = "Interactive target browser + build runner for Giant. Dispatched via `giant tui`."
 
 [[bin]]
@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 # Links the engine: the protocol types (re-exported from giant-protocol) plus
 # `giant::selection` for client-side target filtering. The TUI drives a `giant
-# session` subprocess for builds (ADR-0034).
+# session` subprocess for builds.
 giant = { path = "../giant" }
 
 # Async runtime - single-process tokio app.

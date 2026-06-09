@@ -2,7 +2,6 @@
 
 - **Status**: Accepted
 - **Date**: 2026-05-20
-- **Supersedes**: [ADR-0005](0005-tasks-stripped-to-bone.md)
 
 ## Context
 
@@ -43,7 +42,7 @@ Adopt the porcelain pattern.
   `giant <name>` dispatches to `giant-<name>` if `<name>` is not a
   built-in subcommand. Same model as git, cargo, kubectl, jj.
 - **Communication between porcelain and core uses the NDJSON
-  protocol** (TDD-0004) over one of three transports chosen
+  protocol** over one of three transports chosen
   per-porcelain:
   - **Subprocess + stdout** for one-shot consumers (`giant-task`
     spawning `giant build X --events ndjson`).
@@ -88,7 +87,7 @@ transport that matches their needs.
 
 - Subcommand dispatch in core: any unrecognised subcommand →
   `giant-<name>` on PATH → exec. Clear error when not found.
-- The NDJSON event + command protocol (TDD-0004) is the stable
+- The NDJSON event + command protocol is the stable
   contract between core and porcelains. Breaking changes require a
   protocol version bump.
 - Both subprocess and (future) socket transports speak the same
@@ -141,6 +140,6 @@ in `crates/giant-task/`.
 - cargo plugins (cargo-edit, cargo-watch, cargo-nextest, etc.)
 - kubectl krew plugin system
 - jj's subcommand dispatch
-- [TDD-0004 - Event protocol](../tdd/0004-event-protocol.md)
-- [ADR-0005 - Tasks stripped to bone (superseded)](0005-tasks-stripped-to-bone.md)
-- [ADR-0020 - giant-task workhorse charter](0020-giant-task-workhorse-charter.md) (defines this porcelain's scope)
+- TDD-0004 - Event protocol
+- ADR-0005 - Tasks stripped to bone (superseded)
+- ADR-0020 - giant-task workhorse charter (defines this porcelain's scope)

@@ -32,7 +32,7 @@ is a thin layer over the engine.
 **The giant binary's command surface shrinks to `session` + `completions` + the
 `giant-<name>` PATH dispatch. Every other command becomes a porcelain.**
 
-- **`session`** stays - it *is* the engine exposed over NDJSON (ADR-0003). It is
+- **`session`** stays - it *is* the engine exposed over NDJSON. It is
   the only necessary command.
 - **`completions`** stays - it is the dispatcher's own concern. Static scripts
   cover the binary's surface; dynamic completion (`clap_complete::CompleteEnv` +
@@ -54,7 +54,7 @@ That sorts them into three categories:
    `logs` (over `logs.get`), `build` / `test` (over `build` + the event stream),
    and the TUI all live here. This is the pure model and the one to reach for by
    default: the engine lives in exactly one place, the same protocol feeds the
-   CLI and the TUI, and a future warm daemon (ADR-0003) answers without
+   CLI and the TUI, and a future warm daemon answers without
    rebuilding the graph per invocation - something a lib-linked command can never
    do.
 2. **Static committed data → read it directly.** ADR-0032 put the build graph on

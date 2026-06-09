@@ -1,4 +1,4 @@
-//! Porcelain dispatch end-to-end (ADR-0010 + ADR-0035):
+//! Porcelain dispatch end-to-end:
 //! - `giant <name>` for a non-built-in → look up `giant-<name>` (beside giant,
 //!   then on PATH) → exec.
 //! - No such binary → "no such subcommand" error. There is no catch-all; an
@@ -66,7 +66,7 @@ fn dispatches_to_giant_prefixed_binary_on_path() {
 #[test]
 fn unknown_name_errors_and_never_falls_back_to_a_task_runner() {
     // Even with `giant-task` right there on PATH, an unknown name must NOT be
-    // routed to it (ADR-0035): it errors with a helpful "no such subcommand".
+    // routed to it: it errors with a helpful "no such subcommand".
     let bindir = tempfile::tempdir().unwrap();
     write_exec(
         &bindir.path().join("giant-task"),

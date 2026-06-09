@@ -1,4 +1,4 @@
-//! End-to-end tests for giant-sandbox (TDD-0025).
+//! End-to-end tests for giant-sandbox.
 //!
 //! Two groups:
 //! - **Setup-failure** tests run anywhere: a bad/missing spec must exit 125,

@@ -1,5 +1,5 @@
 //! `giant test` - same machinery as `giant build`, restricted to `test: true`
-//! targets. Porcelain (ADR-0034).
+//! targets. Porcelain.
 
 use clap::Parser;
 use giant::selection::TestMode;

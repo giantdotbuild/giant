@@ -1,11 +1,11 @@
 //! `giant-task --watch` - re-run a task when relevant files change.
 //!
 //! The porcelain does no file watching itself. It spawns a `giant
-//! session` (the headless engine, ADR-0003) and subscribes to a
+//! session` (the headless engine) and subscribes to a
 //! notify-only watch scoped to the task's `deps:` (as target ids, which
 //! the engine expands through the graph - so a change to a *transitive*
 //! dependency counts) and `inputs:` (as extra globs). On each
-//! `watch.changed` the task re-runs. See ADR-0022 / TDD-0019.
+//! `watch.changed` the task re-runs.
 //!
 //! The engine owns the watcher, the debouncer, and the graph; the
 //! porcelain only declares what to watch and reacts. Ctrl-C (or stdin

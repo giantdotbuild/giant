@@ -322,7 +322,7 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
 
     let cwd = ctx.workspace_root.as_path().join(spec.cwd.as_path());
 
-    // Under `--sandbox`, an eligible target (ADR-0030 §4a: `sandbox != false`)
+    // Under `--sandbox`, an eligible target (`sandbox != false`)
     // runs through the `giant-sandbox` wrapper instead of `sh` directly. An
     // exempt target, or sandbox mode off, takes the plain path unchanged.
     // `sandbox_allowed` carries the granted path set for an enforced target, so
@@ -440,7 +440,7 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
         let mut error = format!("exit code {code}");
         // Under enforcement, turn a bare exit code into a likely cause - an
         // undeclared read, a blocked socket, or a sandbox that wouldn't start
-        // (ADR-0036). Reads the captured stderr, so it needs log capture on
+        // Reads the captured stderr, so it needs log capture on
         // (the default; `giant verify` always captures).
         if let Some(allowed) = &sandbox_allowed
             && let Some(hint) = diagnose_sandbox_failure(code, &stderr_bytes, allowed, spec.network)
@@ -568,7 +568,7 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
 }
 
 /// Capture a target's outputs: glob-expand each declared pattern, hash
-/// every matching file, and store it in CAS (ADR-0019).
+/// every matching file, and store it in CAS.
 ///
 /// Each `outputs:` entry is a glob; a literal path is the degenerate
 /// single-match case, so the must-exist contract survives (a named file
@@ -843,7 +843,7 @@ where
 const SANDBOX_SETUP_FAILURE: i32 = 125;
 
 /// Best-effort explanation for why an enforced command failed, from its exit
-/// code and stderr (ADR-0036 diagnostics). The sandbox surfaces a denial as the
+/// code and stderr. The sandbox surfaces a denial as the
 /// child's own `EACCES` / network error, so we pattern-match those and point at
 /// the declared set. `None` when nothing recognisable stands out - the caller
 /// keeps the bare exit code.

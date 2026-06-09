@@ -1,4 +1,4 @@
-//! The `giant.yaml` wire schema - the typed config contract (ADR-0007's "JSON
+//! The `giant.yaml` wire schema - the typed config contract ("JSON
 //! is the contract", as a first-class type rather than serde annotations on a
 //! hybrid struct).
 //!
@@ -8,26 +8,24 @@
 //! Keeping it here means producer and consumer cannot drift: a bad field is a
 //! compile error against `WireTarget`, not a runtime surprise at load. The
 //! dependency direction is `giant-schema <- engine` and `giant-schema <-
-//! generator host`; this crate depends on neither (ADR-0029 §5).
-//!
-//! See TDD-0001 for the schema and ADR-0007 for the YAML-as-sugar input forms.
+//! generator host`; this crate depends on neither.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 
-/// The current `SandboxSpec` wire version. Bump on any field change (TDD-0025).
+/// The current `SandboxSpec` wire version. Bump on any field change.
 pub const SANDBOX_SPEC_SCHEMA: u32 = 1;
 
 /// The bind set the engine resolves for a sandboxed target and hands to the
-/// `giant-sandbox` porcelain (TDD-0025). Written as JSON to
+/// `giant-sandbox` porcelain. Written as JSON to
 /// `<state_dir>/sandbox/<target>.json`; the command and its args are passed on
 /// the porcelain's command line after `--`, never in this struct.
 ///
 /// All paths are absolute: the engine resolves them against the workspace root
 /// before writing, so the porcelain never resolves paths itself. The contract
-/// is mechanism-agnostic (ADR-0030 §2a) - the porcelain decides how to enforce
+/// is mechanism-agnostic - the porcelain decides how to enforce
 /// it (v1: birdcage).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxSpec {
@@ -56,7 +54,7 @@ pub struct SandboxSpec {
     /// Names of environment variables the command may read. Empty means "pass
     /// the whole ambient environment" (back-compat); a non-empty list scrubs to
     /// exactly these. The engine fills it with `PATH` plus the toolchain/locale
-    /// essentials and the target's declared `env:` (ADR-0030 §4).
+    /// essentials and the target's declared `env:`.
     #[serde(default)]
     pub env: Vec<String>,
 
@@ -79,12 +77,12 @@ pub struct Document {
 /// The engine's loader deserializes this and builds the internal resolved
 /// `TargetSpec` from it; a generator builds this and serializes it.
 ///
-/// Schema in TDD-0001. Paths (`outputs`, `cwd`, input globs) are written
+/// Paths (`outputs`, `cwd`, input globs) are written
 /// package-relative or `//`-rooted; the engine resolves them against the
 /// declaring file's package on load.
 /// `env` and `tags` are sorted maps/sets, and empty/default fields are omitted
 /// on serialize, so a generator's emitted YAML is deterministic and clean -
-/// the property `giant gen --check` relies on (TDD-0024 §F).
+/// the property `giant gen --check` relies on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireTarget {
     /// Local name, unique within the package.
@@ -114,13 +112,13 @@ pub struct WireTarget {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub remote_cache: bool,
 
-    /// Network access when sandboxed (ADR-0030 §4a). Default `false` (denied);
+    /// Network access when sandboxed. Default `false` (denied);
     /// `true` is the per-target escape for targets that genuinely fetch. Inert
     /// unless `--sandbox` mode is on, and never a cache-key input.
     #[serde(default, skip_serializing_if = "is_false")]
     pub network: bool,
 
-    /// Sandbox eligibility (ADR-0030 §4a). Default `true`; set `false` to
+    /// Sandbox eligibility. Default `true`; set `false` to
     /// exempt a target from `--sandbox` (it runs normally even in the mode).
     /// There is no meaningful `true` opt-in. Never a cache-key input.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
@@ -156,7 +154,7 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// One input declaration. Three forms per TDD-0001.
+/// One input declaration. Three forms.
 ///
 /// In YAML/JSON config, a bare string is sugar for `{kind: file, glob: "..."}`.
 /// Deserialization handles both via the `try_from` attribute.
@@ -195,7 +193,7 @@ impl TryFrom<InputRaw> for Input {
 
 impl From<Input> for InputRaw {
     fn from(i: Input) -> Self {
-        // Serialize a file input as the bare-string sugar (ADR-0007), so
+        // Serialize a file input as the bare-string sugar, so
         // generated configs read cleanly (`- "src/*.go"`, not a tagged map).
         // The tagged form still deserializes, so the round-trip is preserved.
         match i {
@@ -207,7 +205,7 @@ impl From<Input> for InputRaw {
 /// A glob pattern, validated on parse.
 ///
 /// Stored as the original string; compiled on demand. Validation happens
-/// at config load (TDD-0001 §Validation).
+/// at config load.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct GlobPattern(String);

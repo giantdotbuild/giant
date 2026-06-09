@@ -2,7 +2,7 @@
 //!
 //! `main` does only enough to set up the tokio runtime, parse the
 //! top-level CLI, and dispatch into `cli::run`. All meaningful work
-//! is async and lives in the library (ADR-0009).
+//! is async and lives in the library.
 
 use std::process::ExitCode;
 

@@ -1,6 +1,6 @@
-//! `load()` resolution (TDD-0024 §B/§I): `@std//<name>` (and the legacy
+//! `load()` resolution: `@std//<name>` (and the legacy
 //! `@giant//<name>` alias) resolves to a module in giant's Starlark std
-//! collection -- shipped as files alongside the binary, not embedded (ADR-0031),
+//! collection -- shipped as files alongside the binary, not embedded,
 //! and located via `GIANT_STD` or an install-relative `share/giant/std`. Any
 //! other path is a repo-local `.star` file read relative to the workspace root.
 //! Loaded modules are evaluated with the same host globals and cached.

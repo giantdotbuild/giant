@@ -2,10 +2,11 @@
 name = "giant-explain"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 description = "Show what feeds a target's cache key. Dispatched via `giant explain`."
 
 [dependencies]
-# The wire protocol + session client only - not the engine (ADR-0034). explain
+# The wire protocol + session client only - not the engine. explain
 # talks to a `giant session` subprocess; it does not recompute anything itself.
 giant-protocol = { path = "../giant-protocol" }
 clap = { version = "4", features = ["derive"] }

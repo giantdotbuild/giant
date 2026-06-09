@@ -362,8 +362,8 @@ tasks:
 
     #[test]
     fn allows_task_named_after_a_giant_command() {
-        // Tasks are reached only as `giant task <name>` (ADR-0035 dropped the
-        // bare `giant <name>` route), so a task named `build` is unambiguous
+        // Tasks are reached only as `giant task <name>` (the bare
+        // `giant <name>` route was dropped), so a task named `build` is unambiguous
         // and must load - it never collides with the `giant build` porcelain.
         let f = write_yaml(
             r#"

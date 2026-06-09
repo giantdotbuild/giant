@@ -1,6 +1,6 @@
 //! NDJSON event protocol.
 //!
-//! See TDD-0004 for the full schema and command channel. This module
+//! for the full schema and command channel. This module
 //! defines the in-engine `Event` enum that gets serialized to the wire.
 
 use crate::TargetId;
@@ -14,7 +14,7 @@ pub enum Event {
         version: String,
         protocol: u32,
         workspace: String,
-        /// Read/query capabilities (ADR-0033, protocol 2). Absent or empty
+        /// Read/query capabilities (protocol 2). Absent or empty
         /// means a protocol-1 engine: structural catalog + build events only,
         /// no pull queries.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -149,7 +149,7 @@ pub enum Event {
         target: Option<TargetId>,
     },
 
-    // ----- Session-mode events (TDD-0014) ----------------------------
+    // ----- Session-mode events ----------------------------
     //
     // Emitted after the initial catalog stream finishes, indicating the
     // session is now ready to accept commands on stdin.
@@ -206,7 +206,7 @@ pub enum Event {
     #[serde(rename = "affected.error")]
     AffectedError { base: String, message: String },
 
-    /// Reply to `query.status` (ADR-0033). Per-target cache state, correlated
+    /// Reply to `query.status`. Per-target cache state, correlated
     /// by `command_id`.
     #[serde(rename = "query.status")]
     QueryStatus {
@@ -215,7 +215,7 @@ pub enum Event {
         targets: Vec<TargetStatus>,
     },
 
-    /// One captured log line replayed for `logs.get` (ADR-0033), correlated by
+    /// One captured log line replayed for `logs.get`, correlated by
     /// `command_id`. Distinct from `target.log`, which is live build output.
     #[serde(rename = "logs.line")]
     LogsLine {
@@ -234,7 +234,7 @@ pub enum Event {
         target: TargetId,
     },
 
-    /// Reply to `query.explain` (ADR-0033): what feeds a target's cache key,
+    /// Reply to `query.explain`: what feeds a target's cache key,
     /// and whether it is currently cached. The structured form of `giant
     /// explain`, for an inline "why did this run / why cached" view.
     #[serde(rename = "query.explained")]
@@ -365,7 +365,7 @@ pub struct TargetCounts {
     pub skipped: u32,
 }
 
-/// Best-effort sender that drops log events first under backpressure (TDD-0004).
+/// Best-effort sender that drops log events first under backpressure.
 pub type EventSender = tokio::sync::mpsc::Sender<Event>;
 
 #[cfg(test)]

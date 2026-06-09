@@ -2,9 +2,10 @@
 name = "giant-affected"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 
 [dependencies]
-# The engine as a library (ADR-0034): workspace load + selection + git. No
+# The engine as a library: workspace load + selection + git. No
 # protocol, no subprocess - a one-shot read links the lib directly.
 giant = { path = "../giant" }
 clap = { version = "4", features = ["derive"] }

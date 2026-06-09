@@ -3,7 +3,7 @@
 //! Owns a single `giant session` subprocess for the TUI's lifetime.
 //! Reads NDJSON events from its stdout, writes NDJSON commands to
 //! its stdin. The state machine in `state.rs` and the layout in
-//! `ui.rs` do the rest. See TDD-0013.
+//! `ui.rs` do the rest.
 
 use std::ffi::OsString;
 use std::io::IsTerminal;
@@ -228,7 +228,7 @@ async fn run(initial_patterns: &[String], config: Option<&std::path::Path>) -> R
                         }
                         Action::ViewLogs(target) => {
                             // State already switched to the log viewer; fetch
-                            // the target's persisted logs (ADR-0033 logs.get).
+                            // the target's persisted logs (logs.get).
                             let _ = cmd_tx.send(Command::LogsGet {
                                 command_id: Some(format!("c_{}", new_command_seq())),
                                 target,
@@ -238,7 +238,7 @@ async fn run(initial_patterns: &[String], config: Option<&std::path::Path>) -> R
                         }
                         Action::Explain(target) => {
                             // Overlay already open; fetch the cache-key
-                            // breakdown (ADR-0033 query.explain).
+                            // breakdown (query.explain).
                             let _ = cmd_tx.send(Command::QueryExplain {
                                 command_id: Some(format!("c_{}", new_command_seq())),
                                 target,
@@ -264,7 +264,7 @@ async fn run(initial_patterns: &[String], config: Option<&std::path::Path>) -> R
                         );
                         // Cache state can change when the catalog (re)loads or
                         // a build completes; ask the engine to recompute it
-                        // (ADR-0033 query.status). The reply lands as a
+                        // (query.status). The reply lands as a
                         // QueryStatus event and updates the browser column.
                         let refresh_status = matches!(
                             ev,

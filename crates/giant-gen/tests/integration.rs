@@ -51,7 +51,7 @@ fn setup_good() -> tempfile::TempDir {
     ws
 }
 
-/// Rewrite the workspace `giant.yaml` with a `generate:` list (ADR-0029 §6).
+/// Rewrite the workspace `giant.yaml` with a `generate:` list.
 fn declare(ws: &tempfile::TempDir, generate_body: &str) {
     fs::write(
         ws.path().join("giant.yaml"),

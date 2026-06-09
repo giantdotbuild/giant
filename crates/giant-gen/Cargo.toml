@@ -2,7 +2,7 @@
 name = "giant-gen"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
 description = "Generator runner porcelain for Giant - dispatched via `giant gen`"
 
 [[bin]]
@@ -18,13 +18,13 @@ giant = { path = "../giant" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
 clap = { version = "4", features = ["derive"] }
 
-# Embedded Starlark host for the built-in generator (ADR-0029, TDD-0024). The
+# Embedded Starlark host for the built-in generator. The
 # whole point of the porcelain's programmable path; single static binary, no
 # runtime to provision. allocative is required by the StarlarkValue derives.
 starlark = "0.14"
 allocative = "0.3"
 
-# The shared wire schema: target() builds and emits a WireTarget (ADR-0029 §5).
+# The shared wire schema: target() builds and emits a WireTarget.
 giant-schema = { path = "../giant-schema" }
 
 # The runner's own narrow schema for giant-gen.yaml (just `generators:`).

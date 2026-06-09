@@ -1,9 +1,9 @@
-//! The dependency link pass (TDD-0026, implements ADR-0032).
+//! The dependency link pass.
 //!
 //! After generators emit, this resolves each target's input globs to the
 //! targets that produce them and writes the resulting `deps:` into the
 //! generated `giant.<infix>.yaml` files. Dependency inference is no longer an
-//! engine concern (ADR-0032 supersedes ADR-0004); the engine reads explicit
+//! engine concern; the engine reads explicit
 //! deps only. The matching is identical to the engine's old pass -- pure
 //! glob-vs-output-string, no filesystem access -- run once at generation over
 //! the whole workspace.

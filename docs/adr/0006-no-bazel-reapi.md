@@ -142,4 +142,4 @@ don't need yet. Revisit if more exotic backends turn out to matter.
 - [Bazel HTTP cache protocol](https://bazel.build/remote/caching#http-caching)
 - [bazel-remote](https://github.com/buchgr/bazel-remote) - reference server
 - [sccache backends](https://github.com/mozilla/sccache/blob/main/docs/Storage.md)
-- [TDD-0006 - Remote cache HTTP protocol](../tdd/0006-remote-cache-http-protocol.md)
+- TDD-0006 - Remote cache HTTP protocol

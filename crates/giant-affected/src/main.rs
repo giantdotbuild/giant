@@ -2,7 +2,7 @@
 //! files. Doesn't run anything; one target id per line on stdout, for piping
 //! into xargs / jq in CI.
 //!
-//! Porcelain (ADR-0034), dispatched as `giant affected`. Links the giant
+//! Porcelain, dispatched as `giant affected`. Links the giant
 //! library for the workspace load + selection + git change detection - the
 //! same code the in-core command used, just out of the binary.
 

@@ -1,7 +1,6 @@
 //! Local content-addressed cache.
 //!
-//! See TDD-0007 for the on-disk layout, TDD-0012 for eviction. This module
-//! implements:
+//! This module implements:
 //!
 //! - Directory layout (`ac/`, `cas/`, `log/`, `tmp/`, `version`).
 //! - Atomic writes via write-then-rename through `tmp/`.
@@ -73,7 +72,7 @@ impl LocalCache {
             for sub in ["ac", "cas", "log", "tmp"] {
                 std::fs::create_dir_all(root.join(sub))?;
             }
-            // Set 0700 on cache root (TDD-0007 §Permissions).
+            // Set 0700 on cache root.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -245,7 +244,7 @@ impl LocalCache {
     }
 
     // -----------------------------------------------------------------
-    // Size accounting + LRU eviction (TDD-0012).
+    // Size accounting + LRU eviction.
     //
     // The v1 design is "scan on demand" - no `size.json` counter, no
     // `refs.json` index. Eviction runs on a background task after a
@@ -269,7 +268,6 @@ impl LocalCache {
     /// `min_age` is a recency buffer: entries with mtime newer than
     /// `now - min_age` are skipped. This avoids evicting cache lines
     /// that another build in another terminal might be actively using.
-    /// (TDD-0012 §"Concurrent builds during eviction".)
     pub async fn evict_to(
         &self,
         target_bytes: u64,
@@ -374,7 +372,7 @@ fn evict_to_blocking(
         let parsed: AcEntry = match serde_json::from_slice(&bytes) {
             Ok(e) => e,
             Err(_) => {
-                // Corrupt AC - TDD-0012 says delete unconditionally.
+                // Corrupt AC - delete unconditionally.
                 let _ = std::fs::remove_file(&path);
                 continue;
             }
@@ -549,7 +547,7 @@ fn atomic_write_blocking(tmp: &Path, dst: &Path, bytes: &[u8]) -> Result<(), Cac
             f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
     }
-    // rename(2) - atomic within a filesystem (TDD-0007).
+    // rename(2) - atomic within a filesystem.
     if let Err(e) = std::fs::rename(tmp, dst) {
         let _ = std::fs::remove_file(tmp);
         return Err(e.into());
@@ -557,7 +555,7 @@ fn atomic_write_blocking(tmp: &Path, dst: &Path, bytes: &[u8]) -> Result<(), Cac
     Ok(())
 }
 
-/// One action-cache entry. Schema matches TDD-0007.
+/// One action-cache entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcEntry {
     pub schema: u32,
@@ -735,7 +733,7 @@ mod tests {
         assert!(entries.is_empty(), "tmp/ should be empty after write");
     }
 
-    // -------- eviction (TDD-0012) --------
+    // -------- eviction --------
 
     /// Build an AC entry that references a list of CAS blobs (which
     /// the caller must have put_cas'd already). Doesn't model

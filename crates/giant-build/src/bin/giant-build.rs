@@ -1,4 +1,4 @@
-//! `giant build` - build targets (non-test by default). Porcelain (ADR-0034).
+//! `giant build` - build targets (non-test by default). Porcelain.
 
 use clap::Parser;
 use giant::selection::TestMode;

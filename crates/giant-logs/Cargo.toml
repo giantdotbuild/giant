@@ -2,10 +2,11 @@
 name = "giant-logs"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 description = "Replay a target's captured logs. Dispatched via `giant logs`."
 
 [dependencies]
-# The wire protocol + session client only - not the engine (ADR-0034). logs talks
+# The wire protocol + session client only - not the engine. logs talks
 # to a `giant session` subprocess (`logs.get`); it does not read the cache itself.
 giant-protocol = { path = "../giant-protocol" }
 clap = { version = "4", features = ["derive"] }

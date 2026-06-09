@@ -2,6 +2,7 @@
 name = "giant-build"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 description = "Build / test / verify porcelains: run targets through the engine and render progress. Dispatched via `giant build`, `giant test`, `giant verify`."
 
 [[bin]]
@@ -18,7 +19,7 @@ path = "src/bin/giant-verify.rs"
 
 [dependencies]
 # Links the engine: build / test / verify run targets in-process via the
-# engine's build adapter and render the event stream (ADR-0034 phase B).
+# engine's build adapter and render the event stream.
 giant = { path = "../giant" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"

@@ -1,6 +1,6 @@
 //! giant-clean - clear the local cache.
 //!
-//! Porcelain (ADR-0034), dispatched as `giant clean`. Two modes:
+//! Porcelain, dispatched as `giant clean`. Two modes:
 //! - **All** (`giant clean`): wipe the whole cache directory after a summary +
 //!   confirmation (`-y` skips).
 //! - **Selective**: filter AC entries by target-id glob and/or `--older-than`;

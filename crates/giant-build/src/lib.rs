@@ -1,5 +1,5 @@
 //! Shared core for the `giant build` / `giant test` / `giant verify` porcelains
-//! (ADR-0034 phase B). Each bin is a thin `main` that parses [`BuildArgs`] and
+//! Each bin is a thin `main` that parses [`BuildArgs`] and
 //! calls [`run`] with a test selection mode; `verify` additionally forces the
 //! sandbox and a fresh build.
 //!
@@ -33,7 +33,7 @@ pub struct BuildArgs {
     pub fresh: bool,
 
     /// Enforce declared inputs/outputs by running each eligible target through
-    /// the `giant-sandbox` helper (Linux only; ADR-0030). Off by default.
+    /// the `giant-sandbox` helper (Linux only). Off by default.
     #[arg(long)]
     pub sandbox: bool,
 
@@ -88,7 +88,7 @@ pub struct BuildArgs {
     pub with_tests: bool,
 
     /// Audit mode: build in a disposable worktree of the committed state so the
-    /// sandbox can't touch the live tree (ADR-0036). Set by `giant verify`, not
+    /// sandbox can't touch the live tree. Set by `giant verify`, not
     /// a user flag.
     #[arg(skip)]
     pub verify: bool,
@@ -169,7 +169,7 @@ pub async fn run(args: BuildArgs, base_mode: TestMode) -> anyhow::Result<i32> {
         }
     };
 
-    // Fold `toolchain`-tagged targets out of the human view (TDD-0017).
+    // Fold `toolchain`-tagged targets out of the human view.
     if !args.show_toolchains {
         *hidden.lock().expect("hidden set mutex") = prepared.graph.ids_with_tag("toolchain");
     }
@@ -279,7 +279,7 @@ pub async fn run(args: BuildArgs, base_mode: TestMode) -> anyhow::Result<i32> {
 
     let counts = renderer_task.await.ok().flatten().unwrap_or_default();
 
-    // Post-build cache eviction (TDD-0012). Silent; only if over the limit.
+    // Post-build cache eviction. Silent; only if over the limit.
     if counts.failed == 0 {
         let _ = maybe_evict(&cache_for_evict, &cache_cfg).await;
     }
@@ -308,7 +308,7 @@ async fn maybe_evict(
     if current <= trigger {
         return Ok(());
     }
-    // 5-minute recency buffer per TDD-0012; protects in-flight builds elsewhere.
+    // 5-minute recency buffer; protects in-flight builds elsewhere.
     let _ = cache
         .evict_to(target, std::time::Duration::from_secs(5 * 60))
         .await?;

@@ -2,9 +2,9 @@
 //! ancestor's cache key (consulting the cache for prior AC entries so the
 //! displayed key matches what an actual build would compute).
 //!
-//! This is the compute behind `query.explain` / `query.status` (ADR-0033). The
+//! This is the compute behind `query.explain` / `query.status`. The
 //! `giant explain` porcelain renders the `query.explained` event these produce;
-//! it does not call this directly (ADR-0034).
+//! it does not call this directly.
 
 use crate::cache::LocalCache;
 use crate::executor::{CacheKeyBreakdown, compute_cache_key_with_breakdown};
@@ -14,7 +14,7 @@ use crate::paths::AbsPath;
 use std::collections::BTreeMap;
 
 /// Compute a target's (cache_key, breakdown, own output hash). Component-based
-/// so the session's `query.explain` handler can reuse it (ADR-0033), the same
+/// so the session's `query.explain` handler can reuse it, the same
 /// way it reuses `walk_target`.
 pub(crate) async fn breakdown_for_target(
     graph: &BuildGraph,
@@ -43,7 +43,7 @@ pub(crate) async fn breakdown_for_target(
 /// its dep closure. Each dep contributes its real output hash (read
 /// from its AC entry if present, sentinel-empty if not). Memoised via
 /// `memo` so shared ancestors get computed once. Shared with the
-/// session's `query.status` handler (ADR-0033).
+/// session's `query.status` handler.
 pub(crate) async fn walk_target(
     graph: &BuildGraph,
     cache: &LocalCache,

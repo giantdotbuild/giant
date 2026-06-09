@@ -2,11 +2,10 @@
 
 - **Status**: Accepted
 - **Date**: 2026-06-07
-- **Supersedes**: ADR-0004
 
 ## Context
 
-ADR-0004 made the engine derive dependency edges: at graph-build time
+The engine used to derive dependency edges: at graph-build time
 `compute_inferred_edges` builds a global output-path to producer index over
 every target, then matches each target's input globs against those output
 strings and adds an edge per match. It is the one place the engine derives a
@@ -56,7 +55,7 @@ Scope of the pass:
   reach - the full reach the engine had - so there is no correctness regression
   from dropping the live pass.
 - It does **not** rewrite hand-written files. A hand-written target therefore
-  declares its own `deps:`. Predictable labels (ADR-0024) make that
+  declares its own `deps:`. Predictable labels make that
   straightforward, and small hand-authored workspaces do it trivially.
 
 **Liveness** is the existing generated-config freshness story, nothing new.
