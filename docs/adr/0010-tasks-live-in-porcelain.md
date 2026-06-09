@@ -1,4 +1,4 @@
-# ADR-0010 - Tasks live in porcelain binaries, not in core
+# ADR-0010 - Tasks live in porcelain binaries
 
 - **Status**: Accepted
 - **Date**: 2026-05-20
@@ -7,7 +7,7 @@
 
 A fully-featured task subsystem (services with `after` DAGs, ready
 probes, log modes, restart-on-rebuild, nested task hierarchies) is
-genuinely useful - the integration-test scenario "start a database,
+useful - the integration-test scenario "start a database,
 run tests, stop services" is a real workflow. The cost is large
 surface area in the build engine, and users without tasks reasonably
 ask "why is this in the build tool?"

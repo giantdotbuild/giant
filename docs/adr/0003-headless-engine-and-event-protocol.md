@@ -103,7 +103,7 @@ a BES exporter later if anyone asks for it.
 
 - **Daemon mode timing.** When does `giant serve` actually ship?
   Leaning: not until at least one multi-client porcelain (e.g. an
-  IDE plugin alongside the TUI) genuinely needs it. The subprocess +
+  IDE plugin alongside the TUI) needs it. The subprocess +
   NDJSON transport covers single-client cases.
 
 ## References

@@ -42,7 +42,7 @@ time**, and the wrapper is **not** part of the key. So a sandboxed run and an
 unsandboxed run of the same target share the same cache key and the same cache
 entries.
 
-This is the load-bearing decision, and the reasoning is: for a correctly
+This is the core decision here, and the reasoning is: for a correctly
 declared (hermetic) target, the output is identical whether or not it ran in a
 sandbox - the sandbox only *enforces* the declared inputs/outputs, it does not
 change them. The only targets whose output legitimately differs sandboxed
@@ -125,7 +125,7 @@ because:
 
 This refines ADR-0008's "prepend `bwrap`" sketch: the same prepend-a-wrapper
 shape, but the wrapper is our own porcelain over a Rust sandbox library rather
-than an external bind-mount tool. The mechanism is genuinely small either way
+than an external bind-mount tool. The mechanism is small either way
 (roughly 15-40 lines to translate a `SandboxSpec` into any of these backends);
 the choice is about properties, not line count, and birdcage wins on
 pure-Rust + the right enforcement surface.
@@ -180,7 +180,7 @@ per-target flags like `sandbox`/`network`), never to emit the mechanism.
   `TMPDIR`; a fresh tmpfs and PID isolation are isolation-grade extras a future
   `bwrap` backend can add, not part of the v1 birdcage surface).
 - **Network off by default**, with a per-target **`network: true`** escape for
-  the targets that genuinely fetch (sysroot/dependency fetches, image pulls).
+  the targets that fetch (sysroot/dependency fetches, image pulls).
 - **Env scrubbed to an allowlist.** The command sees only a generic base
   (`PATH`, `HOME`, `TMPDIR`, `LANG`, `LC_*`, `SSL_CERT_FILE`, … - no toolchain
   manager assumed), the workspace's configured `sandbox.env` extras (e.g.

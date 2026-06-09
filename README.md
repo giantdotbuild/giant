@@ -102,9 +102,9 @@ event stream consumed by porcelains.
 Unknown subcommands dispatch to `giant-<name>` on PATH, the git/cargo/kubectl
 model. Run `giant task deploy` and it execs `giant-task deploy` if present.
 The wire format between core and porcelains is the NDJSON event/command
-protocol (see `docs/tdd/0004-event-protocol.md`). Two porcelains ship today,
-`giant-task` and `giant-tui`, dispatched git-style; the same shim picks up
-any community-built ones on PATH.
+protocol. Several first-party porcelains ship (build/test, tasks, tui,
+generation, logs, explain, graph), dispatched git-style; the same shim picks
+up any community-built ones on PATH.
 
 ## Remote cache
 
@@ -170,7 +170,7 @@ A short tour of what's where:
 - `crates/giant/src/cli/` - subcommand handlers.
 - `crates/giant-task/` - task-runner porcelain ([docs](docs-site/src/content/docs/extending/giant-task.md)).
 
-Design docs are in `docs/adr/` (decisions) and `docs/tdd/` (technical specs).
+Design decisions are recorded in `docs/adr/`.
 
 ## Dogfood
 
@@ -212,17 +212,16 @@ contents.
 ## Status
 
 Working: build, test, `--watch`, affected, graph, explain, clean, porcelain
-dispatch, local + remote cache, NDJSON event stream, LRU cache
-eviction. `giant session` runs a persistent engine
-that live-reloads on `giant.yaml` edits, and the command channel lets porcelains
-send commands back over the protocol. `giant-task`
-ships in `crates/giant-task/` and handles tasks, services with readiness probes,
-needs/finally, args, shell completions across six shells. `giant-tui` ships in
-`crates/giant-tui/` - a full TUI with a tag/status-toggle surface for filtering
-the build.
+dispatch, local + remote cache, NDJSON event stream, LRU cache eviction, and
+opt-in sandboxing with `giant verify` (a sandboxed audit in a disposable
+worktree). `giant session` runs a persistent engine that live-reloads on
+`giant.yaml` edits, and the command channel lets porcelains send commands back
+over the protocol. `giant-task` ships in `crates/giant-task/` and handles
+tasks, services with readiness probes, needs/finally, args, and shell
+completions across six shells. `giant-tui` ships in `crates/giant-tui/` - a
+full TUI with a tag/status-toggle surface for filtering the build.
 
-Not yet built: the `giant-web` browser bridge, sandboxing and `giant verify`,
-and remote execution.
+Not yet built: the `giant-web` browser bridge and remote execution.
 
 ## License
 

@@ -288,7 +288,7 @@ hard line: the moment expansion lives in the schema it grows - `exclude`
 invites conditionals, conditionals invite computed values, and the
 schema reinvents a language one field at a time. It is the anti-pattern
 the project's own guardrails warn against. If hand-authoring generators
-proves genuinely painful for matrices, this can be added later,
+proves painful for matrices, this can be added later,
 additively, with eyes open.
 
 ### Semantic global IDs instead of path-derived labels
