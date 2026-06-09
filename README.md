@@ -221,10 +221,10 @@ giant task docs             # builds the static docs site
 giant task docs-dev         # serves the docs site at :4321
 giant task release          # check + release-build + docs
 giant task bin              # refresh bin/giant + bin/giant-task
-giant build docs:build      # the docs-site cache layer (npm install + astro build)
+giant build '//docs-site:build'   # the docs-site cache layer (npm install + astro build)
 ```
 
-`giant build docs:build` is the interesting one - npm install + astro
+`giant build '//docs-site:build'` is the interesting one - npm install + astro
 build take ~5 s cold and 0 ms warm, because giant caches the directory
 contents.
 
