@@ -46,20 +46,24 @@ cache:
   dir: ~/.cache/giant
 
 targets:
-  - id: "demo:greet"
+  - name: "greet"
     inputs: ["name.txt"]
     outputs: ["greeting.txt"]
     command: "echo \"hello, $(cat name.txt)\" > greeting.txt"
 ```
 
+A target's identity is its label, derived from where its `giant.yaml`
+lives: `//<package>:<name>`. A target in the root file has the empty
+package, so this one is `//:greet`.
+
 ```bash
 $ echo world > name.txt
 $ giant build
-✓ BUILD   demo:greet   4ms
+✓ BUILD   //:greet   4ms
   OK    1 built · 0 cached · 0 failed  in 4ms
 
 $ giant build
-✓ CACHE   demo:greet   1ms
+✓ CACHE   //:greet   1ms
   OK    0 built · 1 cached · 0 failed  in 1ms
 ```
 
@@ -67,19 +71,21 @@ The second run hits the cache. Edit `name.txt` and the target rebuilds.
 
 ## Selecting targets
 
-Patterns work like git/cargo:
+Targets are selected by label, with git/cargo-style patterns:
 
 ```bash
-giant build go:bin:server               # exact id
-giant build 'go:bin:*'                  # one segment with *
-giant build 'go:**' '!go:test:*'        # union, then exclude
+giant build //src/go/server:server       # exact label
+giant build '//src/go:*'                  # every target in one package
+giant build '//src/go/...'                # a package and everything under it
+giant build '//...' '!//src/legacy/...'   # whole tree, then exclude
 giant build --tag release --no-tag flaky
-giant build --affected --base main      # only what changed since main
+giant build --affected --base main        # only what changed since main
 ```
 
-`*` stops at `:`; `**` crosses. `!pattern` excludes. Exact-id typos error;
-glob misses go silent. The same language is used by `giant test`,
-`giant build --watch`, and `giant affected`.
+`:*` selects a package, `/...` recurses, `//...` is everything, `!pattern`
+excludes. An exact-label typo errors; a glob that matches nothing is silent.
+The same language is used by `giant test`, `giant build --watch`, and
+`giant affected`.
 
 ## Common commands
 
@@ -89,7 +95,7 @@ giant test              # run all test targets
 giant build --watch     # initial build, then rebuild on file changes
 giant affected --base main    # list what would rebuild, no work done
 giant graph             # show the dependency graph
-giant explain go:bin:server   # explain a target's cache key
+giant explain //src/go/server:server   # explain a target's cache key
 giant clean             # clear the local cache
 ```
 
@@ -103,8 +109,8 @@ Unknown subcommands dispatch to `giant-<name>` on PATH, the git/cargo/kubectl
 model. Run `giant task deploy` and it execs `giant-task deploy` if present.
 The wire format between core and porcelains is the NDJSON event/command
 protocol. Several first-party porcelains ship (build/test, tasks, tui,
-generation, logs, explain, graph), dispatched git-style; the same shim picks
-up any community-built ones on PATH.
+generation, logs, explain, graph, affected, clean), dispatched git-style;
+the same shim picks up any community-built ones on PATH.
 
 ## Remote cache
 
@@ -140,12 +146,12 @@ remote:                       # feature-gated
   auth: { kind: bearer, token_env: TOKEN }
 
 targets:
-  - id: "<unique-id>"
-    inputs: [...]             # globs, relative to workspace root
-    outputs: [...]            # relative to the target's cwd
-    deps: [...]               # additional explicit deps (most are inferred)
+  - name: "<unique-in-package>"  # label is //<package>:<name> (//:name in the root file)
+    inputs: [...]             # globs, package-relative; // anchors the workspace root
+    outputs: [...]            # package-relative (// for root-level)
+    deps: [...]               # explicit deps as labels //pkg:name (generation fills the rest)
     command: "..."
-    cwd: "..."                # workspace-relative; default = root
+    cwd: "..."                # package-relative; default = the package dir
     env: { KEY: VAL }
     test: false
     tags: [release, linux]
@@ -162,12 +168,14 @@ A short tour of what's where:
 - `crates/giant/src/executor.rs` - parallel dispatch, cache key composition,
   early-cutoff, remote-cache fallback chain.
 - `crates/giant/src/cache.rs` - local content-addressed cache; LRU eviction.
-- `crates/giant/src/graph.rs` - dependency graph, output-based dep inference.
-- `crates/giant/src/selection.rs` - pattern language (globs, exclusions, tags,
+- `crates/giant/src/graph.rs` - dependency graph (explicit `deps`, output
+  uniqueness check).
+- `crates/giant/src/selection.rs` - pattern language (labels, exclusions, tags,
   test mode).
-- `crates/giant/src/renderer.rs` - colored line-streaming output + NDJSON
-  pass-through.
-- `crates/giant/src/cli/` - subcommand handlers.
+- `crates/giant/src/cli/` - the `session` and `completions` built-ins plus
+  porcelain dispatch.
+- `crates/giant-build/` - the `build`/`test`/`verify` porcelain and the
+  line-streaming + NDJSON renderer.
 - `crates/giant-task/` - task-runner porcelain ([docs](docs-site/src/content/docs/extending/giant-task.md)).
 
 The design is described in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
