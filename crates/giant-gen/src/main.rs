@@ -81,16 +81,13 @@ fn vendor(names: &[String]) -> Result<i32> {
         anyhow::bail!("giant gen vendor: name a module, e.g. `giant gen vendor go.star`");
     }
     let (_, root) = giant::Config::load_root(None)?;
-    let dir = star::std_dir().ok_or_else(|| {
-        anyhow::anyhow!("no giant std collection found; set GIANT_STD to its path")
-    })?;
+    let dir = star::std_dir();
     let dest = root.join("star");
     std::fs::create_dir_all(&dest)?;
     for name in names {
-        let from = dir.join(name);
-        let to = dest.join(name);
-        std::fs::copy(&from, &to)
-            .with_context(|| format!("vendoring {name} from {}", from.display()))?;
+        let src = star::std_source(dir.as_deref(), name)?
+            .ok_or_else(|| anyhow::anyhow!("no std module named '{name}'"))?;
+        std::fs::write(dest.join(name), src).with_context(|| format!("vendoring {name}"))?;
         eprintln!("vendored {name} -> star/{name}");
     }
     Ok(0)

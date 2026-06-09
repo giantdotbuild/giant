@@ -19,7 +19,7 @@ use starlark::environment::{GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
 use starlark::syntax::{AstModule, Dialect};
 
-pub(crate) use load::std_dir;
+pub(crate) use load::{std_dir, std_source};
 pub(crate) use value::Emitted;
 use value::{Collector, Ws, host_globals};
 
@@ -30,8 +30,9 @@ pub(crate) fn generate(script: &Path, root: &Path) -> Result<Vec<Emitted>> {
     generate_with_std(script, root, load::std_dir())
 }
 
-/// `generate` with an explicit std collection dir (the production path resolves
-/// it from `GIANT_STD` / install layout; tests point it at the in-repo `std/`).
+/// `generate` with an explicit std collection dir overriding the embedded
+/// modules (the production path resolves it from `GIANT_STD` / install
+/// layout; tests point it at the in-repo `std/` or pass `None`).
 pub(crate) fn generate_with_std(
     script: &Path,
     root: &Path,

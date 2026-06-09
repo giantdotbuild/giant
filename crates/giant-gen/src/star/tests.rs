@@ -206,26 +206,30 @@ fn legacy_giant_alias_still_resolves() {
 }
 
 #[test]
-fn unknown_stdlib_module_is_an_error() {
+fn loads_stdlib_embedded_without_collection() {
+    // With no on-disk collection, `@std//` resolves to the modules compiled
+    // into the binary.
     let tmp = TempDir::new().unwrap();
     let s = script(
         tmp.path(),
-        "load(\"@std//nope.star\", \"x\")\ndef generate(ws):\n    pass\n",
+        "load(\"@std//go.star\", \"bin_name\")\ndef generate(ws):\n    target(name = bin_name(\"cmd/backend\"), command = \"true\", outputs = [\"o\"])\n",
     );
-    let err = super::generate_with_std(&s, tmp.path(), Some(std_dir())).unwrap_err();
-    assert!(err.to_string().contains("nope.star"), "{err}");
+    let out = super::generate_with_std(&s, tmp.path(), None).unwrap();
+    assert_eq!(out[0].wire.name, "backend");
 }
 
 #[test]
-fn std_load_without_collection_hints_vendoring() {
-    // No std collection available -> a clear error that points at `vendor`.
+fn unknown_std_module_is_a_clear_error() {
+    // Same error whether an on-disk collection is present or not.
     let tmp = TempDir::new().unwrap();
-    let s = script(
-        tmp.path(),
-        "load(\"@std//go.star\", \"bin_name\")\ndef generate(ws):\n    pass\n",
-    );
-    let err = super::generate_with_std(&s, tmp.path(), None).unwrap_err();
-    assert!(err.to_string().contains("vendor"), "{err}");
+    let s = script(tmp.path(), "load(\"@std//nope.star\", \"x\")\n");
+    for dir in [None, Some(std_dir())] {
+        let e = super::generate_with_std(&s, tmp.path(), dir).unwrap_err();
+        assert!(
+            e.to_string().contains("no std module named 'nope.star'"),
+            "{e}"
+        );
+    }
 }
 
 #[test]

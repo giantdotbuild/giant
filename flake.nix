@@ -119,43 +119,9 @@
         # One crate, three bins: giant-build, giant-test, giant-verify.
         giant-build = mkBin { name = "giant-build"; };
 
-        # giant-gen ships the official Starlark std collection as files (not
-        # embedded in the binary). The library lands in
-        # share/giant/std and GIANT_STD points the `@std//` loader and
-        # `giant gen vendor` at it.
-        giant-gen =
-          let
-            pkg = craneLib.buildPackage (
-              commonArgs
-              // {
-                inherit cargoArtifacts;
-                pname = "giant-gen";
-                cargoExtraArgs = "--locked -p giant-gen";
-                doCheck = false;
-                postInstall = ''
-                  mkdir -p $out/share/giant
-                  cp -r std $out/share/giant/std
-                '';
-                meta = {
-                  description = "Part of the Giant build-orchestration suite";
-                  homepage = "https://github.com/johnae/giant";
-                  license = pkgs.lib.licenses.asl20;
-                  mainProgram = "giant-gen";
-                };
-              }
-            );
-          in
-          pkgs.symlinkJoin {
-            name = "giant-gen-with-std";
-            paths = [ pkg ];
-            nativeBuildInputs = [ pkgs.makeWrapper ];
-            postBuild = ''
-              wrapProgram $out/bin/giant-gen --set GIANT_STD ${pkg}/share/giant/std
-            '';
-            meta = pkg.meta // {
-              mainProgram = "giant-gen";
-            };
-          };
+        # The Starlark std collection is compiled into the binary;
+        # GIANT_STD stays available as an override for a local copy.
+        giant-gen = mkBin { name = "giant-gen"; };
 
         # Meta-package: `nix profile install .` drops all three
         # binaries onto PATH at once. Implementation is a
