@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
-# Install Giant - downloads the appropriate prebuilt binary from GitHub
-# releases for your OS/arch and drops it on your PATH.
+# Install Giant - downloads the prebuilt suite (the `giant` engine plus its
+# porcelain binaries) from GitHub releases for your OS/arch and drops it on
+# your PATH.
 #
 # Usage:
 #   curl -fsSL https://giant.build/install.sh | sh
@@ -27,7 +28,7 @@ case "$OS" in
   linux)
     case "$ARCH" in
       x86_64|amd64) TRIPLE="x86_64-unknown-linux-musl" ;;
-      aarch64|arm64) TRIPLE="aarch64-unknown-linux-gnu" ;;
+      aarch64|arm64) TRIPLE="aarch64-unknown-linux-musl" ;;
       *) err "unsupported linux arch: $ARCH" ;;
     esac
     ;;
@@ -38,7 +39,7 @@ case "$OS" in
       *) err "unsupported macOS arch: $ARCH" ;;
     esac
     ;;
-  *) err "unsupported OS: $OS (Windows: download the .exe from GitHub releases)" ;;
+  *) err "unsupported OS: $OS" ;;
 esac
 
 # --- resolve install dir ---
@@ -77,14 +78,27 @@ curl -fsSL --output "$TMPDIR/$TARBALL" "$URL"
 curl -fsSL --output "$TMPDIR/SHA256SUMS" "$SUMS_URL" || info "warning: no SHA256SUMS file; skipping checksum verification"
 
 if [ -f "$TMPDIR/SHA256SUMS" ]; then
-  (cd "$TMPDIR" && grep " $TARBALL\$" SHA256SUMS | sha256sum -c -)
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$TMPDIR" && grep " $TARBALL\$" SHA256SUMS | sha256sum -c -)
+  else
+    (cd "$TMPDIR" && grep " $TARBALL\$" SHA256SUMS | shasum -a 256 -c -)
+  fi
 fi
 
 # --- extract + install ---
-tar -xzf "$TMPDIR/$TARBALL" -C "$TMPDIR"
-install -m 0755 "$TMPDIR/giant" "$DEST/giant"
+# The tarball holds the whole suite: `giant` plus the giant-* porcelains it
+# dispatches to on PATH. Install every binary.
+mkdir "$TMPDIR/pkg"
+tar -xzf "$TMPDIR/$TARBALL" -C "$TMPDIR/pkg"
+COUNT=0
+for bin in "$TMPDIR"/pkg/giant*; do
+  [ -f "$bin" ] || continue
+  install -m 0755 "$bin" "$DEST/$(basename "$bin")"
+  COUNT=$((COUNT + 1))
+done
+[ "$COUNT" -gt 0 ] || err "no binaries found in $TARBALL"
 
-info "installed giant $VERSION to $DEST/giant"
+info "installed giant $VERSION ($COUNT binaries) to $DEST"
 
 # Hint about PATH if needed.
 case ":$PATH:" in

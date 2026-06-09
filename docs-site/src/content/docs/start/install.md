@@ -3,14 +3,16 @@ title: Install
 description: Install Giant - pre-built binaries, source builds, package managers.
 ---
 
-Giant is a single static binary. No runtime dependencies, no daemon, no
-JVM. Pick whichever installation method fits your environment.
+Giant ships as a small suite of static binaries: the `giant` engine plus
+the porcelains it dispatches to (`giant-build`, `giant-task`, `giant-tui`,
+and friends). No runtime dependencies, no daemon, no JVM. Pick whichever
+installation method fits your environment.
 
-## Pre-built binary (recommended)
+## Pre-built binaries (recommended)
 
 The install script detects your OS and architecture, downloads the
-matching release binary from GitHub, and drops it in `/usr/local/bin`
-(or `~/.local/bin` if you don't have root):
+matching release tarball from GitHub, and installs the suite into
+`/usr/local/bin` (or `~/.local/bin` if you don't have root):
 
 ```bash
 curl -fsSL https://giant.build/install.sh | sh
@@ -26,26 +28,36 @@ Supported platforms:
 
 | Platform | Triple |
 |---|---|
-| Linux x86_64 (glibc) | `x86_64-unknown-linux-gnu` |
 | Linux x86_64 (musl, static) | `x86_64-unknown-linux-musl` |
-| Linux aarch64 | `aarch64-unknown-linux-gnu` |
+| Linux aarch64 (musl, static) | `aarch64-unknown-linux-musl` |
 | macOS x86_64 | `x86_64-apple-darwin` |
 | macOS aarch64 (Apple Silicon) | `aarch64-apple-darwin` |
 
-Binaries are signed and shipped with SHA-256 checksums. Verify:
+Each release ships a `SHA256SUMS` file and the install script verifies
+the tarball against it. To check by hand:
 
 ```bash
-curl -fsSL https://giant.build/releases/0.1.0/SHA256SUMS | sha256sum -c -
+curl -fsSL https://github.com/johnae/giant/releases/latest/download/SHA256SUMS
 ```
 
 ## From source
 
+The engine alone can't do much - `giant build` dispatches to the
+`giant-build` porcelain on PATH - so install at least the engine and the
+build porcelain:
+
 ```bash
 git clone https://github.com/johnae/giant
 cd giant
-cargo install --path crates/giant
+cargo install --path crates/giant        # the engine
+cargo install --path crates/giant-build  # giant build / test / verify
 
-# With the remote-cache feature (Bazel HTTP cache protocol)
+# Add the other porcelains you want (each becomes `giant <name>`):
+cargo install --path crates/giant-task
+cargo install --path crates/giant-gen
+cargo install --path crates/giant-tui
+
+# Engine with the remote-cache feature (Bazel HTTP cache protocol)
 cargo install --path crates/giant --features remote
 ```
 
@@ -57,7 +69,7 @@ The repo ships a flake exposing every first-party binary as its own
 package, plus a `giant-suite` meta-package that bundles all of them:
 
 ```bash
-# Everything (giant + giant-task + giant-tui)
+# Everything (the giant-suite meta-package: all first-party binaries)
 nix profile install github:johnae/giant
 
 # Or pick individual binaries
@@ -90,10 +102,10 @@ $ giant --help
 
 ## Uninstall
 
-Remove the binary wherever your install method placed it:
+Remove the binaries wherever your install method placed them:
 
 ```bash
-rm "$(which giant)"
+(cd "$(dirname "$(which giant)")" && rm giant giant-*)
 ```
 
 Clear the cache too if you don't want it lingering:

@@ -20,16 +20,26 @@ inputs, command, and outputs, declared in `giant.yaml`.
 
 ## Install
 
-From source:
+Prebuilt binaries (Linux and macOS, x86_64 and aarch64):
+
+```bash
+curl -fsSL https://giant.build/install.sh | sh
+```
+
+The script installs the whole suite: the `giant` engine plus the
+`giant-*` porcelains it dispatches to. From source, install at least the
+engine and the build porcelain (`giant build`/`test`/`verify` dispatch
+to `giant-build` on PATH):
 
 ```bash
 git clone https://github.com/johnae/giant
 cd giant
 cargo install --path crates/giant
+cargo install --path crates/giant-build
 ```
 
-The binary is called `giant`. With the `remote` feature flag it also speaks the
-Bazel HTTP cache protocol; without it the executable stays smaller and offline-only.
+With the `remote` feature flag the engine also speaks the Bazel HTTP cache
+protocol; without it the executable stays smaller and offline-only.
 
 ```bash
 cargo install --path crates/giant --features remote
@@ -188,7 +198,8 @@ the cargo build of the engine itself.
 **Bootstrap once:**
 
 ```bash
-cargo install --path crates/giant   # gives you a `giant` on PATH
+cargo install --path crates/giant        # the engine
+cargo install --path crates/giant-task   # `giant task` dispatches to this
 giant task bin                # builds bin/giant + bin/giant-task
 ```
 
