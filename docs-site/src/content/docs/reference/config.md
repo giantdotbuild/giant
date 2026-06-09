@@ -44,6 +44,8 @@ targets:
     tags: [release, linux]
     cache: true
     remote_cache: true
+    sandbox: true
+    network: false
     exists: "..."
     timeout_secs: 300
 ```
@@ -182,6 +184,8 @@ Regular build targets. Schema below.
 | `tags` | no | list of strings | Free-form labels for filtering. |
 | `cache` | no | bool | `false` disables caching entirely. Default: `true` for normal targets, `false` for `test: true` targets (the engine computes `cache.unwrap_or(!test)`). |
 | `remote_cache` | no | bool | `false` disables remote uploads for this target. Default `true`. |
+| `sandbox` | no | bool | `false` exempts the target from sandboxing when a run opts in with `--sandbox` (or under `giant verify`). Default `true`. Has no effect on plain runs and is never a cache-key input. |
+| `network` | no | bool | `true` grants the target network access when sandboxed. Default `false` (denied). Inert outside `--sandbox` mode; never a cache-key input. |
 | `exists` | no | string | Shell command. Exit 0 → skip the build command. |
 | `timeout_secs` | no | int | Seconds before the command is killed. Default: no timeout. |
 

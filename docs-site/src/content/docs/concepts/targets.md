@@ -36,6 +36,8 @@ targets:
     tags: ["lang=go", "kind=bin", "release", "linux"]
     cache: true
     remote_cache: true
+    sandbox: true
+    network: false
     exists: "test -f bin/server"
     timeout_secs: 300
 ```
@@ -56,6 +58,8 @@ This target lives in `cmd/server/giant.yaml`, so its label is
 | `tags` | Free-form labels (`lang=go`, `kind=bin`, …) for `--tag` / `--no-tag` filtering. |
 | `cache` | Set to `false` to never cache this target's outputs. |
 | `remote_cache` | Set to `false` to exclude from remote cache uploads. |
+| `sandbox` | Set to `false` to exempt this target when a run is sandboxed (`--sandbox`, `giant verify`). Default `true`. Plain runs are never sandboxed regardless. |
+| `network` | Set to `true` to grant network access when sandboxed. Default `false`. |
 | `exists` | External check; if it succeeds, the command is skipped. |
 | `timeout_secs` | Seconds before the command is killed. Default: unlimited. |
 

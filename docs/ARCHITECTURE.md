@@ -121,11 +121,13 @@ first-class command without the engine knowing tasks exist.
 
 ## Sandboxing and verify
 
-Sandboxing is opt-in and is enforcement, applied by wrapping the command at
-execution time under birdcage (Landlock and seccomp on Linux). The wrapper is
-not part of the cache key, so a sandboxed run and a plain run of the same target
-share cache entries. A target sets `sandbox: true` to require its declared
-inputs and outputs; `network: true` grants it the network when sandboxed.
+Sandboxing is enforcement, applied by wrapping the command at execution time
+under birdcage (Landlock and seccomp on Linux). Nothing is sandboxed unless the
+run opts in with `giant build --sandbox`; the per-target `sandbox` field
+(default `true`) only marks eligibility, so `sandbox: false` exempts a target
+that cannot yet run confined. `network: true` grants a sandboxed target the
+network. The wrapper is not part of the cache key, so a sandboxed run and a
+plain run of the same target share cache entries.
 
 `giant verify` is the audit. It builds every target sandboxed, with the cache
 bypassed, inside a disposable git worktree of the committed state. Building in
