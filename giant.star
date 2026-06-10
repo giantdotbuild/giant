@@ -8,7 +8,7 @@
 # cargo.star is vendored (`giant gen vendor cargo.star`) so this repo's own
 # generation never needs the network. The collection lives in
 # github.com/giantdotbuild/giant-std.
-load("star/cargo.star", "cargo_targets")
+load("@std//cargo.star", "cargo_targets")
 
 def generate(ws):
     # Every workspace binary, re-keyed by the toolchain (//:devenv) so a devenv
