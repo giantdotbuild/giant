@@ -1,8 +1,8 @@
-//! Where `@std//` modules come from: an on-disk collection (`GIANT_STD` or
-//! an install-relative `share/giant/std`), or the pinned online collection
-//! declared in the root config's `std:` block. Pinned modules are fetched
-//! once per (repo, ref, module) and cached under the engine cache dir, so
-//! `giant gen` touches the network only on a cold cache.
+//! Where `@std//` modules come from: an on-disk collection (`GIANT_STD`,
+//! the root config's `std.path`, or an install-relative `share/giant/std`),
+//! or the pinned online collection declared as `std.ref`. Pinned modules are
+//! fetched once per (repo, ref, module) and cached under the engine cache
+//! dir, so `giant gen` touches the network only on a cold cache.
 
 use std::path::{Path, PathBuf};
 
@@ -45,12 +45,6 @@ pub(crate) struct StdSource {
 }
 
 impl StdSource {
-    /// The production resolver: `GIANT_STD` / install-relative dir, plus the
-    /// workspace's pin if one is declared.
-    pub(crate) fn detect(pin: Option<StdPin>) -> Self {
-        Self::new(std_dir(), pin)
-    }
-
     pub(crate) fn new(dir: Option<PathBuf>, pin: Option<StdPin>) -> Self {
         Self { dir, pin }
     }
@@ -74,10 +68,13 @@ impl StdSource {
             write_atomic(&cached, &src)?;
             return Ok(src);
         }
-        bail!(
-            "no std module source: pin one in giant.yaml (`std: {{ ref: <tag-or-commit> }}`) \
-             or set GIANT_STD to a local collection"
-        )
+        match &self.dir {
+            Some(d) => bail!("no std module named '{name}' in {}", d.display()),
+            None => bail!(
+                "no std module source: pin one in giant.yaml (`std: {{ ref: <tag-or-commit> }}`), \
+                 point `std: {{ path: <dir> }}` or GIANT_STD at a local collection"
+            ),
+        }
     }
 }
 
@@ -142,18 +139,21 @@ fn write_atomic(path: &Path, content: &str) -> Result<()> {
         .with_context(|| format!("caching {}", path.display()))
 }
 
-/// Locate an on-disk std collection: `GIANT_STD` if it points at a real
-/// directory, else the install-relative `share/giant/std` next to the binary
-/// (`<prefix>/bin/giant-gen` -> `<prefix>/share/giant/std`).
-pub(crate) fn std_dir() -> Option<PathBuf> {
+/// Locate the on-disk std collection: `GIANT_STD` (the per-user override)
+/// wins, then the workspace's `std.path`, then the install-relative
+/// `share/giant/std` next to the binary (`<prefix>/bin/giant-gen` ->
+/// `<prefix>/share/giant/std`).
+pub(crate) fn detect_dir(config_path: Option<PathBuf>) -> Option<PathBuf> {
     if let Ok(d) = std::env::var("GIANT_STD") {
         let p = PathBuf::from(d);
         if p.is_dir() {
             return Some(p);
         }
     }
-    let exe = std::env::current_exe().ok()?;
-    let prefix = exe.parent()?.parent()?;
-    let p = prefix.join("share/giant/std");
-    p.is_dir().then_some(p)
+    config_path.or_else(|| {
+        let exe = std::env::current_exe().ok()?;
+        let prefix = exe.parent()?.parent()?;
+        let p = prefix.join("share/giant/std");
+        p.is_dir().then_some(p)
+    })
 }

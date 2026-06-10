@@ -20,7 +20,7 @@ use starlark::environment::{GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
 use starlark::syntax::{AstModule, Dialect};
 
-pub(crate) use source::{DEFAULT_STD_REPO, StdPin, StdSource, safe_segment};
+pub(crate) use source::{DEFAULT_STD_REPO, StdPin, StdSource, detect_dir, safe_segment};
 pub(crate) use value::Emitted;
 use value::{Collector, Ws, host_globals};
 

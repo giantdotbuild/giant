@@ -66,8 +66,17 @@ after that it runs offline. Bumping `ref` is how you take a new std
 version; an unpinned "latest" doesn't exist, since it would make
 generation non-reproducible.
 
-Two local overrides take precedence over the pin: a `GIANT_STD` env var
-pointing at a collection directory, and vendored copies (below).
+Instead of a pin, `path:` points at a local collection directory - a
+giant-std checkout, or a path your environment manager (devenv, nix)
+provides:
+
+```yaml
+std:
+  path: ~/Development/giant-std
+```
+
+A `GIANT_STD` env var pointing at a directory overrides either form, and
+vendored copies (below) sidestep `@std//` entirely.
 
 ### Vendoring
 

@@ -15,26 +15,29 @@ struct File {
     #[serde(default)]
     generate: Vec<Decl>,
     #[serde(default)]
-    std: Option<StdDecl>,
+    std: Option<StdRaw>,
 }
 
-/// The `std:` block: where `@std//` modules come from. `ref` pins a tag or
-/// commit of the collection repo; the porcelain fetches a module once per
-/// (repo, ref) and caches it under the engine cache dir.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// The `std:` block as written: `ref` (+ optional `repo`) pins an online
+/// collection, `path` points at a local directory. One or the other.
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StdDecl {
-    /// `owner/name` on GitHub. Defaults to the official collection.
-    #[serde(default = "default_std_repo")]
-    pub repo: String,
-    /// A tag or commit sha. Required: an unpinned collection would make
-    /// generation non-reproducible.
-    #[serde(rename = "ref")]
-    pub rev: String,
+struct StdRaw {
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(rename = "ref", default)]
+    rev: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
 }
 
-fn default_std_repo() -> String {
-    crate::star::DEFAULT_STD_REPO.into()
+/// Where `@std//` modules come from, validated. `Pinned` fetches a module
+/// once per (repo, ref) and caches it under the engine cache dir; `Local`
+/// reads a directory (a checkout, a devenv-managed path) directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StdDecl {
+    Pinned { repo: String, rev: String },
+    Local { path: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,14 +117,31 @@ pub fn load_std(root: &Path) -> Result<Option<StdDecl>> {
         return Ok(None);
     };
     let seg_ok = crate::star::safe_segment;
-    match decl.repo.split('/').collect::<Vec<_>>()[..] {
-        [owner, name] if seg_ok(owner) && seg_ok(name) => {}
-        _ => bail!("std.repo '{}' is not an owner/name pair", decl.repo),
+    match (decl.path, decl.rev) {
+        (Some(_), Some(_)) => bail!("std.path and std.ref are mutually exclusive"),
+        (Some(path), None) => {
+            if decl.repo.is_some() {
+                bail!("std.repo only applies with std.ref");
+            }
+            Ok(Some(StdDecl::Local { path }))
+        }
+        (None, Some(rev)) => {
+            let repo = decl
+                .repo
+                .unwrap_or_else(|| crate::star::DEFAULT_STD_REPO.into());
+            match repo.split('/').collect::<Vec<_>>()[..] {
+                [owner, name] if seg_ok(owner) && seg_ok(name) => {}
+                _ => bail!("std.repo '{repo}' is not an owner/name pair"),
+            }
+            if !seg_ok(&rev) {
+                bail!("std.ref '{rev}' is not a tag or commit");
+            }
+            Ok(Some(StdDecl::Pinned { repo, rev }))
+        }
+        (None, None) => {
+            bail!("std: needs `ref` (a pinned collection) or `path` (a local directory)")
+        }
     }
-    if !seg_ok(&decl.rev) {
-        bail!("std.ref '{}' is not a tag or commit", decl.rev);
-    }
-    Ok(Some(decl))
 }
 
 fn find_config(root: &Path) -> Option<PathBuf> {
@@ -188,8 +208,13 @@ mod tests {
     #[test]
     fn std_block_defaults_the_repo() {
         let decl = std("std: { ref: v3 }").unwrap().unwrap();
-        assert_eq!(decl.repo, crate::star::DEFAULT_STD_REPO);
-        assert_eq!(decl.rev, "v3");
+        assert_eq!(
+            decl,
+            StdDecl::Pinned {
+                repo: crate::star::DEFAULT_STD_REPO.into(),
+                rev: "v3".into()
+            }
+        );
     }
 
     #[test]
@@ -197,7 +222,18 @@ mod tests {
         let decl = std("std: { repo: acme/std, ref: 0a1b2c3 }")
             .unwrap()
             .unwrap();
-        assert_eq!(decl.repo, "acme/std");
+        assert!(matches!(decl, StdDecl::Pinned { repo, .. } if repo == "acme/std"));
+    }
+
+    #[test]
+    fn std_block_takes_a_local_path() {
+        let decl = std("std: { path: ../giant-std }").unwrap().unwrap();
+        assert_eq!(
+            decl,
+            StdDecl::Local {
+                path: "../giant-std".into()
+            }
+        );
     }
 
     #[test]
@@ -221,6 +257,24 @@ mod tests {
     fn std_block_rejects_unknown_fields() {
         let e = std("std: { ref: v1, rev: v1 }").unwrap_err();
         assert!(e.to_string().contains("rev"), "{e}");
+    }
+
+    #[test]
+    fn std_block_rejects_path_plus_ref() {
+        let e = std("std: { path: ./std, ref: v1 }").unwrap_err();
+        assert!(e.to_string().contains("mutually exclusive"), "{e}");
+    }
+
+    #[test]
+    fn std_block_rejects_repo_without_ref() {
+        let e = std("std: { repo: acme/std, path: ./std }").unwrap_err();
+        assert!(e.to_string().contains("std.repo"), "{e}");
+    }
+
+    #[test]
+    fn empty_std_block_is_an_error() {
+        let e = std("std: {}").unwrap_err();
+        assert!(e.to_string().contains("`ref`"), "{e}");
     }
 
     fn gens(yaml: &str) -> Result<Vec<Generator>> {

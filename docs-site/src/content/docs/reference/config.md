@@ -21,9 +21,10 @@ cache:
   replay_logs: true
   log_capture_cap_bytes: 5242880
 
-std:                          # giant-gen: pin for @std// generator modules
+std:                          # giant-gen: where @std// generator modules come from
   ref: v3                     # giant-std tag or commit sha
   repo: giantdotbuild/giant-std
+  # or instead of a pin:  path: ~/Development/giant-std
 
 remote:                       # feature-gated; only with --features remote
   enabled: true               # must be true; remote is a no-op otherwise
@@ -160,8 +161,11 @@ Root file only. Owned by the `giant-gen` porcelain: pins the
 
 | Field | Default | Description |
 |---|---|---|
-| `ref` | - | Required. A giant-std tag or commit sha. Modules are fetched once per (repo, ref) and cached under the cache dir. |
-| `repo` | `giantdotbuild/giant-std` | The collection's GitHub `owner/name`. |
+| `ref` | - | A giant-std tag or commit sha. Modules are fetched once per (repo, ref) and cached under the cache dir. |
+| `repo` | `giantdotbuild/giant-std` | The collection's GitHub `owner/name`. Only with `ref`. |
+| `path` | - | A local collection directory instead of a pin (a checkout, a devenv-managed path). Tildes expand; relative paths anchor at the workspace root. Mutually exclusive with `ref`. |
+
+One of `ref` or `path` is required.
 
 ## `remote` (feature-gated)
 

@@ -97,8 +97,9 @@ The standard library lives in its own repo (giantdotbuild/giant-std) so it can
 move faster than the binaries. A workspace pins it with a `std:` block in the
 root config (a tag or commit, no floating "latest"); `@std//` modules are
 fetched once per pin into the cache dir and read from disk after that, so
-generation stays offline past the first fetch. A `GIANT_STD` directory or a
-vendored copy in the repo (`giant gen vendor`) overrides the pin entirely.
+generation stays offline past the first fetch. `std: {path: ...}` reads a
+local collection directory instead of a pin, and a `GIANT_STD` directory or
+a vendored copy in the repo (`giant gen vendor`) overrides either form.
 
 Emission is deterministic, so `giant gen --check` is a byte-diff gate: it
 regenerates into a scratch directory and fails if the result differs from

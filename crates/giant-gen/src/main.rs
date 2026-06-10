@@ -76,16 +76,28 @@ async fn real_main() -> Result<i32> {
     }
 }
 
-/// The workspace's `@std//` resolver: the on-disk override plus the `std:`
-/// pin from the root config, caching fetched modules under the cache dir.
+/// The workspace's `@std//` resolver, from the root config's `std:` block:
+/// a local directory, or a pin caching fetched modules under the cache dir.
+/// `GIANT_STD` and the install-relative collection still override.
 fn std_source(cfg: &giant::Config, root: &Path) -> Result<star::StdSource> {
-    let pin = config::load_std(root)?
-        .map(|d| -> Result<star::StdPin> {
+    let (path, pin) = match config::load_std(root)? {
+        Some(config::StdDecl::Local { path }) => {
+            // Tilde-expand (the same rules as cache.dir), then anchor a
+            // relative path at the workspace root.
+            let p = giant::resolve_cache_dir(&path)?;
+            let dir = if p.is_absolute() { p } else { root.join(p) };
+            if !dir.is_dir() {
+                anyhow::bail!("std.path {} is not a directory", dir.display());
+            }
+            (Some(dir), None)
+        }
+        Some(config::StdDecl::Pinned { repo, rev }) => {
             let cache = giant::resolve_cache_dir(&cfg.cache.dir)?.join("std");
-            Ok(star::StdPin::new(d.repo, d.rev, cache))
-        })
-        .transpose()?;
-    Ok(star::StdSource::detect(pin))
+            (None, Some(star::StdPin::new(repo, rev, cache)))
+        }
+        None => (None, None),
+    };
+    Ok(star::StdSource::new(star::detect_dir(path), pin))
 }
 
 /// Copy stdlib modules from giant's std collection into the workspace's `star/`
