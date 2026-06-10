@@ -174,7 +174,8 @@ Root file only.
 | Field | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Must be `true` to use the remote cache. Remote is a no-op when false. |
-| `url` | - | Cache endpoint (Bazel HTTP cache protocol). |
+| `kind` | `bazel_http` | `bazel_http` (any Bazel-HTTP cache server) or `github_actions` (the Actions runner's own cache - no `url`/`auth`; see [the guide](/guides/remote-cache/#the-github-actions-cache)). |
+| `url` | - | Cache endpoint (Bazel HTTP cache protocol). `bazel_http` only. |
 | `auth.kind` | - | `none`, `bearer`, or `basic`. |
 | `auth.token_env` | - | (bearer) env var name to read the token from. |
 | `auth.username_env` | - | (basic) env var name for the username. |

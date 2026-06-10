@@ -17,7 +17,47 @@ jobs:
       - run: cargo clippy --workspace --all-targets --features giant/remote -- -D warnings
       # The smoke tests spawn `giant build`, which dispatches to the
       # giant-build binary beside the giant binary. `cargo test` links bins
-      # only for packages with integration tests, so link them all first.
+      # only for packages with integration tests, so link them all first -
+      # and the feature-enabled test run needs siblings built with the same
+      # feature, or the remote path is compiled out of the porcelain that
+      # actually runs the build.
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
+      - run: cargo build --workspace --locked --features giant/remote
       - run: cargo test --workspace --locked --features giant/remote
+
+  # The github_actions remote backend against the real cache service - the
+  # signed-URL flow can't be fully faked, so prove it where it runs.
+  gha-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update --no-self-update stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Expose the runner's cache credentials
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - run: cargo build --locked -p giant -p giant-build --features giant/remote
+      - name: Round-trip against the real cache service
+        run: |
+          ws="$(mktemp -d)"
+          printf 'run %s\n' "$GITHUB_RUN_ID" > "$ws/in.txt"
+          printf '%s\n' \
+            'workspace: { name: gha_roundtrip }' \
+            'cache: { dir: ./cache }' \
+            'remote: { enabled: true, kind: github_actions }' \
+            'targets:' \
+            '  - name: demo' \
+            '    inputs: ["in.txt"]' \
+            '    outputs: ["out.txt"]' \
+            '    command: "cp in.txt out.txt"' \
+            > "$ws/giant.yaml"
+          export PATH="$PWD/target/debug:$PATH"
+          (cd "$ws" && giant build)
+          rm -rf "$ws/cache" "$ws/out.txt"
+          (cd "$ws" && giant build) | tee second.log
+          grep -q REMOTE second.log
+          grep -q 'run' "$ws/out.txt"

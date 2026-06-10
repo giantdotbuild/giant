@@ -1,8 +1,9 @@
-//! Remote cache client - Bazel HTTP cache protocol.
+//! Remote cache client. Two backends behind one surface:
 //!
-//! Two endpoints:
-//!   GET/PUT/HEAD  /ac/<sha256_hex>    Action Cache entries (our JSON schema)
-//!   GET/PUT/HEAD  /cas/<sha256_hex>   Content-Addressed Storage blobs
+//!   - Bazel HTTP cache protocol (bazel-remote, sccache, ...):
+//!     GET/PUT/HEAD `/ac/<sha256_hex>` and `/cas/<sha256_hex>`.
+//!   - The GitHub Actions cache service ([`gha`]), configured from the
+//!     env the runner provides.
 //!
 //! Feature-gated behind `--features remote`; the
 //! engine builds and runs without it.
@@ -12,6 +13,10 @@
 //! continues to work, build proceeds, and we just log a warning.
 
 #![cfg(feature = "remote")]
+
+mod gha;
+
+pub use gha::GhaConfig;
 
 use crate::cache::AcEntry;
 use crate::model::{CacheKey, ContentHash};
@@ -53,11 +58,17 @@ pub enum RemoteError {
 /// lookups + URL normalization applied.
 #[derive(Debug, Clone)]
 pub struct RemoteCacheConfig {
-    pub base_url: String,
-    pub auth: Auth,
+    pub backend: BackendConfig,
     pub skip_head: bool,
     pub max_blob_size: u64,
     pub skip_tls_verify: bool,
+}
+
+/// Which remote we talk to, with its resolved credentials.
+#[derive(Debug, Clone)]
+pub enum BackendConfig {
+    BazelHttp { base_url: String, auth: Auth },
+    GithubActions(GhaConfig),
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +83,21 @@ impl RemoteCacheConfig {
     /// a `RemoteCacheConfig` (with the actual secret values). Reads
     /// env vars lazily, so secrets never sit in the parsed config tree.
     pub fn from_config(cfg: &crate::config::RemoteConfig) -> Result<Self, RemoteError> {
+        let backend = match cfg.kind {
+            crate::config::RemoteKind::BazelHttp => Self::bazel_backend(cfg)?,
+            crate::config::RemoteKind::GithubActions => BackendConfig::GithubActions(
+                GhaConfig::from_env(REMOTE_AC_SCHEMA).map_err(RemoteError::Config)?,
+            ),
+        };
+        Ok(Self {
+            backend,
+            skip_head: cfg.skip_head,
+            max_blob_size: cfg.max_blob_size_mb.saturating_mul(1024 * 1024),
+            skip_tls_verify: cfg.tls.skip_verify,
+        })
+    }
+
+    fn bazel_backend(cfg: &crate::config::RemoteConfig) -> Result<BackendConfig, RemoteError> {
         let url = cfg.url.as_deref().ok_or_else(|| {
             RemoteError::Config("cache.remote.url is required when enabled".into())
         })?;
@@ -93,14 +119,7 @@ impl RemoteCacheConfig {
                     .map_err(|_| RemoteError::Config(format!("env var {password_env} is unset")))?,
             },
         };
-
-        Ok(Self {
-            base_url,
-            auth,
-            skip_head: cfg.skip_head,
-            max_blob_size: cfg.max_blob_size_mb.saturating_mul(1024 * 1024),
-            skip_tls_verify: cfg.tls.skip_verify,
-        })
+        Ok(BackendConfig::BazelHttp { base_url, auth })
     }
 }
 
@@ -153,46 +172,53 @@ impl RemoteCache {
         }
     }
 
-    fn auth_headers(&self) -> HeaderMap {
-        let mut h = HeaderMap::new();
-        match &self.inner.config.auth {
-            Auth::None => {}
-            Auth::Bearer(t) => {
-                if let Ok(v) = HeaderValue::from_str(&format!("Bearer {t}")) {
-                    h.insert(AUTHORIZATION, v);
-                }
-            }
-            Auth::Basic { user, pass } => {
-                use base64::Engine;
-                let token =
-                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
-                if let Ok(v) = HeaderValue::from_str(&format!("Basic {token}")) {
-                    h.insert(AUTHORIZATION, v);
-                }
-            }
-        }
-        h
-    }
-
-    fn ac_url(&self, key: &CacheKey) -> String {
-        format!("{}/ac/{}", self.inner.config.base_url, key.to_hex())
-    }
-    fn cas_url(&self, hash: &ContentHash) -> String {
-        format!("{}/cas/{}", self.inner.config.base_url, hash.to_hex())
-    }
-
     /// GET /ac/<key>. Returns `Ok(None)` on 404 or any error (we treat
     /// remote as best-effort).
     pub async fn get_ac(&self, key: &CacheKey) -> Result<Option<AcEntry>, RemoteError> {
         if self.is_disabled() {
             return Ok(None);
         }
-        let url = self.ac_url(key);
+        match &self.inner.config.backend {
+            BackendConfig::BazelHttp { base_url, auth } => {
+                self.bazel_get_ac(base_url, auth, key).await
+            }
+            BackendConfig::GithubActions(g) => {
+                let fetched = gha::fetch(&self.inner.client, g, &gha::ac_key(key)).await;
+                let bytes = self.gha_result("AC fetch", fetched).flatten();
+                Ok(bytes.and_then(|b| parse_remote_ac(&b, &key.to_hex())))
+            }
+        }
+    }
+
+    /// Translate a GHA backend result into the best-effort policy: auth
+    /// failures disable the remote for the rest of the run, anything else
+    /// logs and reads as a miss.
+    fn gha_result<T>(&self, what: &str, r: Result<T, gha::GhaError>) -> Option<T> {
+        match r {
+            Ok(v) => Some(v),
+            Err(gha::GhaError::Auth) => {
+                self.disable("auth failed (401/403)");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("remote {what} failed: {e}");
+                None
+            }
+        }
+    }
+
+    async fn bazel_get_ac(
+        &self,
+        base_url: &str,
+        auth: &Auth,
+        key: &CacheKey,
+    ) -> Result<Option<AcEntry>, RemoteError> {
+        let url = format!("{base_url}/ac/{}", key.to_hex());
         let resp = self
             .inner
             .client
             .get(&url)
-            .headers(self.auth_headers())
+            .headers(auth_headers(auth))
             .send()
             .await
             .map_err(|e| {
@@ -206,13 +232,7 @@ impl RemoteCache {
         match resp.status() {
             StatusCode::OK => {
                 let bytes = resp.bytes().await?;
-                match serde_json::from_slice::<RemoteAcEntry>(&bytes) {
-                    Ok(remote) => Ok(Some(remote.into_local())),
-                    Err(e) => {
-                        tracing::warn!("remote AC at {url} unparseable: {e}");
-                        Ok(None)
-                    }
-                }
+                Ok(parse_remote_ac(&bytes, &url))
             }
             StatusCode::NOT_FOUND => Ok(None),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
@@ -226,19 +246,38 @@ impl RemoteCache {
         }
     }
 
-    /// PUT /ac/<key>. Errors are logged but don't propagate - upload
-    /// is best-effort.
+    /// Upload the AC entry for `key`. Errors are logged but don't
+    /// propagate - upload is best-effort.
     pub async fn put_ac(&self, key: &CacheKey, entry: &AcEntry) -> Result<(), RemoteError> {
         if self.is_disabled() {
             return Ok(());
         }
         let body = serde_json::to_vec(&RemoteAcEntry::from_local(entry))?;
-        let url = self.ac_url(key);
+        match &self.inner.config.backend {
+            BackendConfig::BazelHttp { base_url, auth } => {
+                self.bazel_put_ac(base_url, auth, key, body).await
+            }
+            BackendConfig::GithubActions(g) => {
+                let stored = gha::store(&self.inner.client, g, &gha::ac_key(key), body).await;
+                self.gha_result("AC put", stored);
+                Ok(())
+            }
+        }
+    }
+
+    async fn bazel_put_ac(
+        &self,
+        base_url: &str,
+        auth: &Auth,
+        key: &CacheKey,
+        body: Vec<u8>,
+    ) -> Result<(), RemoteError> {
+        let url = format!("{base_url}/ac/{}", key.to_hex());
         let resp = self
             .inner
             .client
             .put(&url)
-            .headers(self.auth_headers())
+            .headers(auth_headers(auth))
             .body(body)
             .send()
             .await;
@@ -264,37 +303,62 @@ impl RemoteCache {
         }
     }
 
-    /// HEAD /cas/<hash>. Skipped when `skip_head` is set.
+    /// Existence probe before upload. Skipped when `skip_head` is set.
     /// Returns `Ok(true)` when the blob is known to exist.
     pub async fn has_cas(&self, hash: &ContentHash) -> Result<bool, RemoteError> {
         if self.is_disabled() || self.inner.config.skip_head {
             return Ok(false);
         }
-        let url = self.cas_url(hash);
-        let resp = self
-            .inner
-            .client
-            .head(&url)
-            .headers(self.auth_headers())
-            .send()
-            .await;
-        match resp {
-            Ok(r) if r.status() == StatusCode::OK => Ok(true),
-            Ok(_) | Err(_) => Ok(false),
+        match &self.inner.config.backend {
+            BackendConfig::BazelHttp { base_url, auth } => {
+                let url = format!("{base_url}/cas/{}", hash.to_hex());
+                let resp = self
+                    .inner
+                    .client
+                    .head(&url)
+                    .headers(auth_headers(auth))
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status() == StatusCode::OK => Ok(true),
+                    Ok(_) | Err(_) => Ok(false),
+                }
+            }
+            BackendConfig::GithubActions(g) => {
+                let found = gha::exists(&self.inner.client, g, &gha::cas_key(hash)).await;
+                Ok(self.gha_result("CAS probe", found).unwrap_or(false))
+            }
         }
     }
 
-    /// GET /cas/<hash>. None on miss / error / oversize.
+    /// Fetch a CAS blob. None on miss / error / oversize.
     pub async fn get_cas(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>, RemoteError> {
         if self.is_disabled() {
             return Ok(None);
         }
-        let url = self.cas_url(hash);
+        match &self.inner.config.backend {
+            BackendConfig::BazelHttp { base_url, auth } => {
+                self.bazel_get_cas(base_url, auth, hash).await
+            }
+            BackendConfig::GithubActions(g) => {
+                let fetched = gha::fetch(&self.inner.client, g, &gha::cas_key(hash)).await;
+                Ok(self.gha_result("CAS fetch", fetched).flatten())
+            }
+        }
+    }
+
+    async fn bazel_get_cas(
+        &self,
+        base_url: &str,
+        auth: &Auth,
+        hash: &ContentHash,
+    ) -> Result<Option<Vec<u8>>, RemoteError> {
+        let url = format!("{base_url}/cas/{}", hash.to_hex());
         let resp = self
             .inner
             .client
             .get(&url)
-            .headers(self.auth_headers())
+            .headers(auth_headers(auth))
             .send()
             .await;
         let resp = match resp {
@@ -321,8 +385,8 @@ impl RemoteCache {
         }
     }
 
-    /// PUT /cas/<hash>. Skips when the blob is too large or when a
-    /// preceding HEAD reported existence.
+    /// Upload a CAS blob. Skips when the blob is too large or when a
+    /// preceding existence probe reported it present.
     pub async fn put_cas(&self, hash: &ContentHash, bytes: Vec<u8>) -> Result<(), RemoteError> {
         if self.is_disabled() {
             return Ok(());
@@ -337,12 +401,31 @@ impl RemoteCache {
         if self.has_cas(hash).await.unwrap_or(false) {
             return Ok(());
         }
-        let url = self.cas_url(hash);
+        match &self.inner.config.backend {
+            BackendConfig::BazelHttp { base_url, auth } => {
+                self.bazel_put_cas(base_url, auth, hash, bytes).await
+            }
+            BackendConfig::GithubActions(g) => {
+                let stored = gha::store(&self.inner.client, g, &gha::cas_key(hash), bytes).await;
+                self.gha_result("CAS put", stored);
+                Ok(())
+            }
+        }
+    }
+
+    async fn bazel_put_cas(
+        &self,
+        base_url: &str,
+        auth: &Auth,
+        hash: &ContentHash,
+        bytes: Vec<u8>,
+    ) -> Result<(), RemoteError> {
+        let url = format!("{base_url}/cas/{}", hash.to_hex());
         let resp = self
             .inner
             .client
             .put(&url)
-            .headers(self.auth_headers())
+            .headers(auth_headers(auth))
             .body(bytes)
             .send()
             .await;
@@ -364,9 +447,42 @@ impl RemoteCache {
     }
 }
 
+/// Headers for the Bazel-HTTP backend's configured auth.
+fn auth_headers(auth: &Auth) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    match auth {
+        Auth::None => {}
+        Auth::Bearer(t) => {
+            if let Ok(v) = HeaderValue::from_str(&format!("Bearer {t}")) {
+                h.insert(AUTHORIZATION, v);
+            }
+        }
+        Auth::Basic { user, pass } => {
+            use base64::Engine;
+            let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+            if let Ok(v) = HeaderValue::from_str(&format!("Basic {token}")) {
+                h.insert(AUTHORIZATION, v);
+            }
+        }
+    }
+    h
+}
+
 fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
     let v = headers.get(RETRY_AFTER)?.to_str().ok()?;
     v.parse().ok()
+}
+
+/// Decode an AC entry fetched from any backend. An unparseable entry is a
+/// miss, not an error: it logs `where` (a URL or cache key) and returns None.
+fn parse_remote_ac(bytes: &[u8], where_: &str) -> Option<AcEntry> {
+    match serde_json::from_slice::<RemoteAcEntry>(bytes) {
+        Ok(remote) => Some(remote.into_local()),
+        Err(e) => {
+            tracing::warn!("remote AC at {where_} unparseable: {e}");
+            None
+        }
+    }
 }
 
 // =============================================================================

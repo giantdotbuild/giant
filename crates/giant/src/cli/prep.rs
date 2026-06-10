@@ -117,6 +117,17 @@ pub fn open_remote(config: &Config) -> anyhow::Result<OpenedRemote> {
     if !config.remote.enabled {
         return Ok((None, None, None));
     }
+    // A github_actions remote outside Actions is a no-op rather than an
+    // error: the config is committed once and local builds simply run
+    // without a remote. Inside Actions (GITHUB_ACTIONS is set by the
+    // runner) a missing token still fails loudly - that means the
+    // credential-export step is missing from the workflow.
+    if config.remote.kind == crate::config::RemoteKind::GithubActions
+        && std::env::var_os("GITHUB_ACTIONS").is_none()
+    {
+        tracing::info!("remote cache (github_actions) inactive outside GitHub Actions");
+        return Ok((None, None, None));
+    }
     let resolved = crate::remote::RemoteCacheConfig::from_config(&config.remote)
         .map_err(|e| anyhow::anyhow!("remote cache config: {e}"))?;
     let remote = crate::remote::RemoteCache::open(resolved)

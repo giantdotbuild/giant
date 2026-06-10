@@ -153,3 +153,184 @@ targets:
         "hello remote"
     );
 }
+
+// ============================================================================
+// GitHub Actions cache backend
+// ============================================================================
+
+/// In-memory GitHub Actions cache service: the three Twirp endpoints plus
+/// the signed-URL blob store they hand out. Twirp calls must carry the
+/// runtime token; the signed URLs must not.
+#[derive(Clone, Default)]
+struct GhaService {
+    base: Arc<Mutex<String>>,
+    blobs: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+}
+
+const TWIRP_BASE: &str = "/twirp/github.actions.results.api.v1.CacheService/";
+
+impl Respond for GhaService {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let path = req.url.path().to_string();
+        let base = self.base.lock().unwrap().clone();
+
+        if let Some(method_name) = path.strip_prefix(TWIRP_BASE) {
+            let authed = req
+                .headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v == "Bearer t-token");
+            if !authed {
+                return ResponseTemplate::new(401);
+            }
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            let key = body["key"].as_str().unwrap_or_default().to_string();
+            assert!(
+                !body["version"].as_str().unwrap_or_default().is_empty(),
+                "twirp requests must carry a version"
+            );
+            return match method_name {
+                "GetCacheEntryDownloadURL" => {
+                    let hit = self.blobs.lock().unwrap().contains_key(&key);
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "ok": hit,
+                        "signedDownloadUrl": if hit { format!("{base}/blob/{key}") } else { String::new() },
+                    }))
+                }
+                "CreateCacheEntry" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ok": true,
+                    "signedUploadUrl": format!("{base}/upload/{key}"),
+                })),
+                "FinalizeCacheEntryUpload" => ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "entryId": "1"})),
+                _ => ResponseTemplate::new(404),
+            };
+        }
+
+        if let Some(key) = path.strip_prefix("/upload/") {
+            if req.headers.get("x-ms-blob-type").is_none() {
+                return ResponseTemplate::new(400);
+            }
+            self.blobs
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), req.body.clone());
+            return ResponseTemplate::new(201);
+        }
+        if let Some(key) = path.strip_prefix("/blob/") {
+            return match self.blobs.lock().unwrap().get(key) {
+                Some(bytes) => ResponseTemplate::new(200).set_body_bytes(bytes.clone()),
+                None => ResponseTemplate::new(404),
+            };
+        }
+        ResponseTemplate::new(404)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gha_cache_round_trip() {
+    let server = MockServer::start().await;
+    let svc = GhaService::default();
+    *svc.base.lock().unwrap() = server.uri();
+    for m in ["POST", "PUT", "GET"] {
+        Mock::given(method(m))
+            .respond_with(svc.clone())
+            .mount(&server)
+            .await;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(ws.join("in.txt"), "hello gha\n").unwrap();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: gha_round_trip
+cache:
+  dir: ./cache
+remote:
+  enabled: true
+  kind: github_actions
+targets:
+  - name: "demo"
+    inputs: ["in.txt"]
+    outputs: ["out.txt"]
+    command: "cp in.txt out.txt"
+"#,
+    )
+    .unwrap();
+
+    let build = |ws: &std::path::Path| {
+        Command::new(giant_bin())
+            .arg("build")
+            .current_dir(ws)
+            // The backend is gated on running inside Actions; fake it.
+            .env("GITHUB_ACTIONS", "true")
+            .env("ACTIONS_RESULTS_URL", server.uri())
+            .env("ACTIONS_RUNTIME_TOKEN", "t-token")
+            .output()
+            .expect("spawn")
+    };
+
+    // Outside Actions (no GITHUB_ACTIONS), the same config is a quiet
+    // no-op: the build succeeds and nothing reaches the mock service.
+    let out0 = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .env_remove("GITHUB_ACTIONS")
+        .output()
+        .expect("spawn");
+    assert!(out0.status.success(), "local-mode build failed");
+    assert!(
+        svc.blobs.lock().unwrap().is_empty(),
+        "no uploads expected outside Actions"
+    );
+    let _ = Command::new(giant_bin())
+        .args(["clean", "-y"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    std::fs::remove_file(ws.join("out.txt")).ok();
+
+    let out = build(ws);
+    assert!(
+        out.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let keys: Vec<String> = svc.blobs.lock().unwrap().keys().cloned().collect();
+    assert!(
+        keys.iter().any(|k| k.starts_with("giant-ac-")),
+        "expected an AC entry; got {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|k| k.starts_with("giant-cas-")),
+        "expected a CAS blob; got {keys:?}"
+    );
+
+    let _ = Command::new(giant_bin())
+        .args(["clean", "-y"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    std::fs::remove_file(ws.join("out.txt")).ok();
+
+    let out2 = build(ws);
+    assert!(
+        out2.status.success(),
+        "second build failed: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        stdout.contains("REMOTE"),
+        "expected a REMOTE cache hit; got stdout: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("out.txt")).unwrap().trim(),
+        "hello gha"
+    );
+}

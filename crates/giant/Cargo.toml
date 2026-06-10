@@ -92,7 +92,8 @@ remote = ["dep:reqwest", "dep:base64"]
 version = "0.12"
 optional = true
 default-features = false
-features = ["rustls-tls", "stream"]
+# `json` carries the GitHub Actions backend's Twirp calls.
+features = ["rustls-tls", "stream", "json"]
 
 [dependencies.base64]
 version = "0.22"

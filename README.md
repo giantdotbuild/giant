@@ -140,7 +140,9 @@ remote:
 ```
 
 Speaks the Bazel HTTP cache protocol - works against bazel-remote, BuildBuddy,
-sccache, and S3-backed caches via the same protocol.
+sccache, and S3-backed caches via the same protocol. On GitHub Actions,
+`kind: github_actions` uses the runner's own cache service instead - shared
+caching with nothing to host.
 
 ## Configuration reference
 

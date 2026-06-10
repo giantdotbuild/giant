@@ -59,6 +59,15 @@ toolchains the generators query (`go list`, `cargo metadata`). It exits
 non-zero with a per-generator report when a `giant gen` run would change
 the committed files.
 
+## The zero-infrastructure remote cache
+
+On GitHub Actions, Giant can use the runner's own cache service - no
+server to host. Set `remote: { enabled: true, kind: github_actions }`
+in `giant.yaml` and export the runner's credentials before the build
+step; the [remote cache guide](/guides/remote-cache/#the-github-actions-cache)
+has the two-line export and the scoping details. Outside Actions the
+same config is inactive, so it's safe to commit.
+
 ## Bring your own remote cache
 
 Set up a [bazel-remote](https://github.com/buchgr/bazel-remote) (or

@@ -1,19 +1,16 @@
 ---
 title: Remote cache
-description: Share build artifacts across machines via the Bazel HTTP cache protocol.
+description: Share build artifacts across machines - a Bazel HTTP cache server, or the GitHub Actions cache.
 ---
 
-Giant's remote cache speaks the [Bazel HTTP cache
-protocol](https://bazel.build/remote/caching) - the same protocol used
-by `bazel-remote`, BuildBuddy, sccache, and various S3-backed servers.
-That means you can:
+Giant's remote cache has two backends:
 
-- Run bazel-remote on a server you own
-- Sign up for a hosted service
-- Point Giant at sccache for shared Rust artifacts
-- Use any S3 bucket via a tiny shim
-
-…and Giant will use it without modification.
+- The [Bazel HTTP cache protocol](https://bazel.build/remote/caching) -
+  the same protocol used by `bazel-remote`, BuildBuddy, sccache, and
+  various S3-backed servers. Run one anywhere, point Giant at it.
+- The [GitHub Actions cache](#the-github-actions-cache): when CI runs
+  on Actions, Giant uses the runner's own cache service directly -
+  shared caching with zero infrastructure to host.
 
 ## Enable the feature
 
@@ -68,6 +65,54 @@ remote:
     username_env: GIANT_REMOTE_USER
     password_env: GIANT_REMOTE_PASS
 ```
+
+## The GitHub Actions cache
+
+Inside a GitHub Actions job, the runner already hosts a cache service -
+the one `actions/cache` uses. Giant can speak to it directly:
+
+```yaml
+# giant.yaml (workspace root)
+remote:
+  enabled: true
+  kind: github_actions
+```
+
+No `url`, no `auth` - the runner provides both. The catch is that the
+runner only exposes its credentials (`ACTIONS_RESULTS_URL`,
+`ACTIONS_RUNTIME_TOKEN`) to JavaScript actions, never to plain `run:`
+steps, so the workflow exports them once before any `giant` step (the
+same dance sccache and BuildKit require):
+
+```yaml
+- name: Expose the cache credentials to giant
+  uses: actions/github-script@v7
+  with:
+    script: |
+      core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+      core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+- run: giant build --quiet
+```
+
+The config commits once and behaves sensibly everywhere: outside
+Actions, a `github_actions` remote is simply inactive and builds run
+with the local cache only. Inside Actions with the export step missing,
+giant fails at startup with an error naming the variables - the one
+case that's a workflow bug rather than a normal environment.
+
+Three GitHub-isms to know:
+
+- **Branch scoping.** Entries written on the default branch are
+  readable from every branch; a PR's writes are visible only to that
+  PR. Net effect: `main` warms the cache, PRs read it, PRs can't
+  pollute each other.
+- **Quota.** GitHub gives each repo 10 GB, evicting least-recently-used
+  entries. `cache.max_size_gb` doesn't apply here; GitHub does its own
+  housekeeping.
+- **Rate limits.** Heavily parallel builds can get throttled. Giant's
+  remote is best-effort everywhere, so a throttled call degrades to a
+  cache miss and the build carries on.
 
 ## How the lookup chain works
 

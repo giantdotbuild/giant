@@ -114,11 +114,16 @@ The local cache is content-addressed: outputs and captured logs are stored as
 blake3-named blobs, with an action-cache entry per cache key, and LRU eviction
 when the cache grows past a configured size.
 
-A remote cache is optional and feature-gated. It speaks the Bazel HTTP cache
-protocol, which works against bazel-remote, an S3 bucket behind a small shim,
-or any HTTP object store. The richer REAPI gRPC protocol was considered and set
-aside: it is a large surface to implement and maintain for a build tool this
-size, and the HTTP protocol covers the cache-sharing case that matters.
+A remote cache is optional and feature-gated, with two backends behind one
+client surface. The default speaks the Bazel HTTP cache protocol, which works
+against bazel-remote, an S3 bucket behind a small shim, or any HTTP object
+store. The second is the GitHub Actions cache service (`kind:
+github_actions`): inside an Actions job the runner's own cache holds the AC
+entries and blobs, keyed immutably per cache key, so CI gets shared caching
+with no server to host. Outside Actions that config is inactive rather than
+an error, so it commits once. The richer REAPI gRPC protocol was considered
+and set aside: it is a large surface to implement and maintain for a build
+tool this size, and these two cover the cache-sharing cases that matter.
 
 ## Tasks live in a porcelain
 

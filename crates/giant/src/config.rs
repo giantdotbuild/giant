@@ -207,6 +207,8 @@ impl Default for CacheConfig {
 pub struct RemoteConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub kind: RemoteKind,
     pub url: Option<String>,
     #[serde(default)]
     pub auth: RemoteAuth,
@@ -216,6 +218,19 @@ pub struct RemoteConfig {
     pub max_blob_size_mb: u64,
     #[serde(default)]
     pub tls: TlsConfig,
+}
+
+/// Which protocol the remote speaks. `BazelHttp` is any Bazel-HTTP-cache
+/// server (bazel-remote, sccache, ...); `GithubActions` is the runner's
+/// own cache service, configured entirely from the env the runner
+/// provides (`ACTIONS_RESULTS_URL` / `ACTIONS_RUNTIME_TOKEN`).
+#[cfg(feature = "remote")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteKind {
+    #[default]
+    BazelHttp,
+    GithubActions,
 }
 
 #[cfg(feature = "remote")]
@@ -334,6 +349,26 @@ impl Config {
                 "schema_version {} not supported (only v1 in this build)",
                 self.schema_version
             )));
+        }
+
+        // The github_actions remote is configured entirely by the runner's
+        // env; endpoint/auth fields would be silently ignored, so reject them.
+        #[cfg(feature = "remote")]
+        if self.remote.kind == RemoteKind::GithubActions {
+            if self.remote.url.is_some() {
+                return Err(ConfigError::Validation(
+                    "remote.url does not apply when remote.kind is github_actions \
+                     (the runner provides the endpoint)"
+                        .into(),
+                ));
+            }
+            if !matches!(self.remote.auth, RemoteAuth::None) {
+                return Err(ConfigError::Validation(
+                    "remote.auth does not apply when remote.kind is github_actions \
+                     (the runner provides the token)"
+                        .into(),
+                ));
+            }
         }
 
         self.validate_targets()
@@ -658,6 +693,28 @@ mod tests {
         f.write_all(s.as_bytes()).unwrap();
         f.flush().unwrap();
         f
+    }
+
+    #[cfg(feature = "remote")]
+    #[test]
+    fn github_actions_remote_rejects_url_and_auth() {
+        let with_url = write_yaml(
+            "workspace: { name: x }\nremote:\n  enabled: true\n  kind: github_actions\n  url: https://cache\n",
+        );
+        let e = Config::load(with_url.path()).unwrap_err();
+        assert!(e.to_string().contains("remote.url"), "{e}");
+
+        let with_auth = write_yaml(
+            "workspace: { name: x }\nremote:\n  enabled: true\n  kind: github_actions\n  auth: { kind: bearer, token_env: T }\n",
+        );
+        let e = Config::load(with_auth.path()).unwrap_err();
+        assert!(e.to_string().contains("remote.auth"), "{e}");
+
+        let plain = write_yaml(
+            "workspace: { name: x }\nremote:\n  enabled: true\n  kind: github_actions\n",
+        );
+        let cfg = Config::load(plain.path()).unwrap();
+        assert_eq!(cfg.remote.kind, RemoteKind::GithubActions);
     }
 
     #[test]
