@@ -9,7 +9,7 @@ targets:
   - //bin/giant-task
   deps:
   - //:devenv
-  command: cargo build --release -p giant-task --bin giant-task && install -m 0755 target/release/giant-task bin/giant-task
+  command: cargo build --release -p giant-task --bin giant-task && install -m 0755 target/release/giant-task $GIANT_WORKSPACE_ROOT/bin/giant-task
   cwd: //
   timeout_secs: 600
   tags:

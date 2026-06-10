@@ -9,7 +9,7 @@ targets:
   - //bin/giant-sandbox
   deps:
   - //:devenv
-  command: cargo build --release -p giant-sandbox --bin giant-sandbox && install -m 0755 target/release/giant-sandbox bin/giant-sandbox
+  command: cargo build --release -p giant-sandbox --bin giant-sandbox && install -m 0755 target/release/giant-sandbox $GIANT_WORKSPACE_ROOT/bin/giant-sandbox
   cwd: //
   timeout_secs: 600
   tags:

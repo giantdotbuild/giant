@@ -22,26 +22,30 @@ def cargo_packages(ws, meta):
         pkgs.append({"name": p["name"], "dir": pkg_dir, "bins": bins})
     return pkgs
 
-# Cache-key inputs for a crate: its Rust sources, build script if present, the
-# package manifest, and the workspace manifest + lockfile (the dependency axis).
-# Package-relative except the `//`-rooted workspace files.
-def cargo_inputs(ws, pkg):
-    items = ["src/**/*.rs", "Cargo.toml", "//Cargo.toml", "//Cargo.lock"]
+# Cache-key inputs for a crate: its Rust sources, build script if present,
+# the package manifest, and the workspace manifest + lockfile (the dependency
+# axis). Package-relative except the `//`-rooted workspace files; `dir` is
+# the workspace dir for a nested workspace. `extra` adds non-Rust inputs the
+# crate compiles in (sqlx queries, templates, included assets).
+def cargo_inputs(ws, pkg, dir = ".", extra = []):
+    prefix = "" if dir == "." else dir + "/"
+    items = ["src/**/*.rs", "Cargo.toml", "//" + prefix + "Cargo.toml", "//" + prefix + "Cargo.lock"]
     if ws.glob(pkg["dir"] + "/build.rs"):
         items.append("build.rs")
-    return items
+    return items + extra
 
-# Emit a release build-and-install target for binary `bin` of `pkg`. Installs to
-# `//bin/<bin>`; cwd is the workspace root so cargo drives the whole workspace
-# and resolves intra-workspace deps itself.
-def cargo_bin(ws, pkg, bin, deps = []):
+# Emit a release build-and-install target for binary `bin` of `pkg`. Installs
+# to `//bin/<bin>`; cwd is the workspace dir so cargo drives the whole
+# workspace and resolves intra-workspace deps itself.
+def cargo_bin(ws, pkg, bin, deps = [], dir = ".", features = [], extra_inputs = []):
+    flags = " --features " + ",".join(features) if features else ""
     target(
         name = bin,
-        inputs = cargo_inputs(ws, pkg),
+        inputs = cargo_inputs(ws, pkg, dir, extra_inputs),
         outputs = ["//bin/" + bin],
-        cwd = "//",
-        command = "cargo build --release -p " + pkg["name"] + " --bin " + bin +
-                  " && install -m 0755 target/release/" + bin + " bin/" + bin,
+        cwd = "//" if dir == "." else "//" + dir,
+        command = "cargo build --release -p " + pkg["name"] + " --bin " + bin + flags +
+                  " && install -m 0755 target/release/" + bin + " $GIANT_WORKSPACE_ROOT/bin/" + bin,
         deps = deps,
         timeout_secs = 600,
         tags = ["bin", "rust"],
@@ -50,9 +54,14 @@ def cargo_bin(ws, pkg, bin, deps = []):
 
 # The floor: a build-and-install target for every binary in the workspace.
 # `deps` ride every target (e.g. a toolchain-identity target so a toolchain
-# change re-keys the build).
-def cargo_targets(ws, deps = [], dir = "."):
+# change re-keys the build). `exclude` skips members by crate name - example
+# or fixture members a workspace lists but doesn't ship. A binary needing
+# features or extra inputs drops to `cargo_bin` for that one and excludes
+# its crate here.
+def cargo_targets(ws, deps = [], dir = ".", exclude = []):
     meta = cargo_metadata(ws, dir)
     for pkg in cargo_packages(ws, meta):
+        if pkg["name"] in exclude:
+            continue
         for bin in pkg["bins"]:
-            cargo_bin(ws, pkg, bin, deps = deps)
+            cargo_bin(ws, pkg, bin, deps = deps, dir = dir)

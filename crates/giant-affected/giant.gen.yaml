@@ -9,7 +9,7 @@ targets:
   - //bin/giant-affected
   deps:
   - //:devenv
-  command: cargo build --release -p giant-affected --bin giant-affected && install -m 0755 target/release/giant-affected bin/giant-affected
+  command: cargo build --release -p giant-affected --bin giant-affected && install -m 0755 target/release/giant-affected $GIANT_WORKSPACE_ROOT/bin/giant-affected
   cwd: //
   timeout_secs: 600
   tags:

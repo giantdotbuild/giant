@@ -9,7 +9,7 @@ targets:
   - //bin/giant-logs
   deps:
   - //:devenv
-  command: cargo build --release -p giant-logs --bin giant-logs && install -m 0755 target/release/giant-logs bin/giant-logs
+  command: cargo build --release -p giant-logs --bin giant-logs && install -m 0755 target/release/giant-logs $GIANT_WORKSPACE_ROOT/bin/giant-logs
   cwd: //
   timeout_secs: 600
   tags:

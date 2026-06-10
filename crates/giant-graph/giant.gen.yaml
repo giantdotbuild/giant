@@ -9,7 +9,7 @@ targets:
   - //bin/giant-graph
   deps:
   - //:devenv
-  command: cargo build --release -p giant-graph --bin giant-graph && install -m 0755 target/release/giant-graph bin/giant-graph
+  command: cargo build --release -p giant-graph --bin giant-graph && install -m 0755 target/release/giant-graph $GIANT_WORKSPACE_ROOT/bin/giant-graph
   cwd: //
   timeout_secs: 600
   tags:

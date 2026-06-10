@@ -9,7 +9,7 @@ targets:
   - //bin/giant-gen
   deps:
   - //:devenv
-  command: cargo build --release -p giant-gen --bin giant-gen && install -m 0755 target/release/giant-gen bin/giant-gen
+  command: cargo build --release -p giant-gen --bin giant-gen && install -m 0755 target/release/giant-gen $GIANT_WORKSPACE_ROOT/bin/giant-gen
   cwd: //
   timeout_secs: 600
   tags:
