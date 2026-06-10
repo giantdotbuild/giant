@@ -1,6 +1,6 @@
 ---
 title: How Giant compares
-description: Where Giant sits next to make, just, Bazel, and Buck2.
+description: Where Giant sits next to make, just, ninja, Bazel, and Buck2.
 ---
 
 Build tooling spans a wide range, from a 30-line `Makefile` to a
@@ -44,6 +44,26 @@ with `just`. The engine underneath, the caching and the graph, is the part
 build cache underneath your tasks," that's Giant with `giant-task`
 installed.
 
+## ninja (and the CMake/meson family)
+
+ninja made a deliberate split: a small, fast executor that consumes build
+files a generator wrote (CMake, meson, gn), files designed for machines
+rather than people. Giant shares that philosophy - a small engine reading
+static files, with generation as a separate offline step - and differs in
+what each half does:
+
+- **The engine caches.** ninja tracks freshness per build directory; Giant
+  keys every target on content hashes, shares results through a local CAS,
+  and speaks the Bazel HTTP protocol to a remote cache.
+- **The config is for humans.** `.ninja` files are an output you regenerate
+  and don't review. `giant.yaml` is committed, diffable config you can write
+  by hand; a [generator](/guides/generating-config/) is how you scale it,
+  rather than the only way to produce it.
+
+If you think of CMake-generates-ninja as "compile the build, then run it",
+Giant is the same shape with caching in the runner and YAML you can read in
+the middle.
+
 ## Bazel
 
 Bazel is the reference design for hermetic, content-addressed, remotely
@@ -83,16 +103,17 @@ session`.
 
 ## At a glance
 
-| | make | just | Bazel / Buck2 | Giant |
-| --- | --- | --- | --- | --- |
-| Content-addressed cache | ✗ (mtime) | ✗ | ✓ | ✓ |
-| Remote / shared cache | ✗ | ✗ | ✓ | ✓ (Bazel HTTP) |
-| Cross-language dep graph | manual | ✗ | ✓ | ✓ |
-| Wraps your existing commands | ✓ | ✓ | rewrite as rules | ✓ |
-| Own build language | ✗ | ✗ | Starlark | ✗ (YAML; Starlark only to *generate* config) |
-| Daemon | ✗ | ✗ | ✓ | ✗ (opt-in `session`) |
-| Deep hermeticity / sandbox | ✗ | ✗ | ✓ | opt-in (`giant verify`) |
-| Footprint | tiny | tiny | large | tiny |
+| | make | just | ninja | Bazel / Buck2 | Giant |
+| --- | --- | --- | --- | --- | --- |
+| Content-addressed cache | ✗ (mtime) | ✗ | ✗ (mtime) | ✓ | ✓ |
+| Remote / shared cache | ✗ | ✗ | ✗ | ✓ | ✓ (Bazel HTTP) |
+| Cross-language dep graph | manual | ✗ | ✓ (generated) | ✓ | ✓ |
+| Wraps your existing commands | ✓ | ✓ | ✓ | rewrite as rules | ✓ |
+| Own build language | ✗ | ✗ | ✗ (generated files) | Starlark | ✗ (YAML; Starlark only to *generate* config) |
+| Human-written config | ✓ | ✓ | ✗ | ✓ | ✓ (generators optional) |
+| Daemon | ✗ | ✗ | ✗ | ✓ | ✗ (opt-in `session`) |
+| Deep hermeticity / sandbox | ✗ | ✗ | ✗ | ✓ | opt-in (`giant verify`) |
+| Footprint | tiny | tiny | tiny | large | tiny |
 
 A row being blank isn't a verdict - `just` not having a build cache is the
 point of `just`. The table is for placing Giant: it sits with the big tools
