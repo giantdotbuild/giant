@@ -5,9 +5,9 @@
 # hand-written per-crate giant.yaml build targets, so adding a crate can't drift
 # out of sync with the build graph (the generators and the link pass).
 #
-# cargo.star is vendored (`giant gen vendor cargo.star`) so this repo's own
-# generation never needs the network. The collection lives in
-# github.com/giantdotbuild/giant-std.
+# cargo.star is fetched from giant-std so this repo's own
+# The collection lives in github.com/giantdotbuild/giant-std.
+# See giant.yaml for the ref
 load("@std//cargo.star", "cargo_targets")
 
 def generate(ws):
