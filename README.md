@@ -32,7 +32,7 @@ engine and the build porcelain (`giant build`/`test`/`verify` dispatch
 to `giant-build` on PATH):
 
 ```bash
-git clone https://github.com/johnae/giant
+git clone https://github.com/giantdotbuild/giant
 cd giant
 cargo install --path crates/giant
 cargo install --path crates/giant-build

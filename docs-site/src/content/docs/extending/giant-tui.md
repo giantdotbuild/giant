@@ -39,7 +39,7 @@ engine does.
 cargo install giant-tui
 
 # From source
-cargo install --path crates/giant-tui --git https://github.com/johnae/giant
+cargo install --path crates/giant-tui --git https://github.com/giantdotbuild/giant
 ```
 
 The binary just needs to be on PATH. Verify:

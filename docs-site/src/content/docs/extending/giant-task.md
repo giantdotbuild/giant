@@ -30,7 +30,7 @@ their own top-level keys the same way.
 cargo install giant-task
 
 # From source
-cargo install --path crates/giant-task --git https://github.com/johnae/giant
+cargo install --path crates/giant-task --git https://github.com/giantdotbuild/giant
 ```
 
 The binary just needs to be on PATH. Verify:

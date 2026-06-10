@@ -14,7 +14,7 @@
 
 set -eu
 
-REPO="johnae/giant"
+REPO="giantdotbuild/giant"
 VERSION="${GIANT_VERSION:-latest}"
 
 err() { printf 'install: %s\n' "$*" >&2; exit 1; }

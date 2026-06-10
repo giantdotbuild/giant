@@ -80,7 +80,7 @@
                 doCheck = false;
                 meta = {
                   description = "Part of the Giant build-orchestration suite";
-                  homepage = "https://github.com/johnae/giant";
+                  homepage = "https://github.com/giantdotbuild/giant";
                   license = pkgs.lib.licenses.asl20;
                   mainProgram = name;
                 };

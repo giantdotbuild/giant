@@ -23,10 +23,10 @@ export default defineConfig({
       },
       customCss: ['./src/styles/landing.css'],
       social: [
-        { icon: 'github', label: 'GitHub', href: 'https://github.com/johnae/giant' },
+        { icon: 'github', label: 'GitHub', href: 'https://github.com/giantdotbuild/giant' },
       ],
       editLink: {
-        baseUrl: 'https://github.com/johnae/giant/edit/main/docs-site/',
+        baseUrl: 'https://github.com/giantdotbuild/giant/edit/main/docs-site/',
       },
       lastUpdated: true,
       sidebar: [

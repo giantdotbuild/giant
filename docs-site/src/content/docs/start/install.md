@@ -37,7 +37,7 @@ Each release ships a `SHA256SUMS` file and the install script verifies
 the tarball against it. To check by hand:
 
 ```bash
-curl -fsSL https://github.com/johnae/giant/releases/latest/download/SHA256SUMS
+curl -fsSL https://github.com/giantdotbuild/giant/releases/latest/download/SHA256SUMS
 ```
 
 ## From source
@@ -47,7 +47,7 @@ The engine alone can't do much - `giant build` dispatches to the
 build porcelain:
 
 ```bash
-git clone https://github.com/johnae/giant
+git clone https://github.com/giantdotbuild/giant
 cd giant
 cargo install --path crates/giant        # the engine
 cargo install --path crates/giant-build  # giant build / test / verify
@@ -70,18 +70,18 @@ package, plus a `giant-suite` meta-package that bundles all of them:
 
 ```bash
 # Everything (the giant-suite meta-package: all first-party binaries)
-nix profile install github:johnae/giant
+nix profile install github:giantdotbuild/giant
 
 # Or pick individual binaries
-nix profile install github:johnae/giant#giant
-nix profile install github:johnae/giant#giant-tui
+nix profile install github:giantdotbuild/giant#giant
+nix profile install github:giantdotbuild/giant#giant-tui
 
 # Run without installing
-nix run github:johnae/giant -- build
-nix run github:johnae/giant#giant-tui
+nix run github:giantdotbuild/giant -- build
+nix run github:giantdotbuild/giant#giant-tui
 
 # Build locally and inspect the result
-git clone https://github.com/johnae/giant
+git clone https://github.com/giantdotbuild/giant
 cd giant
 nix build .#giant-suite
 ./result/bin/giant --version
