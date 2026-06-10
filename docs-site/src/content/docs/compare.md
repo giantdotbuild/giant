@@ -111,3 +111,21 @@ Two things don't fit in a row:
   each a [porcelain](/extending/porcelains/) you install or skip. Uninstall the
   task runner and `giant task` stops resolving; the engine has no concept of a
   task to begin with. The toolset grows while the core holds still.
+
+## Where Giant comes from
+
+Giant condenses years of working in and on large repos: internal build
+tools, the bespoke setups that grow up around them, and the lessons each
+one charged for. That's why the design settled quickly - the expensive
+mistakes were already paid for.
+
+Bazel shaped it most. Its core ideas are the right ones (the section above
+lists what Giant borrows), and it is engineered for planet-scale repos;
+below that scale you carry the weight without collecting the payoff. Giant
+keeps the ideas at a size that fits the repos most teams actually have.
+
+Why YAML? Years in the Kubernetes world made it an easy choice. It has
+warts, but everyone reads it, every language emits it, and a build graph
+should be data you can diff in code review. When a repo outgrows
+hand-written config, [generation](/guides/generating-config/) writes the
+same YAML offline, so the syntax stays boring either way.

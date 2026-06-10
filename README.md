@@ -16,6 +16,12 @@ The engine is language-agnostic. Targets are `inputs → command → outputs`. G
 packages, Docker images, protobuf - all of them are just targets with the right
 inputs, command, and outputs, declared in `giant.yaml`.
 
+Giant condenses years of building and running build tooling for large
+repos - internal tools, bespoke setups, a long stretch of Bazel. It keeps
+the ideas that earned their keep, at a size that fits the repos most teams
+actually have. More on that in
+[How Giant compares](https://giant.build/compare/).
+
 > Full docs and a quickstart at **[giant.build](https://giant.build)**.
 
 ## Install
