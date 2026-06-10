@@ -194,15 +194,15 @@ impl Respond for GhaService {
                     let hit = self.blobs.lock().unwrap().contains_key(&key);
                     ResponseTemplate::new(200).set_body_json(serde_json::json!({
                         "ok": hit,
-                        "signedDownloadUrl": if hit { format!("{base}/blob/{key}") } else { String::new() },
+                        "signed_download_url": if hit { format!("{base}/blob/{key}") } else { String::new() },
                     }))
                 }
                 "CreateCacheEntry" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "ok": true,
-                    "signedUploadUrl": format!("{base}/upload/{key}"),
+                    "signed_upload_url": format!("{base}/upload/{key}"),
                 })),
                 "FinalizeCacheEntryUpload" => ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"ok": true, "entryId": "1"})),
+                    .set_body_json(serde_json::json!({"ok": true, "entry_id": "1"})),
                 _ => ResponseTemplate::new(404),
             };
         }

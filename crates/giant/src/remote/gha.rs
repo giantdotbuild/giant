@@ -85,31 +85,33 @@ pub(super) fn cas_key(hash: &ContentHash) -> String {
     format!("giant-cas-{}", hash.to_hex())
 }
 
-// --- Twirp wire shapes (proto3 JSON: lowerCamelCase) ------------------------
+// --- Twirp wire shapes ------------------------------------------------------
+//
+// The service emits original proto field names (snake_case), not the
+// canonical proto3-JSON lowerCamelCase - matching the field names the
+// BuildKit client uses against the same endpoints.
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct EntryRequest<'a> {
     key: &'a str,
     version: &'a str,
 }
 
 #[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(default)]
 struct DownloadUrlResponse {
     ok: bool,
     signed_download_url: String,
 }
 
 #[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(default)]
 struct CreateEntryResponse {
     ok: bool,
     signed_upload_url: String,
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct FinalizeRequest<'a> {
     key: &'a str,
     version: &'a str,
@@ -117,7 +119,7 @@ struct FinalizeRequest<'a> {
 }
 
 #[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(default)]
 struct FinalizeResponse {
     ok: bool,
 }
