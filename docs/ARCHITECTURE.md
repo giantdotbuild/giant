@@ -89,9 +89,12 @@ config compose without the engine learning anything about either.
 `giant.<name>.yaml` files, one filename infix per generator. The blessed
 generator embeds a Starlark interpreter: a `giant.star` describes how to turn
 the tree into targets, calling a `target()` builtin that emits the typed wire
-struct the engine reads. Language opinions - how to enumerate Go packages, how
-to lay out a Docker build - live in Starlark, shipped as a standard library,
-never compiled into the engine.
+struct the engine reads. The interpreter lives in the `giant-gen` binary
+only - the engine loads YAML and cannot evaluate a script - and the
+generated files are committed, so building a checkout never involves a
+generator. Language opinions - how to enumerate Go packages, how to lay out
+a Docker build - live in Starlark, shipped as a standard library, never
+compiled into the engine.
 
 The standard library lives in its own repo (giantdotbuild/giant-std) so it can
 move faster than the binaries. A workspace pins it with a `std:` block in the

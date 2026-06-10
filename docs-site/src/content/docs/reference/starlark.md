@@ -10,6 +10,13 @@ builtin. Language- and tool-specific opinion lives in Starlark on top -
 the [std collection](https://github.com/giantdotbuild/giant-std) or your
 own modules - never in the host.
 
+Starlark exists only here, inside the `giant-gen` binary, and only to
+produce YAML. The engine loads the committed `giant.<infix>.yaml` files and
+has no interpreter to evaluate anything else; a build never runs a
+generator. See [Generating config](/guides/generating-config/) for the
+workflow that follows from that (commit the output, gate drift in CI with
+`giant gen --check`).
+
 ## The contract
 
 A generator script defines `generate(ws)`. The host evaluates the script,

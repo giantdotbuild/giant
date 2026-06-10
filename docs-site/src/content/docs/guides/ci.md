@@ -38,6 +38,27 @@ Notes:
 - `--quiet` strips per-target lines; you see only failures plus the
   summary.
 
+## Guard generated config
+
+If the repo [generates config](/guides/generating-config/), the generated
+`giant.<name>.yaml` files are committed, so build and test jobs run from
+the checkout as-is - no generator installed, no generation step. Add one
+job that catches drift between the generators and what's committed:
+
+```yaml
+  gen-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: yourorg/install-giant@v1
+      - run: giant gen --check
+```
+
+This job is the exception that needs `giant-gen` on PATH, plus whatever
+toolchains the generators query (`go list`, `cargo metadata`). It exits
+non-zero with a per-generator report when a `giant gen` run would change
+the committed files.
+
 ## Bring your own remote cache
 
 Set up a [bazel-remote](https://github.com/buchgr/bazel-remote) (or

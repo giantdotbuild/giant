@@ -15,6 +15,22 @@ normal [package scan](/concepts/packages/), unable to tell generated config
 from hand-written. This is the split Bazel uses (the engine reads `BUILD`
 files, Gazelle generates them) - discovery is not the engine's job.
 
+To be precise about where the boundary sits: the Starlark interpreter lives
+in the `giant-gen` binary and nowhere else. The engine loads YAML, full
+stop - it cannot evaluate a `giant.star` any more than `go build` can run
+Gazelle. Generation is a step you run when the tree's shape changes (a new
+package, a new service), and its output is ordinary config.
+
+**Commit every `giant.<name>.yaml`.** They relate to your `giant.star` the
+way generated protobuf stubs relate to their `.proto` files: derived,
+checked in, reviewed in diffs. (If you're coming from CMake or autotools,
+note the difference: their output is machine-specific and regenerated per
+build, while giant's generated config describes the tree, so it belongs in
+the repo.) Because the files are committed, a fresh checkout builds with
+just the engine and the build porcelain - `giant-gen` doesn't need to be
+installed where you only build, CI included. What CI should run instead is
+the [drift gate](#keeping-it-fresh-giant-gen---check) below.
+
 `giant gen` runs two kinds of generator: the built-in **Starlark host** (the
 integrated path), and **external commands** (any language, via a small
 contract). Most repos only need the first.
@@ -140,6 +156,11 @@ error: a generator is stale; run `giant gen <name>` and commit the result
 It reports each generator as `ok`, `DRIFT` (output would change), or
 `FAILED`, and exits non-zero if any drifted. This is the check Gazelle
 performs with `--mode=diff`, without the shell plumbing.
+
+This is the one CI job that does need `giant-gen` - and the toolchains your
+generators shell out to (`go list`, `cargo metadata`), since `--check`
+re-runs them. Build and test jobs run from the committed files and need
+neither.
 
 ## External generators (any language)
 
