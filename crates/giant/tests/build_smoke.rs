@@ -5,6 +5,9 @@ use std::process::Command;
 
 fn giant_bin() -> std::path::PathBuf {
     // Cargo sets CARGO_BIN_EXE_<name> for the bin of the package under test.
+    // `giant build` dispatches to a `giant-build` binary beside this one, and
+    // `cargo test` alone does not link other packages' bins - run
+    // `cargo build --workspace` first (CI does).
     let path = env!("CARGO_BIN_EXE_giant");
     std::path::PathBuf::from(path)
 }

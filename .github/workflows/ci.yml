@@ -15,5 +15,9 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --workspace --all-targets --features giant/remote -- -D warnings
+      # The smoke tests spawn `giant build`, which dispatches to the
+      # giant-build binary beside the giant binary. `cargo test` links bins
+      # only for packages with integration tests, so link them all first.
+      - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
       - run: cargo test --workspace --locked --features giant/remote
