@@ -4,6 +4,7 @@
 //! `GIANT_WORKSPACE` the root for generators that prefer not to rely on cwd).
 
 use crate::config::Generator;
+use crate::star::StdSource;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -36,21 +37,29 @@ async fn run_builtin(
     infix: &str,
     out_root: &Path,
     workspace_root: &Path,
+    std: &StdSource,
 ) -> Result<Vec<PathBuf>> {
     let script = workspace_root.join(script);
     let infix = infix.to_string();
     let out_root = out_root.to_path_buf();
     let root = workspace_root.to_path_buf();
-    tokio::task::spawn_blocking(move || crate::star::run(&script, &infix, &out_root, &root)).await?
+    let std = std.clone();
+    tokio::task::spawn_blocking(move || crate::star::run(&script, &infix, &out_root, &root, &std))
+        .await?
 }
 
 /// Run a generator with its output streamed live (used by `giant gen`).
 /// Returns whether it succeeded; failures are reported to stderr here so the
 /// caller only tallies them.
-pub async fn run_live(g: &Generator, workspace_root: &Path, out_root: &Path) -> Result<bool> {
+pub async fn run_live(
+    g: &Generator,
+    workspace_root: &Path,
+    out_root: &Path,
+    std: &StdSource,
+) -> Result<bool> {
     match g {
         Generator::Builtin { infix, script } => {
-            match run_builtin(script, infix, out_root, workspace_root).await {
+            match run_builtin(script, infix, out_root, workspace_root, std).await {
                 Ok(paths) => {
                     println!("{infix}\tgenerated {} file(s)", paths.len());
                     Ok(true)
@@ -96,10 +105,11 @@ pub async fn produce_quiet(
     g: &Generator,
     workspace_root: &Path,
     out_root: &Path,
+    std: &StdSource,
 ) -> Result<Produced> {
     match g {
         Generator::Builtin { infix, script } => {
-            match run_builtin(script, infix, out_root, workspace_root).await {
+            match run_builtin(script, infix, out_root, workspace_root, std).await {
                 Ok(_) => Ok(Produced::Ran),
                 Err(e) => Ok(Produced::Failed(format!("{e:#}"))),
             }

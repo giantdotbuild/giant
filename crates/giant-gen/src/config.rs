@@ -14,6 +14,27 @@ use std::path::{Path, PathBuf};
 struct File {
     #[serde(default)]
     generate: Vec<Decl>,
+    #[serde(default)]
+    std: Option<StdDecl>,
+}
+
+/// The `std:` block: where `@std//` modules come from. `ref` pins a tag or
+/// commit of the collection repo; the porcelain fetches a module once per
+/// (repo, ref) and caches it under the engine cache dir.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StdDecl {
+    /// `owner/name` on GitHub. Defaults to the official collection.
+    #[serde(default = "default_std_repo")]
+    pub repo: String,
+    /// A tag or commit sha. Required: an unpinned collection would make
+    /// generation non-reproducible.
+    #[serde(rename = "ref")]
+    pub rev: String,
+}
+
+fn default_std_repo() -> String {
+    crate::star::DEFAULT_STD_REPO.into()
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +101,29 @@ pub fn load(root: &Path) -> Result<Vec<Generator>> {
     resolve(decls)
 }
 
+/// Read the `std:` block from the workspace's root config, if declared.
+/// Validates the shapes here so a bad pin fails before any generator runs.
+pub fn load_std(root: &Path) -> Result<Option<StdDecl>> {
+    let Some(path) = find_config(root) else {
+        return Ok(None);
+    };
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let file: File = parse(&path, &raw)?;
+    let Some(decl) = file.std else {
+        return Ok(None);
+    };
+    let seg_ok = crate::star::safe_segment;
+    match decl.repo.split('/').collect::<Vec<_>>()[..] {
+        [owner, name] if seg_ok(owner) && seg_ok(name) => {}
+        _ => bail!("std.repo '{}' is not an owner/name pair", decl.repo),
+    }
+    if !seg_ok(&decl.rev) {
+        bail!("std.ref '{}' is not a tag or commit", decl.rev);
+    }
+    Ok(Some(decl))
+}
+
 fn find_config(root: &Path) -> Option<PathBuf> {
     ["giant.yaml", "giant.yml", "giant.json"]
         .into_iter()
@@ -134,6 +178,50 @@ fn is_name_safe(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn std(yaml: &str) -> Result<Option<StdDecl>> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("giant.yaml"), yaml).unwrap();
+        load_std(dir.path())
+    }
+
+    #[test]
+    fn std_block_defaults_the_repo() {
+        let decl = std("std: { ref: v3 }").unwrap().unwrap();
+        assert_eq!(decl.repo, crate::star::DEFAULT_STD_REPO);
+        assert_eq!(decl.rev, "v3");
+    }
+
+    #[test]
+    fn std_block_takes_an_explicit_repo() {
+        let decl = std("std: { repo: acme/std, ref: 0a1b2c3 }")
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.repo, "acme/std");
+    }
+
+    #[test]
+    fn absent_std_block_is_none() {
+        assert!(std("workspace: { name: x }").unwrap().is_none());
+    }
+
+    #[test]
+    fn std_block_rejects_a_bad_repo() {
+        let e = std("std: { repo: not-a-pair, ref: v1 }").unwrap_err();
+        assert!(e.to_string().contains("owner/name"), "{e}");
+    }
+
+    #[test]
+    fn std_block_rejects_a_path_like_ref() {
+        let e = std("std: { ref: \"../up\" }").unwrap_err();
+        assert!(e.to_string().contains("std.ref"), "{e}");
+    }
+
+    #[test]
+    fn std_block_rejects_unknown_fields() {
+        let e = std("std: { ref: v1, rev: v1 }").unwrap_err();
+        assert!(e.to_string().contains("rev"), "{e}");
+    }
 
     fn gens(yaml: &str) -> Result<Vec<Generator>> {
         let file: File = serde_yaml_ng::from_str(yaml).unwrap();

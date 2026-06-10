@@ -51,7 +51,9 @@ async fn real_main() -> Result<i32> {
     // positional generator list keeps its plain shape (`giant gen [names...]`).
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("vendor") {
-        return vendor(&args[1..]);
+        // Off the runtime thread: vendoring a pinned module does blocking I/O.
+        let names = args[1..].to_vec();
+        return tokio::task::spawn_blocking(move || vendor(&names)).await?;
     }
 
     let cli = Cli::parse();
@@ -66,11 +68,24 @@ async fn real_main() -> Result<i32> {
         return Ok(0);
     }
 
+    let std = std_source(&cfg, &root)?;
     if cli.check {
-        check::run(&selected, &root, &cfg.state.dir).await
+        check::run(&selected, &root, &cfg.state.dir, &std).await
     } else {
-        run_all(&selected, &root).await
+        run_all(&selected, &root, &std).await
     }
+}
+
+/// The workspace's `@std//` resolver: the on-disk override plus the `std:`
+/// pin from the root config, caching fetched modules under the cache dir.
+fn std_source(cfg: &giant::Config, root: &Path) -> Result<star::StdSource> {
+    let pin = config::load_std(root)?
+        .map(|d| -> Result<star::StdPin> {
+            let cache = giant::resolve_cache_dir(&cfg.cache.dir)?.join("std");
+            Ok(star::StdPin::new(d.repo, d.rev, cache))
+        })
+        .transpose()?;
+    Ok(star::StdSource::detect(pin))
 }
 
 /// Copy stdlib modules from giant's std collection into the workspace's `star/`
@@ -80,13 +95,12 @@ fn vendor(names: &[String]) -> Result<i32> {
     if names.is_empty() {
         anyhow::bail!("giant gen vendor: name a module, e.g. `giant gen vendor go.star`");
     }
-    let (_, root) = giant::Config::load_root(None)?;
-    let dir = star::std_dir();
+    let (cfg, root) = giant::Config::load_root(None)?;
+    let std = std_source(&cfg, &root)?;
     let dest = root.join("star");
     std::fs::create_dir_all(&dest)?;
     for name in names {
-        let src = star::std_source(dir.as_deref(), name)?
-            .ok_or_else(|| anyhow::anyhow!("no std module named '{name}'"))?;
+        let src = std.source(name)?;
         std::fs::write(dest.join(name), src).with_context(|| format!("vendoring {name}"))?;
         eprintln!("vendored {name} -> star/{name}");
     }
@@ -111,13 +125,14 @@ fn select(all: &[Generator], names: &[String]) -> Result<Vec<Generator>> {
 }
 
 /// Run every selected generator concurrently, each writing in place.
-async fn run_all(selected: &[Generator], root: &Path) -> Result<i32> {
+async fn run_all(selected: &[Generator], root: &Path, std: &star::StdSource) -> Result<i32> {
     let mut handles = Vec::with_capacity(selected.len());
     for g in selected {
         let g = g.clone();
         let root = root.to_path_buf();
+        let std = std.clone();
         handles.push(tokio::spawn(async move {
-            run::run_live(&g, &root, &root).await
+            run::run_live(&g, &root, &root, &std).await
         }));
     }
     let mut failures = 0;

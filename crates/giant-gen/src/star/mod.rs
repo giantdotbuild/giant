@@ -10,6 +10,7 @@ mod emit;
 mod io;
 mod json;
 mod load;
+mod source;
 mod value;
 
 use std::path::{Path, PathBuf};
@@ -19,35 +20,25 @@ use starlark::environment::{GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
 use starlark::syntax::{AstModule, Dialect};
 
-pub(crate) use load::{std_dir, std_source};
+pub(crate) use source::{DEFAULT_STD_REPO, StdPin, StdSource, safe_segment};
 pub(crate) use value::Emitted;
 use value::{Collector, Ws, host_globals};
 
 /// Evaluate `script`, calling `generate(ws)`; collect every `target()` it
 /// registers. `target()` records into a side collector as it runs, so the
 /// return value of `generate` is not used (a target is emitted when built).
-pub(crate) fn generate(script: &Path, root: &Path) -> Result<Vec<Emitted>> {
-    generate_with_std(script, root, load::std_dir())
-}
-
-/// `generate` with an explicit std collection dir overriding the embedded
-/// modules (the production path resolves it from `GIANT_STD` / install
-/// layout; tests point it at the in-repo `std/` or pass `None`).
-pub(crate) fn generate_with_std(
-    script: &Path,
-    root: &Path,
-    std_dir: Option<PathBuf>,
-) -> Result<Vec<Emitted>> {
+pub(crate) fn generate(script: &Path, root: &Path, std: &StdSource) -> Result<Vec<Emitted>> {
     let src =
         std::fs::read_to_string(script).with_context(|| format!("reading {}", script.display()))?;
     let disp = script.display().to_string();
     let ast = AstModule::parse(&disp, src, &Dialect::Standard).map_err(star_err)?;
     let globals = GlobalsBuilder::standard().with(host_globals).build();
     let root = root.to_path_buf();
+    let std = std.clone();
 
     Module::with_temp_heap(move |module| -> Result<Vec<Emitted>> {
         let collector = Collector::default();
-        let loader = load::Loader::new(&root, &globals, std_dir);
+        let loader = load::Loader::new(&root, &globals, std);
         let mut eval = Evaluator::new(&module);
         eval.set_loader(&loader);
         eval.extra = Some(&collector);
@@ -74,8 +65,9 @@ pub(crate) fn run(
     infix: &str,
     out_root: &Path,
     root: &Path,
+    std: &StdSource,
 ) -> Result<Vec<PathBuf>> {
-    let targets = generate(script, root)?;
+    let targets = generate(script, root, std)?;
     emit::write(targets, infix, out_root)
 }
 

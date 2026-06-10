@@ -39,16 +39,40 @@ $ giant gen            # writes the giant.*.yaml files in place
 $ giant build //...    # the engine reads what was written
 ```
 
-Giant ships a standard library of generators - `cargo.star`, `go.star` -
-that you `load(...)`. They're plain Starlark built on a generic host: a
-`ws` handle (`ws.exec`, `ws.glob`, `ws.read`, `ws.rel`), `parse_json` /
-`parse_yaml`, and a `target()` builtin that emits a target. The
-language-specific opinion lives in editable Starlark, leaving the engine
-generic - `cargo.star` derives targets from `cargo metadata` the same way
-`go.star`
-derives them from `go list`.
+Giant's standard library of generators - `cargo.star`, `go.star`, and
+whatever lands next - lives in its own repo,
+[giantdotbuild/giant-std](https://github.com/giantdotbuild/giant-std), so it
+can grow without waiting for a giant release. They're plain Starlark built
+on a generic host: a `ws` handle (`ws.exec`, `ws.glob`, `ws.read`,
+`ws.rel`), `parse_json` / `parse_yaml`, and a `target()` builtin that emits
+a target. The language-specific opinion lives in editable Starlark, leaving
+the engine generic - `cargo.star` derives targets from `cargo metadata` the
+same way `go.star` derives them from `go list`.
 
-To pin and edit a std generator, vendor it into your repo:
+### Pinning the std collection
+
+`@std//` needs to know which version of the collection you mean. Pin one in
+the root `giant.yaml`:
+
+```yaml
+std:
+  ref: v3          # a giant-std tag or commit sha
+  # repo: giantdotbuild/giant-std   (the default; any owner/name works)
+```
+
+Each module is fetched once per (repo, ref) and cached under the cache dir,
+so generation only touches the network the first time a pin is seen -
+after that it runs offline. Bumping `ref` is how you take a new std
+version; an unpinned "latest" doesn't exist, since it would make
+generation non-reproducible.
+
+Two local overrides take precedence over the pin: a `GIANT_STD` env var
+pointing at a collection directory, and vendored copies (below).
+
+### Vendoring
+
+To pin a module in-repo and edit it - or to generate fully offline -
+vendor it:
 
 ```console
 $ giant gen vendor cargo.star      # copies it to star/cargo.star

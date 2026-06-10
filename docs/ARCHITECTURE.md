@@ -93,6 +93,13 @@ struct the engine reads. Language opinions - how to enumerate Go packages, how
 to lay out a Docker build - live in Starlark, shipped as a standard library,
 never compiled into the engine.
 
+The standard library lives in its own repo (giantdotbuild/giant-std) so it can
+move faster than the binaries. A workspace pins it with a `std:` block in the
+root config (a tag or commit, no floating "latest"); `@std//` modules are
+fetched once per pin into the cache dir and read from disk after that, so
+generation stays offline past the first fetch. A `GIANT_STD` directory or a
+vendored copy in the repo (`giant gen vendor`) overrides the pin entirely.
+
 Emission is deterministic, so `giant gen --check` is a byte-diff gate: it
 regenerates into a scratch directory and fails if the result differs from
 what's committed, which keeps generated config from drifting from its source.

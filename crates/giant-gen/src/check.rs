@@ -12,6 +12,7 @@
 use crate::config::Generator;
 use crate::link;
 use crate::run;
+use crate::star::StdSource;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::collections::BTreeMap;
@@ -19,7 +20,12 @@ use std::path::Path;
 
 /// Run `--check` over the selected generators, printing a per-generator
 /// report. Returns the process exit code (0 = all clean).
-pub async fn run(generators: &[Generator], root: &Path, state_dir: &str) -> Result<i32> {
+pub async fn run(
+    generators: &[Generator],
+    root: &Path,
+    state_dir: &str,
+    std: &StdSource,
+) -> Result<i32> {
     // A mirror of the committed config tree; the link pass needs the whole
     // workspace (cross-generator and hand-written producers) to resolve deps.
     let merged = root.join(state_dir).join("gen-check").join("_merged");
@@ -32,7 +38,7 @@ pub async fn run(generators: &[Generator], root: &Path, state_dir: &str) -> Resu
     for g in generators {
         let scratch = root.join(state_dir).join("gen-check").join(g.name());
         reset_dir(&scratch)?;
-        match run::produce_quiet(g, root, &scratch).await? {
+        match run::produce_quiet(g, root, &scratch, std).await? {
             run::Produced::Failed(msg) => {
                 produced.push((g.name().to_string(), Outcome::Failed(msg)))
             }

@@ -33,8 +33,7 @@
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
         # crane's `cleanCargoSource` keeps only Rust/Cargo files, which would
-        # drop the Starlark std collection (`std/*.star`) that giant-gen ships
-        # and the `.star` fixtures its tests read. Keep `.star` files.
+        # drop the `.star` fixtures giant-gen's tests read. Keep `.star` files.
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           name = "giant-source";
@@ -119,8 +118,8 @@
         # One crate, three bins: giant-build, giant-test, giant-verify.
         giant-build = mkBin { name = "giant-build"; };
 
-        # The Starlark std collection is compiled into the binary;
-        # GIANT_STD stays available as an override for a local copy.
+        # `@std//` modules come from the pinned giant-std repo (or a
+        # GIANT_STD / vendored copy); the binary itself ships no data.
         giant-gen = mkBin { name = "giant-gen"; };
 
         # Meta-package: `nix profile install .` drops all three

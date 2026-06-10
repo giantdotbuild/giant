@@ -21,6 +21,10 @@ cache:
   replay_logs: true
   log_capture_cap_bytes: 5242880
 
+std:                          # giant-gen: pin for @std// generator modules
+  ref: v3                     # giant-std tag or commit sha
+  repo: giantdotbuild/giant-std
+
 remote:                       # feature-gated; only with --features remote
   enabled: true               # must be true; remote is a no-op otherwise
   url: "https://cache.example.com"
@@ -61,7 +65,7 @@ the full model.
 The **root** `giant.yaml` is mandatory. It marks the workspace (what `//`
 resolves against) and is the only file that may carry the workspace-global
 sections - `workspace`, `cache`, `remote` - plus the porcelain-owned
-`tasks:` / `services:` blocks. A **nested package file carries only
+`tasks:` / `services:` / `std:` blocks. A **nested package file carries only
 `targets:`**; putting a root-only section (`workspace`, `cache`, `remote`,
 `tasks`, `services`) in a package file fails the config load loudly; it is
 never silently ignored.
@@ -148,6 +152,16 @@ With it the renderer (and any porcelain on the [event protocol](/reference/event
 sees the same `target.log` line stream a fresh build would have
 produced. See [Log capture and replay](/reference/cache-layout/#log-capture-and-replay)
 for storage details.
+
+## `std`
+
+Root file only. Owned by the `giant-gen` porcelain: pins the
+[`@std//` generator collection](/guides/generating-config/#pinning-the-std-collection).
+
+| Field | Default | Description |
+|---|---|---|
+| `ref` | - | Required. A giant-std tag or commit sha. Modules are fetched once per (repo, ref) and cached under the cache dir. |
+| `repo` | `giantdotbuild/giant-std` | The collection's GitHub `owner/name`. |
 
 ## `remote` (feature-gated)
 
