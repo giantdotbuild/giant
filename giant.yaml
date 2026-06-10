@@ -10,6 +10,13 @@ workspace:
 cache:
   dir: .giant/cache
 
+# On GitHub Actions, share build results through the runner's own cache
+# service (the CI workflow exports the credentials). Outside Actions this
+# is inactive, and a giant built without the remote feature ignores it.
+remote:
+  enabled: true
+  kind: github_actions
+
 # Sandbox extras for this repo's Nix/devenv toolchain (only consulted under
 # `giant --sandbox` / `giant verify`). Core grants the generic FHS roots and a
 # generic env allowlist; these add what a devenv environment needs - the Nix

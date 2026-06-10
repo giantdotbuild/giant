@@ -26,6 +26,34 @@ jobs:
       - run: cargo build --workspace --locked --features giant/remote
       - run: cargo test --workspace --locked --features giant/remote
 
+  # The dogfood chain: the dev environment from devenv (via Determinate
+  # Nix), the repo built by giant itself, results shared through the
+  # github_actions remote cache. An unchanged target on a later run is a
+  # REMOTE hit that skips cargo/npm entirely. Bootstrap is a cargo debug
+  # build until a release ships that understands `remote.kind`.
+  dogfood:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/determinate-nix-action@v3
+        with:
+          extra-conf: |
+            extra-substituters = https://devenv.cachix.org
+            extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=
+      - run: nix profile add nixpkgs#devenv
+      - name: Expose the cache credentials to giant
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - name: Bootstrap giant
+        run: devenv shell bash -- -c 'cargo build --locked -p giant -p giant-build --features giant/remote'
+      - name: Build the workspace with giant
+        run: |
+          # shellcheck disable=SC2016  # the inner shell expands these
+          devenv shell bash -- -c 'PATH="$PWD/target/debug:$PATH" giant build --quiet'
+
   # The github_actions remote backend against the real cache service - the
   # signed-URL flow can't be fully faked, so prove it where it runs.
   gha-cache:
