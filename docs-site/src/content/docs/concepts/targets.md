@@ -10,7 +10,8 @@ inputs → command → outputs
 ```
 
 A target is one instance of that shape. A build graph is a DAG of
-targets connected by inferred or explicit dependencies.
+targets connected by `deps:` edges - written by hand, or filled in by a
+[generator](/guides/generating-config/).
 
 Targets are declared in `giant.yaml` files spread across the tree - each
 directory's file declares that directory's package. The engine scans and
@@ -50,7 +51,7 @@ This target lives in `cmd/server/giant.yaml`, so its label is
 | `name` | Local name, unique within the package; the engine identity is the `//package:name` label. Required. |
 | `inputs` | File globs whose matched files affect the cache key. Package-relative; `//` anchors to the workspace root. |
 | `outputs` | Files the command produces, relative to `cwd`. Cached. |
-| `deps` | Explicit target dependencies (most are inferred - see below). |
+| `deps` | Target dependencies, as labels. Written by hand, or filled in by generation - see [Dependencies](#dependencies). |
 | `command` | Shell command, run from `cwd`. Required unless `exists` succeeds. `//` is **not** rewritten here - the shell sees it verbatim. Write paths relative to `cwd`, or use `$GIANT_WORKSPACE_ROOT` / `$GIANT_PACKAGE_DIR` (see [below](#environment-giant-sets-for-every-command)). |
 | `cwd` | Working directory. Default: the package directory. `//` anchors to the workspace root. |
 | `env` | Environment variables. Hashed into the cache key. |
@@ -86,11 +87,13 @@ lockfile without walking up with `../`.
 
 Every matched file's content hash contributes to the cache key.
 
-### Output references (inferred deps)
+### Output references
 
-You don't write these explicitly - Giant infers them. If target B's
-input glob matches target A's output file, B automatically depends on
-A.
+When target B's input glob matches a file target A produces, B needs
+`deps:` naming A so A runs first. In hand-written config you declare
+that edge yourself; in [generated](/guides/generating-config/) config
+the link pass finds the match and writes the `deps:` line for you. See
+[Dependencies](#dependencies) below.
 
 ## Outputs
 
@@ -140,37 +143,32 @@ side effects (e.g. linting, a `docker push`). Their cache hit means
 
 ## Dependencies
 
-Two flavors:
+The engine reads `deps:` exactly as written and never invents an edge.
+What varies is who writes the line.
 
-### Inferred (the common case)
+### By hand
 
-If target B's `inputs:` glob matches a file produced by target A's
-`outputs:`, B depends on A. Giant works this out at graph-build time
-by walking the cross-product.
+At five or ten targets, the edges are the easy part of the config - you
+know which target feeds which, and you say so:
 
 ```yaml
 # proto/giant.yaml
 - name: "gen"
   inputs: ["**/*.proto"]
   outputs: ["//gen/api.pb.go"]
-  tags: ["kind=gen"]
   command: "..."
 
 # cmd/server/giant.yaml
 - name: "server"
   inputs: ["**/*.go", "//gen/**/*.go"]
   outputs: ["//bin/server"]
-  tags: ["lang=go", "kind=bin"]
+  deps: ["//proto:gen"]
   cwd: "//"
   command: "go build -o bin/server ./cmd/server"
-  # `deps: ["//proto:gen"]` is inferred - //gen/api.pb.go matches //gen/**/*.go.
 ```
 
-### Explicit
-
-Use `deps:` when there's a dependency Giant can't infer - usually
-because the upstream target produces no file the downstream target
-reads:
+`deps:` is also how you order targets that share no file at all - the
+upstream produces nothing the downstream reads:
 
 ```yaml
 - name: "production"
@@ -180,6 +178,23 @@ reads:
   deps: ["//docker:api", "//docker:worker"]
   command: "kubectl apply -f k8s/"
 ```
+
+### Filled in by generation
+
+Hundreds of targets is where maintaining edges by hand stops scaling,
+and that's exactly where [generation](/guides/generating-config/) takes
+over. After generators emit, a **link pass** resolves every target's
+input globs against every target's outputs and writes the matches into
+the generated files as ordinary `deps:` lines - in the example above,
+`//gen/api.pb.go` matching `//gen/**/*.go` becomes a written-down
+`deps: ["//proto:gen"]` in the generated `cmd/server` file.
+
+Because this happens offline, the inferred edge is visible: a committed
+line you read in code review, with `giant gen --check` keeping it from
+drifting. The link pass reads hand-written targets as producers too (a
+generated target consuming a hand-written target's output gets its
+edge), but it only ever writes into generated files - hand-written
+targets keep their `deps:` exactly as you authored them.
 
 ## The `exists` escape hatch
 
