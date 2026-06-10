@@ -130,7 +130,10 @@ giant build //services/...       # everything under services/
 ```
 
 When the service count grows past what you want to hand-write, generate
-the per-service `giant.yaml` files offline and check them in - see
+the per-service files instead: the std collection's
+[`docker.star`](https://github.com/giantdotbuild/giant-std/blob/main/docs/docker.md)
+emits exactly these targets - from co-located Dockerfiles, or from one
+shared template parameterized per service. See
 [Generating config](/guides/generating-config/).
 
 ## Multi-stage caching

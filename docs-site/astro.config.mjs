@@ -66,6 +66,7 @@ export default defineConfig({
           items: [
             { label: 'CLI', slug: 'reference/cli' },
             { label: 'giant.yaml', slug: 'reference/config' },
+            { label: 'Starlark host', slug: 'reference/starlark' },
             { label: 'Event protocol (NDJSON)', slug: 'reference/events' },
             { label: 'Cache layout', slug: 'reference/cache-layout' },
           ],

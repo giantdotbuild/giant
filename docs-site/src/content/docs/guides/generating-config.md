@@ -39,15 +39,19 @@ $ giant gen            # writes the giant.*.yaml files in place
 $ giant build //...    # the engine reads what was written
 ```
 
-Giant's standard library of generators - `cargo.star`, `go.star`, and
-whatever lands next - lives in its own repo,
-[giantdotbuild/giant-std](https://github.com/giantdotbuild/giant-std), so it
-can grow without waiting for a giant release. They're plain Starlark built
-on a generic host: a `ws` handle (`ws.exec`, `ws.glob`, `ws.read`,
-`ws.rel`), `parse_json` / `parse_yaml`, and a `target()` builtin that emits
-a target. The language-specific opinion lives in editable Starlark, leaving
-the engine generic - `cargo.star` derives targets from `cargo metadata` the
-same way `go.star` derives them from `go list`.
+Giant's standard library of generators - `cargo.star`, `go.star`,
+`docker.star`, `controllergen.star`, and whatever lands next - lives in its
+own repo, [giantdotbuild/giant-std](https://github.com/giantdotbuild/giant-std),
+so it can grow without waiting for a giant release. Each module's usage and
+expected output is documented
+[in that repo](https://github.com/giantdotbuild/giant-std/tree/main/docs).
+They're plain Starlark built on a generic host - the full primitive surface
+is in the [Starlark host reference](/reference/starlark/) - and each is
+layered the same way: detectors that derive facts from the tree, emitters
+that shape one correct target, and a floor that wires them into the common
+convention. When a floor doesn't fit your repo, call the detectors and
+emitters from your own `giant.star` instead; the floors are a screenful of
+Starlark each and read as worked examples.
 
 ### Pinning the std collection
 
@@ -92,6 +96,32 @@ then load it by its repo-local path instead of `@std//`:
 ```python
 load("star/cargo.star", "cargo_targets")
 ```
+
+## Workspace config
+
+The root `giant.yaml` is open at the top level: the engine validates the
+sections it owns and ignores keys it doesn't recognise. That makes it the
+natural home for your generator's own configuration - a declarative block
+your `giant.star` reads back, instead of sidecar config files:
+
+```yaml
+# giant.yaml
+images:
+  registry: registry.example.com/platform
+  exclude: [load-tester]
+```
+
+```python
+def generate(ws):
+    cfg = parse_yaml(ws.read("giant.yaml")).get("images", {})
+    registry = cfg.get("registry", "registry.local")
+    ...
+```
+
+Default every field in the generator so an absent block means "the
+convention, unmodified", and prefer keys that override the convention (a
+curated name, an exclusion) over keys that restate what the tree already
+says.
 
 ## Keeping it fresh: `giant gen --check`
 
