@@ -196,5 +196,13 @@
 
         formatter = pkgs.nixfmt-rfc-style;
       }
-    );
+    )
+    // {
+      # Overlay for consumers who want `pkgs.giant` / `pkgs.giant-suite`
+      # in their own nixpkgs (devenv overlays, NixOS configs).
+      overlays.default = final: _prev: {
+        giant = self.packages.${final.stdenv.hostPlatform.system}.giant;
+        giant-suite = self.packages.${final.stdenv.hostPlatform.system}.giant-suite;
+      };
+    };
 }

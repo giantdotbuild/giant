@@ -91,6 +91,29 @@ The flake doesn't replace `devenv.nix` - devenv stays the dev shell
 (`devenv shell` for the full toolchain). The flake's `devShells.default`
 is a thin fallback for people who don't run devenv.
 
+### In a devenv project
+
+Add the flake as an input and put the suite in your packages - two
+edits, and every `devenv shell` has the whole toolchain:
+
+```yaml
+# devenv.yaml
+inputs:
+  giant:
+    url: github:giantdotbuild/giant
+```
+
+```nix
+# devenv.nix
+{ inputs, pkgs, ... }:
+{
+  packages = [ inputs.giant.packages.${pkgs.stdenv.system}.giant-suite ];
+}
+```
+
+The flake also exposes `overlays.default` for setups that prefer
+`pkgs.giant` / `pkgs.giant-suite` via an overlay.
+
 ## Verify the install
 
 ```console

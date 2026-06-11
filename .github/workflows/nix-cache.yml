@@ -1,0 +1,40 @@
+name: Nix cache
+
+# Build the flake packages and push the closures to the Cachix binary
+# cache, so `nix profile install github:giantdotbuild/giant` (and devenv
+# inputs) substitute instead of compiling. Needs the CACHIX_AUTH_TOKEN
+# repository secret (a write-scoped auth token for the cache); signing is
+# handled by Cachix server-side for caches it manages.
+
+# No tag trigger: releases are tagged on commits already pushed to main,
+# so their closures are cached by the main-push run.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/nix-cache.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest # x86_64-linux
+          - runner: ubuntu-24.04-arm # aarch64-linux
+          - runner: macos-15 # aarch64-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - uses: cachix/cachix-action@v16
+        with:
+          name: giantdotbuild
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - run: nix build .#giant-suite
