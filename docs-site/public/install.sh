@@ -53,16 +53,16 @@ fi
 mkdir -p "$DEST"
 
 # --- resolve version ---
+# Follow the /releases/latest redirect to .../releases/tag/<tag> instead of
+# asking the GitHub API: no rate limit, which matters on shared-IP machines
+# (CI runners hit anonymous API 403s routinely).
 if [ "$VERSION" = "latest" ]; then
-  RELEASE_URL="https://api.github.com/repos/$REPO/releases/latest"
-  if command -v jq >/dev/null 2>&1; then
-    VERSION="$(curl -fsSL "$RELEASE_URL" | jq -r .tag_name)"
-  else
-    VERSION="$(curl -fsSL "$RELEASE_URL" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
-  fi
-  [ -n "$VERSION" ] || err "could not resolve latest version"
-  # Strip leading "v" if present.
-  VERSION="${VERSION#v}"
+  LOCATION="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")"
+  VERSION="${LOCATION##*/}"
+  case "$VERSION" in
+    v[0-9]*) VERSION="${VERSION#v}" ;;
+    *) err "could not resolve latest version (got '$LOCATION')" ;;
+  esac
 fi
 
 # --- download + verify ---
