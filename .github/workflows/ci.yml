@@ -89,7 +89,12 @@ jobs:
             > "$ws/giant.yaml"
           export PATH="$PWD/target/debug:$PATH"
           (cd "$ws" && giant build)
-          rm -rf "$ws/cache" "$ws/out.txt"
-          (cd "$ws" && giant build) | tee second.log
-          grep -q REMOTE second.log
+          # A freshly finalized entry can lag readers for a moment; poll.
+          for i in 1 2 3 4 5; do
+            rm -rf "$ws/cache" "$ws/out.txt"
+            (cd "$ws" && giant build) | tee second.log
+            grep -q REMOTE second.log && break
+            [ "$i" = 5 ] && { echo "no REMOTE hit after $i attempts"; exit 1; }
+            sleep 3
+          done
           grep -q 'run' "$ws/out.txt"

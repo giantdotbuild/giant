@@ -160,11 +160,13 @@ targets:
 
 /// In-memory GitHub Actions cache service: the three Twirp endpoints plus
 /// the signed-URL blob store they hand out. Twirp calls must carry the
-/// runtime token; the signed URLs must not.
+/// runtime token; the signed URLs must not. The first Twirp call is
+/// answered 429 to exercise the client's retry.
 #[derive(Clone, Default)]
 struct GhaService {
     base: Arc<Mutex<String>>,
     blobs: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    rate_limited_once: Arc<std::sync::atomic::AtomicBool>,
 }
 
 const TWIRP_BASE: &str = "/twirp/github.actions.results.api.v1.CacheService/";
@@ -182,6 +184,12 @@ impl Respond for GhaService {
                 .is_some_and(|v| v == "Bearer t-token");
             if !authed {
                 return ResponseTemplate::new(401);
+            }
+            if !self
+                .rate_limited_once
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                return ResponseTemplate::new(429).insert_header("retry-after", "1");
             }
             let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
             let key = body["key"].as_str().unwrap_or_default().to_string();

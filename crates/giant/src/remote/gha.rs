@@ -124,6 +124,10 @@ struct FinalizeResponse {
     ok: bool,
 }
 
+/// Attempts per Twirp call: the service rate-limits bursts, and uploads run
+/// in the background where a few seconds of backoff cost nothing.
+const ATTEMPTS: u32 = 3;
+
 async fn twirp<T: DeserializeOwned>(
     client: &Client,
     cfg: &GhaConfig,
@@ -131,21 +135,44 @@ async fn twirp<T: DeserializeOwned>(
     body: &impl Serialize,
 ) -> Result<T, GhaError> {
     let url = format!("{}/{SERVICE}/{method}", cfg.results_url);
-    let resp = client
-        .post(&url)
-        .bearer_auth(&cfg.token)
-        .json(body)
-        .send()
-        .await?;
-    match resp.status() {
-        StatusCode::OK => Ok(resp.json::<T>().await?),
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(GhaError::Auth),
-        status => Err(GhaError::Twirp {
-            method,
-            status,
-            body: resp.text().await.unwrap_or_default(),
-        }),
+    let mut backoff = std::time::Duration::from_secs(1);
+    for attempt in 1..=ATTEMPTS {
+        let resp = client
+            .post(&url)
+            .bearer_auth(&cfg.token)
+            .json(body)
+            .send()
+            .await?;
+        match resp.status() {
+            StatusCode::OK => return Ok(resp.json::<T>().await?),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => return Err(GhaError::Auth),
+            StatusCode::TOO_MANY_REQUESTS if attempt < ATTEMPTS => {
+                let wait = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse().ok())
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or(backoff);
+                tokio::time::sleep(wait).await;
+                backoff *= 4;
+            }
+            status => {
+                return Err(GhaError::Twirp {
+                    method,
+                    status,
+                    body: resp.text().await.unwrap_or_default(),
+                });
+            }
+        }
     }
+    // Not reached: the final attempt's 429 falls through to the `status`
+    // arm above. Kept as an error so no panic path exists.
+    Err(GhaError::Twirp {
+        method,
+        status: StatusCode::TOO_MANY_REQUESTS,
+        body: "rate limited after retries".into(),
+    })
 }
 
 /// Whether an entry exists for `key`, without downloading it.
@@ -212,9 +239,13 @@ pub(super) async fn store(
     .await
     {
         Ok(c) => c,
-        // An `already_exists` reservation conflict comes back as a Twirp
-        // error; any flavor of "no" means someone else owns the key.
-        Err(GhaError::Twirp { .. }) => return Ok(false),
+        // An `already_exists` reservation conflict is success for our
+        // purposes - the entry holds the same content-addressed bytes.
+        // Every other error propagates so the caller can log it; a cache
+        // that silently stores nothing must not look healthy.
+        Err(GhaError::Twirp { body, .. }) if body.contains("already_exists") => {
+            return Ok(false);
+        }
         Err(e) => return Err(e),
     };
     if !created.ok || created.signed_upload_url.is_empty() {
