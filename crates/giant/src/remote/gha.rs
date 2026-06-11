@@ -102,11 +102,22 @@ struct EntryRequest<'a> {
     version: &'a str,
 }
 
+/// Lookup request. `restore_keys` repeats the key: exact-match is all we
+/// want, but the service's lookup path is exercised by mainstream clients
+/// with this field populated, so match their shape.
+#[derive(Serialize)]
+struct LookupRequest<'a> {
+    key: &'a str,
+    restore_keys: [&'a str; 1],
+    version: &'a str,
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct DownloadUrlResponse {
     ok: bool,
     signed_download_url: String,
+    matched_key: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -180,19 +191,37 @@ async fn twirp<T: DeserializeOwned>(
     })
 }
 
-/// Whether an entry exists for `key`, without downloading it.
-pub(super) async fn exists(client: &Client, cfg: &GhaConfig, key: &str) -> Result<bool, GhaError> {
+async fn lookup(
+    client: &Client,
+    cfg: &GhaConfig,
+    key: &str,
+) -> Result<DownloadUrlResponse, GhaError> {
     let resp: DownloadUrlResponse = twirp(
         client,
         cfg,
         "GetCacheEntryDownloadURL",
-        &EntryRequest {
+        &LookupRequest {
             key,
+            restore_keys: [key],
             version: &cfg.version,
         },
     )
     .await?;
-    Ok(resp.ok)
+    tracing::info!(
+        "remote lookup {key}: ok={} matched={}",
+        resp.ok,
+        if resp.matched_key.is_empty() {
+            "-"
+        } else {
+            &resp.matched_key
+        }
+    );
+    Ok(resp)
+}
+
+/// Whether an entry exists for `key`, without downloading it.
+pub(super) async fn exists(client: &Client, cfg: &GhaConfig, key: &str) -> Result<bool, GhaError> {
+    Ok(lookup(client, cfg, key).await?.ok)
 }
 
 /// Fetch the entry stored under `key`. `None` on a miss.
@@ -201,16 +230,7 @@ pub(super) async fn fetch(
     cfg: &GhaConfig,
     key: &str,
 ) -> Result<Option<Vec<u8>>, GhaError> {
-    let resp: DownloadUrlResponse = twirp(
-        client,
-        cfg,
-        "GetCacheEntryDownloadURL",
-        &EntryRequest {
-            key,
-            version: &cfg.version,
-        },
-    )
-    .await?;
+    let resp = lookup(client, cfg, key).await?;
     if !resp.ok || resp.signed_download_url.is_empty() {
         return Ok(None);
     }
