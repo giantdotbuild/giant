@@ -1,0 +1,213 @@
+targets:
+- name: release-aarch64-apple-darwin
+  inputs:
+  - //Cargo.toml
+  - //Cargo.lock
+  - //crates/giant/src/**/*.rs
+  - //crates/giant/Cargo.toml
+  - //crates/giant/build.rs
+  - //crates/giant-protocol/src/**/*.rs
+  - //crates/giant-protocol/Cargo.toml
+  - //crates/giant-schema/src/**/*.rs
+  - //crates/giant-schema/Cargo.toml
+  - //crates/giant-affected/src/**/*.rs
+  - //crates/giant-affected/Cargo.toml
+  - //crates/giant-build/src/**/*.rs
+  - //crates/giant-build/Cargo.toml
+  - //crates/giant-clean/src/**/*.rs
+  - //crates/giant-clean/Cargo.toml
+  - //crates/giant-explain/src/**/*.rs
+  - //crates/giant-explain/Cargo.toml
+  - //crates/giant-gen/src/**/*.rs
+  - //crates/giant-gen/Cargo.toml
+  - //crates/giant-graph/src/**/*.rs
+  - //crates/giant-graph/Cargo.toml
+  - //crates/giant-logs/src/**/*.rs
+  - //crates/giant-logs/Cargo.toml
+  - //crates/giant-sandbox/src/**/*.rs
+  - //crates/giant-sandbox/Cargo.toml
+  - //crates/giant-task/src/**/*.rs
+  - //crates/giant-task/Cargo.toml
+  - //crates/giant-tui/src/**/*.rs
+  - //crates/giant-tui/Cargo.toml
+  outputs:
+  - //output/release/aarch64-apple-darwin/giant
+  - //output/release/aarch64-apple-darwin/giant-affected
+  - //output/release/aarch64-apple-darwin/giant-build
+  - //output/release/aarch64-apple-darwin/giant-clean
+  - //output/release/aarch64-apple-darwin/giant-explain
+  - //output/release/aarch64-apple-darwin/giant-gen
+  - //output/release/aarch64-apple-darwin/giant-graph
+  - //output/release/aarch64-apple-darwin/giant-logs
+  - //output/release/aarch64-apple-darwin/giant-sandbox
+  - //output/release/aarch64-apple-darwin/giant-task
+  - //output/release/aarch64-apple-darwin/giant-test
+  - //output/release/aarch64-apple-darwin/giant-tui
+  - //output/release/aarch64-apple-darwin/giant-verify
+  deps:
+  - //:rustc
+  command: mkdir -p output/release/aarch64-apple-darwin && cargo build --release --locked --workspace --features giant/remote --target aarch64-apple-darwin && install -m 0755 target/aarch64-apple-darwin/release/giant output/release/aarch64-apple-darwin/giant && install -m 0755 target/aarch64-apple-darwin/release/giant-affected output/release/aarch64-apple-darwin/giant-affected && install -m 0755 target/aarch64-apple-darwin/release/giant-build output/release/aarch64-apple-darwin/giant-build && install -m 0755 target/aarch64-apple-darwin/release/giant-clean output/release/aarch64-apple-darwin/giant-clean && install -m 0755 target/aarch64-apple-darwin/release/giant-explain output/release/aarch64-apple-darwin/giant-explain && install -m 0755 target/aarch64-apple-darwin/release/giant-gen output/release/aarch64-apple-darwin/giant-gen && install -m 0755 target/aarch64-apple-darwin/release/giant-graph output/release/aarch64-apple-darwin/giant-graph && install -m 0755 target/aarch64-apple-darwin/release/giant-logs output/release/aarch64-apple-darwin/giant-logs && install -m 0755 target/aarch64-apple-darwin/release/giant-sandbox output/release/aarch64-apple-darwin/giant-sandbox && install -m 0755 target/aarch64-apple-darwin/release/giant-task output/release/aarch64-apple-darwin/giant-task && install -m 0755 target/aarch64-apple-darwin/release/giant-test output/release/aarch64-apple-darwin/giant-test && install -m 0755 target/aarch64-apple-darwin/release/giant-tui output/release/aarch64-apple-darwin/giant-tui && install -m 0755 target/aarch64-apple-darwin/release/giant-verify output/release/aarch64-apple-darwin/giant-verify
+  cwd: //
+  timeout_secs: 3600
+  tags:
+  - platform=aarch64-apple-darwin
+  - release
+- name: release-aarch64-unknown-linux-musl
+  inputs:
+  - //Cargo.toml
+  - //Cargo.lock
+  - //crates/giant/src/**/*.rs
+  - //crates/giant/Cargo.toml
+  - //crates/giant/build.rs
+  - //crates/giant-protocol/src/**/*.rs
+  - //crates/giant-protocol/Cargo.toml
+  - //crates/giant-schema/src/**/*.rs
+  - //crates/giant-schema/Cargo.toml
+  - //crates/giant-affected/src/**/*.rs
+  - //crates/giant-affected/Cargo.toml
+  - //crates/giant-build/src/**/*.rs
+  - //crates/giant-build/Cargo.toml
+  - //crates/giant-clean/src/**/*.rs
+  - //crates/giant-clean/Cargo.toml
+  - //crates/giant-explain/src/**/*.rs
+  - //crates/giant-explain/Cargo.toml
+  - //crates/giant-gen/src/**/*.rs
+  - //crates/giant-gen/Cargo.toml
+  - //crates/giant-graph/src/**/*.rs
+  - //crates/giant-graph/Cargo.toml
+  - //crates/giant-logs/src/**/*.rs
+  - //crates/giant-logs/Cargo.toml
+  - //crates/giant-sandbox/src/**/*.rs
+  - //crates/giant-sandbox/Cargo.toml
+  - //crates/giant-task/src/**/*.rs
+  - //crates/giant-task/Cargo.toml
+  - //crates/giant-tui/src/**/*.rs
+  - //crates/giant-tui/Cargo.toml
+  outputs:
+  - //output/release/aarch64-unknown-linux-musl/giant
+  - //output/release/aarch64-unknown-linux-musl/giant-affected
+  - //output/release/aarch64-unknown-linux-musl/giant-build
+  - //output/release/aarch64-unknown-linux-musl/giant-clean
+  - //output/release/aarch64-unknown-linux-musl/giant-explain
+  - //output/release/aarch64-unknown-linux-musl/giant-gen
+  - //output/release/aarch64-unknown-linux-musl/giant-graph
+  - //output/release/aarch64-unknown-linux-musl/giant-logs
+  - //output/release/aarch64-unknown-linux-musl/giant-sandbox
+  - //output/release/aarch64-unknown-linux-musl/giant-task
+  - //output/release/aarch64-unknown-linux-musl/giant-test
+  - //output/release/aarch64-unknown-linux-musl/giant-tui
+  - //output/release/aarch64-unknown-linux-musl/giant-verify
+  deps:
+  - //:rustc
+  command: mkdir -p output/release/aarch64-unknown-linux-musl && cargo build --release --locked --workspace --features giant/remote --target aarch64-unknown-linux-musl && install -m 0755 target/aarch64-unknown-linux-musl/release/giant output/release/aarch64-unknown-linux-musl/giant && install -m 0755 target/aarch64-unknown-linux-musl/release/giant-affected output/release/aarch64-unknown-linux-musl/giant-affected && install -m 0755 target/aarch64-unknown-linux-musl/release/giant-build output/release/aarch64-unknown-linux-musl/giant-build && install -m 0755 target/aarch64-unknown-linux-musl/release/giant-clean output/release/aarch64-unknown-linux-musl/giant-clean && install -m 0755 target/aarch64-unknown-linux-musl/release/giant-explain output/release/aarch64-unknown-linux-musl/giant-explain && install -m 0755 target/aarch64-unknown-linux-musl/release/giant-gen output/release/aarch64-unknown-linux-musl/giant-gen && install -m 0755 target/aarch64-unknown-linux-musl/release/giant-graph output/release/aarch64-unknown-linux-musl/giant-graph && install -m 0755 target/aarch64-unknown-linux-musl/release/giant-logs output/release/aarch64-unknown-linux-musl/giant-logs && install -m 0755 target/aarch64-unknown-linux-musl/release/giant-sandbox output/release/aarch64-unknown-linux-musl/giant-sandbox && install -m 0755 target/aarch64-unknown-linux-musl/release/giant-task output/release/aarch64-unknown-linux-musl/giant-task && install -m 0755 target/aarch64-unknown-linux-musl/release/giant-test output/release/aarch64-unknown-linux-musl/giant-test && install -m 0755 target/aarch64-unknown-linux-musl/release/giant-tui output/release/aarch64-unknown-linux-musl/giant-tui && install -m 0755 target/aarch64-unknown-linux-musl/release/giant-verify output/release/aarch64-unknown-linux-musl/giant-verify
+  cwd: //
+  timeout_secs: 3600
+  tags:
+  - platform=aarch64-unknown-linux-musl
+  - release
+- name: release-x86_64-apple-darwin
+  inputs:
+  - //Cargo.toml
+  - //Cargo.lock
+  - //crates/giant/src/**/*.rs
+  - //crates/giant/Cargo.toml
+  - //crates/giant/build.rs
+  - //crates/giant-protocol/src/**/*.rs
+  - //crates/giant-protocol/Cargo.toml
+  - //crates/giant-schema/src/**/*.rs
+  - //crates/giant-schema/Cargo.toml
+  - //crates/giant-affected/src/**/*.rs
+  - //crates/giant-affected/Cargo.toml
+  - //crates/giant-build/src/**/*.rs
+  - //crates/giant-build/Cargo.toml
+  - //crates/giant-clean/src/**/*.rs
+  - //crates/giant-clean/Cargo.toml
+  - //crates/giant-explain/src/**/*.rs
+  - //crates/giant-explain/Cargo.toml
+  - //crates/giant-gen/src/**/*.rs
+  - //crates/giant-gen/Cargo.toml
+  - //crates/giant-graph/src/**/*.rs
+  - //crates/giant-graph/Cargo.toml
+  - //crates/giant-logs/src/**/*.rs
+  - //crates/giant-logs/Cargo.toml
+  - //crates/giant-sandbox/src/**/*.rs
+  - //crates/giant-sandbox/Cargo.toml
+  - //crates/giant-task/src/**/*.rs
+  - //crates/giant-task/Cargo.toml
+  - //crates/giant-tui/src/**/*.rs
+  - //crates/giant-tui/Cargo.toml
+  outputs:
+  - //output/release/x86_64-apple-darwin/giant
+  - //output/release/x86_64-apple-darwin/giant-affected
+  - //output/release/x86_64-apple-darwin/giant-build
+  - //output/release/x86_64-apple-darwin/giant-clean
+  - //output/release/x86_64-apple-darwin/giant-explain
+  - //output/release/x86_64-apple-darwin/giant-gen
+  - //output/release/x86_64-apple-darwin/giant-graph
+  - //output/release/x86_64-apple-darwin/giant-logs
+  - //output/release/x86_64-apple-darwin/giant-sandbox
+  - //output/release/x86_64-apple-darwin/giant-task
+  - //output/release/x86_64-apple-darwin/giant-test
+  - //output/release/x86_64-apple-darwin/giant-tui
+  - //output/release/x86_64-apple-darwin/giant-verify
+  deps:
+  - //:rustc
+  command: mkdir -p output/release/x86_64-apple-darwin && cargo build --release --locked --workspace --features giant/remote --target x86_64-apple-darwin && install -m 0755 target/x86_64-apple-darwin/release/giant output/release/x86_64-apple-darwin/giant && install -m 0755 target/x86_64-apple-darwin/release/giant-affected output/release/x86_64-apple-darwin/giant-affected && install -m 0755 target/x86_64-apple-darwin/release/giant-build output/release/x86_64-apple-darwin/giant-build && install -m 0755 target/x86_64-apple-darwin/release/giant-clean output/release/x86_64-apple-darwin/giant-clean && install -m 0755 target/x86_64-apple-darwin/release/giant-explain output/release/x86_64-apple-darwin/giant-explain && install -m 0755 target/x86_64-apple-darwin/release/giant-gen output/release/x86_64-apple-darwin/giant-gen && install -m 0755 target/x86_64-apple-darwin/release/giant-graph output/release/x86_64-apple-darwin/giant-graph && install -m 0755 target/x86_64-apple-darwin/release/giant-logs output/release/x86_64-apple-darwin/giant-logs && install -m 0755 target/x86_64-apple-darwin/release/giant-sandbox output/release/x86_64-apple-darwin/giant-sandbox && install -m 0755 target/x86_64-apple-darwin/release/giant-task output/release/x86_64-apple-darwin/giant-task && install -m 0755 target/x86_64-apple-darwin/release/giant-test output/release/x86_64-apple-darwin/giant-test && install -m 0755 target/x86_64-apple-darwin/release/giant-tui output/release/x86_64-apple-darwin/giant-tui && install -m 0755 target/x86_64-apple-darwin/release/giant-verify output/release/x86_64-apple-darwin/giant-verify
+  cwd: //
+  timeout_secs: 3600
+  tags:
+  - platform=x86_64-apple-darwin
+  - release
+- name: release-x86_64-unknown-linux-musl
+  inputs:
+  - //Cargo.toml
+  - //Cargo.lock
+  - //crates/giant/src/**/*.rs
+  - //crates/giant/Cargo.toml
+  - //crates/giant/build.rs
+  - //crates/giant-protocol/src/**/*.rs
+  - //crates/giant-protocol/Cargo.toml
+  - //crates/giant-schema/src/**/*.rs
+  - //crates/giant-schema/Cargo.toml
+  - //crates/giant-affected/src/**/*.rs
+  - //crates/giant-affected/Cargo.toml
+  - //crates/giant-build/src/**/*.rs
+  - //crates/giant-build/Cargo.toml
+  - //crates/giant-clean/src/**/*.rs
+  - //crates/giant-clean/Cargo.toml
+  - //crates/giant-explain/src/**/*.rs
+  - //crates/giant-explain/Cargo.toml
+  - //crates/giant-gen/src/**/*.rs
+  - //crates/giant-gen/Cargo.toml
+  - //crates/giant-graph/src/**/*.rs
+  - //crates/giant-graph/Cargo.toml
+  - //crates/giant-logs/src/**/*.rs
+  - //crates/giant-logs/Cargo.toml
+  - //crates/giant-sandbox/src/**/*.rs
+  - //crates/giant-sandbox/Cargo.toml
+  - //crates/giant-task/src/**/*.rs
+  - //crates/giant-task/Cargo.toml
+  - //crates/giant-tui/src/**/*.rs
+  - //crates/giant-tui/Cargo.toml
+  outputs:
+  - //output/release/x86_64-unknown-linux-musl/giant
+  - //output/release/x86_64-unknown-linux-musl/giant-affected
+  - //output/release/x86_64-unknown-linux-musl/giant-build
+  - //output/release/x86_64-unknown-linux-musl/giant-clean
+  - //output/release/x86_64-unknown-linux-musl/giant-explain
+  - //output/release/x86_64-unknown-linux-musl/giant-gen
+  - //output/release/x86_64-unknown-linux-musl/giant-graph
+  - //output/release/x86_64-unknown-linux-musl/giant-logs
+  - //output/release/x86_64-unknown-linux-musl/giant-sandbox
+  - //output/release/x86_64-unknown-linux-musl/giant-task
+  - //output/release/x86_64-unknown-linux-musl/giant-test
+  - //output/release/x86_64-unknown-linux-musl/giant-tui
+  - //output/release/x86_64-unknown-linux-musl/giant-verify
+  deps:
+  - //:rustc
+  command: mkdir -p output/release/x86_64-unknown-linux-musl && cargo build --release --locked --workspace --features giant/remote --target x86_64-unknown-linux-musl && install -m 0755 target/x86_64-unknown-linux-musl/release/giant output/release/x86_64-unknown-linux-musl/giant && install -m 0755 target/x86_64-unknown-linux-musl/release/giant-affected output/release/x86_64-unknown-linux-musl/giant-affected && install -m 0755 target/x86_64-unknown-linux-musl/release/giant-build output/release/x86_64-unknown-linux-musl/giant-build && install -m 0755 target/x86_64-unknown-linux-musl/release/giant-clean output/release/x86_64-unknown-linux-musl/giant-clean && install -m 0755 target/x86_64-unknown-linux-musl/release/giant-explain output/release/x86_64-unknown-linux-musl/giant-explain && install -m 0755 target/x86_64-unknown-linux-musl/release/giant-gen output/release/x86_64-unknown-linux-musl/giant-gen && install -m 0755 target/x86_64-unknown-linux-musl/release/giant-graph output/release/x86_64-unknown-linux-musl/giant-graph && install -m 0755 target/x86_64-unknown-linux-musl/release/giant-logs output/release/x86_64-unknown-linux-musl/giant-logs && install -m 0755 target/x86_64-unknown-linux-musl/release/giant-sandbox output/release/x86_64-unknown-linux-musl/giant-sandbox && install -m 0755 target/x86_64-unknown-linux-musl/release/giant-task output/release/x86_64-unknown-linux-musl/giant-task && install -m 0755 target/x86_64-unknown-linux-musl/release/giant-test output/release/x86_64-unknown-linux-musl/giant-test && install -m 0755 target/x86_64-unknown-linux-musl/release/giant-tui output/release/x86_64-unknown-linux-musl/giant-tui && install -m 0755 target/x86_64-unknown-linux-musl/release/giant-verify output/release/x86_64-unknown-linux-musl/giant-verify
+  cwd: //
+  timeout_secs: 3600
+  tags:
+  - platform=x86_64-unknown-linux-musl
+  - release

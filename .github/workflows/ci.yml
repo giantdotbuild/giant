@@ -54,7 +54,9 @@ jobs:
           # Surface remote-cache activity (default is errors only) - uploads
           # are best-effort and otherwise invisible.
           RUST_LOG: giant=info
-        run: devenv shell bash -- -c 'giant build --quiet'
+        # --no-tag release: the per-platform release targets need cross
+        # toolchains this job doesn't carry; the release workflow builds them.
+        run: devenv shell bash -- -c 'giant build --quiet --no-tag release'
       - name: Cache-key stability probe
         run: |
           # Prints the key sections for a leaf and a dependent target;

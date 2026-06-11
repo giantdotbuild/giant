@@ -65,6 +65,18 @@ targets:
     # sandbox. (A toolchain identity probe is never a hermetic build.)
     sandbox: false
 
+  # Toolchain identity for the release targets, which also run on machines
+  # without devenv (the release runners use rustup). Uncached: the probe is
+  # milliseconds, runs every build, and output-cutoff keeps dependents warm
+  # while the compiler version is unchanged.
+  - name: "rustc"
+    inputs: []
+    outputs: [".giant/toolchains/rustc.id"]
+    command: "rustc -V > .giant/toolchains/rustc.id && cargo -V >> .giant/toolchains/rustc.id"
+    cache: false
+    tags: ["toolchain"]
+    sandbox: false
+
 # -----------------------------------------------------------------------------
 # Tasks - named commands. Most are `cargo X` wrappers; the docs pipeline
 # strings together the install + build via `deps:`.
