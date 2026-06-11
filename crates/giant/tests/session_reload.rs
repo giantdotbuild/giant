@@ -421,9 +421,14 @@ targets:
 
     // Edit giant.yaml - no command. The always-on watcher should notice
     // and trigger a reload on its own.
-    write_config(
-        ws,
-        r#"
+    //
+    // The reads below block on the child's stdout, so a lost watcher event
+    // would hang the test (and a CI job) forever. Two guards:
+    //   - a watchdog kills the session at a deadline, turning a hang into
+    //     EOF and a failing assert with context;
+    //   - a nudge thread rewrites the config a few times, so a filesystem
+    //     event lost in the watcher-startup race self-heals.
+    let edited = r#"
 workspace: { name: reload }
 targets:
   - name: "a"
@@ -432,10 +437,36 @@ targets:
   - name: "c"
     command: "true"
     cache: false
-"#,
-    );
+"#;
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let (pid, done) = (child.id(), done.clone());
+        std::thread::spawn(move || {
+            for _ in 0..60 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if done.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+            }
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+        });
+    }
+    {
+        let (ws, done) = (ws.to_path_buf(), done.clone());
+        std::thread::spawn(move || {
+            for i in 0..5u32 {
+                if done.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                // Vary a comment so every nudge is a fresh content change.
+                write_config(&ws, &format!("{edited}# nudge {i}\n"));
+                std::thread::sleep(std::time::Duration::from_secs(8));
+            }
+        });
+    }
 
     let after = read_catalog_until(&mut out, |e| matches!(e, Event::CatalogReady));
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(
         after.contains(&"//:c".to_string()),
         "the watcher should auto-reload and surface target c; got {after:?}"
