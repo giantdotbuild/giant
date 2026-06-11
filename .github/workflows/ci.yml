@@ -26,10 +26,9 @@ jobs:
       - run: cargo test --workspace --locked --features giant/remote
 
   # The dogfood chain: the dev environment from devenv (via Determinate
-  # Nix), the repo built by giant itself, results shared through the
-  # github_actions remote cache. An unchanged target on a later run is a
-  # REMOTE hit that skips cargo/npm entirely. Bootstrap is a cargo debug
-  # build until a release ships that understands `remote.kind`.
+  # Nix), the previous giant release building the next one, results shared
+  # through the github_actions remote cache. An unchanged target on a
+  # later run is a REMOTE hit that skips cargo/npm entirely.
   dogfood:
     runs-on: ubuntu-latest
     steps:
@@ -46,23 +45,22 @@ jobs:
           script: |
             core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-      - name: Bootstrap giant
-        run: devenv shell bash -- -c 'cargo build --locked -p giant -p giant-build -p giant-explain --features giant/remote'
+      - name: Install the released giant
+        run: |
+          curl -fsSL https://giant.build/install.sh | GIANT_INSTALL_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Build the workspace with giant
         env:
           # Surface remote-cache activity (default is errors only) - uploads
           # are best-effort and otherwise invisible.
           RUST_LOG: giant=info
-        run: |
-          # shellcheck disable=SC2016  # the inner shell expands these
-          devenv shell bash -- -c 'PATH="$PWD/target/debug:$PATH" giant build --quiet'
+        run: devenv shell bash -- -c 'giant build --quiet'
       - name: Cache-key stability probe
         run: |
           # Prints the key sections for a leaf and a dependent target;
           # comparing across runs shows which section drifts when CI
           # misses the cache.
-          # shellcheck disable=SC2016
-          devenv shell bash -- -c 'PATH="$PWD/target/debug:$PATH" giant explain //:devenv && PATH="$PWD/target/debug:$PATH" giant explain //crates/giant-clean:giant-clean'
+          devenv shell bash -- -c 'giant explain //:devenv && giant explain //crates/giant-clean:giant-clean'
 
   # The github_actions remote backend against the real cache service - the
   # signed-URL flow can't be fully faked, so prove it where it runs.
