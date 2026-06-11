@@ -66,8 +66,13 @@ impl GhaConfig {
     }
 
     pub fn new(results_url: String, token: String, remote_schema: u32) -> Self {
+        // The namespace salt segregates entries beyond the wire schema. Bump
+        // it to abandon a poisoned namespace - e.g. dangling reservations
+        // left by a crashed or buggy uploader block re-creates of the same
+        // (key, version) until GitHub expires them.
+        const NAMESPACE: u32 = 2;
         let version = const_hex::encode(Sha256::digest(format!(
-            "giant remote cache schema {remote_schema}"
+            "giant remote cache schema {remote_schema} namespace {NAMESPACE}"
         )));
         Self {
             results_url: results_url.trim_end_matches('/').to_string(),
@@ -249,6 +254,11 @@ pub(super) async fn store(
         Err(e) => return Err(e),
     };
     if !created.ok || created.signed_upload_url.is_empty() {
+        // The service declines creates for keys someone else holds - an
+        // existing entry, a concurrent upload, or a dangling reservation
+        // from a crashed uploader. Say so: a cache that quietly stores
+        // nothing looks identical to a healthy one otherwise.
+        tracing::info!("remote create declined for {key} (held elsewhere)");
         return Ok(false);
     }
 
