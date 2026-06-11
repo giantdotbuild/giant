@@ -8,8 +8,13 @@ targets:
     inputs:
       - "package.json"
       - "package-lock.json"
-    outputs:
-      - "node_modules/.package-lock.json"
+    outputs: []
+    # node_modules is external state, like a docker image: a cached marker
+    # file restored on a fresh machine would claim an install that isn't
+    # there. So no cache - the `exists` check asks the real directory, and
+    # `npm ci` runs exactly when it's missing or stale.
+    cache: false
+    exists: "test node_modules/.package-lock.json -nt package-lock.json"
     command: "npm ci"
     timeout_secs: 180
     deps: ["//:devenv"]

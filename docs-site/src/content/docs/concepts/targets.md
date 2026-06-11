@@ -133,6 +133,14 @@ A target can have an empty `outputs:` list. Such targets only run for
 side effects (e.g. linting, a `docker push`). Their cache hit means
 "the inputs and env are unchanged since the last successful run."
 
+Declare outputs honestly: an output must be the artifact dependents
+actually consume. A marker file standing in for bigger state (say,
+`node_modules/.package-lock.json` for a whole `node_modules/`) works on
+the machine that built it, but under a shared cache another machine
+restores the marker and none of the state it implies. For external
+state like that, use `cache: false` with an [`exists`
+check](#the-exists-escape-hatch) against the real thing instead.
+
 ```yaml
 - name: "lint"
   inputs: ["**/*.go"]
