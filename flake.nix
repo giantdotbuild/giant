@@ -1,6 +1,15 @@
 {
   description = "Giant - build orchestration with shared caching for monorepos";
 
+  # CI pushes every build here; nix offers the substituter to consumers
+  # automatically, so installs come prebuilt.
+  nixConfig = {
+    extra-substituters = [ "https://giant.cachix.org" ];
+    extra-trusted-public-keys = [
+      "giant.cachix.org-1:v3xudJPm6zp3waq/lTUVqKBwm+BWzbs3aVZopsD4QM4="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";

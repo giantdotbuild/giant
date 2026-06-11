@@ -66,7 +66,12 @@ Requires Rust 1.95 or newer.
 ## Nix flake
 
 The repo ships a flake exposing every first-party binary as its own
-package, plus a `giant-suite` meta-package that bundles all of them:
+package, plus a `giant-suite` meta-package that bundles all of them.
+CI pushes every build to the [`giant` Cachix
+cache](https://giant.cachix.org) and the flake advertises it, so when
+nix asks whether to trust the substituter, saying yes gets you prebuilt
+binaries instead of a compile (Linux and macOS, x86_64 and aarch64 on
+Linux, aarch64 on macOS):
 
 ```bash
 # Everything (the giant-suite meta-package: all first-party binaries)

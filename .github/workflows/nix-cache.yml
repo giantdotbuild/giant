@@ -35,6 +35,6 @@ jobs:
       - uses: DeterminateSystems/determinate-nix-action@v3
       - uses: cachix/cachix-action@v16
         with:
-          name: giantdotbuild
+          name: giant
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - run: nix build .#giant-suite
