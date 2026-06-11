@@ -49,8 +49,8 @@ elif [ -w "/usr/local/bin" ] 2>/dev/null; then
   DEST="/usr/local/bin"
 else
   DEST="$HOME/.local/bin"
-  mkdir -p "$DEST"
 fi
+mkdir -p "$DEST"
 
 # --- resolve version ---
 if [ "$VERSION" = "latest" ]; then
