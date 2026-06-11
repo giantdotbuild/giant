@@ -85,8 +85,14 @@ jobs:
           # otherwise, and this job exists to catch them.
           RUST_LOG: giant=info
         run: |
+          # Stable input content, so the cache key is stable across runs:
+          # every run after the first reads an entry written minutes to
+          # days earlier - the pattern real consumers (dogfood, releases)
+          # rely on. Freshly written entries have variable read-after-write
+          # lag on GitHub's side, so same-run read-back is not the contract
+          # to test. Bump the version string to roll the key.
           ws="$(mktemp -d)"
-          printf 'run %s\n' "$GITHUB_RUN_ID" > "$ws/in.txt"
+          printf 'giant cache canary v1\n' > "$ws/in.txt"
           printf '%s\n' \
             'workspace: { name: gha_roundtrip }' \
             'cache: { dir: ./cache }' \
@@ -110,4 +116,4 @@ jobs:
             [ "$i" = 8 ] && { echo "no REMOTE hit after $i attempts"; exit 1; }
             sleep 10
           done
-          grep -q 'run' "$ws/out.txt"
+          grep -q 'canary' "$ws/out.txt"
