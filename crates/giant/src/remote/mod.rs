@@ -398,13 +398,16 @@ impl RemoteCache {
             );
             return Ok(());
         }
-        if self.has_cas(hash).await.unwrap_or(false) {
-            return Ok(());
-        }
         match &self.inner.config.backend {
             BackendConfig::BazelHttp { base_url, auth } => {
+                if self.has_cas(hash).await.unwrap_or(false) {
+                    return Ok(());
+                }
                 self.bazel_put_cas(base_url, auth, hash, bytes).await
             }
+            // No pre-probe here: CreateCacheEntry already declines when the
+            // entry exists, and the cache API is rate-limited - every spared
+            // call counts.
             BackendConfig::GithubActions(g) => {
                 let stored = gha::store(&self.inner.client, g, &gha::cas_key(hash), bytes).await;
                 self.gha_result("CAS put", stored);
