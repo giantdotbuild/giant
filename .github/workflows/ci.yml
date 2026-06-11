@@ -13,16 +13,15 @@ jobs:
       - run: rustup update --no-self-update stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
+      # The plain clippy pass fully type-checks the no-feature configuration
+      # (--all-targets includes tests), so the test suite runs once, with
+      # features - that pass is a superset of the plain one apart from the
+      # tiny cfg(not(remote)) stubs.
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --workspace --all-targets --features giant/remote -- -D warnings
-      # The smoke tests spawn `giant build`, which dispatches to the
-      # giant-build binary beside the giant binary. `cargo test` links bins
-      # only for packages with integration tests, so link them all first -
-      # and the feature-enabled test run needs siblings built with the same
-      # feature, or the remote path is compiled out of the porcelain that
-      # actually runs the build.
-      - run: cargo build --workspace --locked
-      - run: cargo test --workspace --locked
+      # Link the bins before testing: the smoke tests spawn `giant build`,
+      # which dispatches to the giant-build binary beside the giant binary,
+      # and those siblings must carry the same features as the tests.
       - run: cargo build --workspace --locked --features giant/remote
       - run: cargo test --workspace --locked --features giant/remote
 
