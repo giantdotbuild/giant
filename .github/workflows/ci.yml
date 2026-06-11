@@ -48,15 +48,22 @@ jobs:
             core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
       - name: Bootstrap giant
-        run: devenv shell bash -- -c 'cargo build --locked -p giant -p giant-build --features giant/remote'
+        run: devenv shell bash -- -c 'cargo build --locked -p giant -p giant-build -p giant-explain --features giant/remote'
       - name: Build the workspace with giant
         env:
-          # Surface remote-cache warnings (default is errors only) - upload
-          # failures are best-effort and otherwise invisible.
-          RUST_LOG: giant=warn
+          # Surface remote-cache activity (default is errors only) - uploads
+          # are best-effort and otherwise invisible.
+          RUST_LOG: giant=info
         run: |
           # shellcheck disable=SC2016  # the inner shell expands these
           devenv shell bash -- -c 'PATH="$PWD/target/debug:$PATH" giant build --quiet'
+      - name: Cache-key stability probe
+        run: |
+          # Prints the key sections for a leaf and a dependent target;
+          # comparing across runs shows which section drifts when CI
+          # misses the cache.
+          # shellcheck disable=SC2016
+          devenv shell bash -- -c 'PATH="$PWD/target/debug:$PATH" giant explain //:devenv && PATH="$PWD/target/debug:$PATH" giant explain //crates/giant-clean:giant-clean'
 
   # The github_actions remote backend against the real cache service - the
   # signed-URL flow can't be fully faked, so prove it where it runs.

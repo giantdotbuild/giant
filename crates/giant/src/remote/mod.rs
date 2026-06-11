@@ -555,6 +555,13 @@ pub fn spawn_uploader(
     let (tx, mut rx) = mpsc::channel::<UploadJob>(256);
     let handle = tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
+            let total: usize = job.blobs.iter().map(|(_, b)| b.len()).sum();
+            tracing::info!(
+                "remote upload: {} ({} blobs, {} bytes)",
+                job.ac_entry.target_id,
+                job.blobs.len(),
+                total
+            );
             // Upload blobs first, then the AC entry - if the AC entry
             // is visible to readers, every blob it references must
             // already be on the server. Order matters.
@@ -562,7 +569,9 @@ pub fn spawn_uploader(
                 let _ = remote.put_cas(&hash, bytes).await;
             }
             let _ = remote.put_ac(&job.cache_key, &job.ac_entry).await;
+            tracing::info!("remote upload done: {}", job.ac_entry.target_id);
         }
+        tracing::info!("remote uploader: queue drained");
     });
     (tx, handle)
 }
