@@ -102,6 +102,17 @@ pub enum EventsFormat {
 /// Run a build with the given base test-selection mode. Returns the process exit
 /// code (0 = success, 1 = one or more targets failed). Setup problems are `Err`.
 pub async fn run(args: BuildArgs, base_mode: TestMode) -> anyhow::Result<i32> {
+    // Tracing from the engine library (remote-cache activity, watch noise)
+    // surfaces here or nowhere - this porcelain hosts the engine in-process.
+    // Stderr, always: the renderer owns stdout, and `--events ndjson` must
+    // stay machine-clean.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+
     // `--with-tests` widens the `build` selection to include tests; `test` is
     // already `Only`, so it stays.
     let test_mode = match base_mode {

@@ -127,7 +127,12 @@ pub async fn run() -> anyhow::Result<()> {
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&cli.log));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // Stderr, always: `giant session` owns stdout for the NDJSON event
+    // stream, and a log line on stdout would corrupt it.
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 
     let global = GlobalFlags {
         config: cli.config.clone(),
