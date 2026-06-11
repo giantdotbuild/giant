@@ -96,10 +96,35 @@ The flake doesn't replace `devenv.nix` - devenv stays the dev shell
 (`devenv shell` for the full toolchain). The flake's `devShells.default`
 is a thin fallback for people who don't run devenv.
 
+### The binary cache
+
+CI builds every commit on `main` for x86_64/aarch64 Linux and aarch64
+macOS and pushes the results to
+[`giant.cachix.org`](https://giant.cachix.org), so nix installs
+substitute prebuilt binaries instead of compiling.
+
+The flake advertises the cache, so plain flake commands just need a yes
+at the trust prompt (or `--accept-flake-config` in scripts):
+
+```console
+$ nix profile install github:giantdotbuild/giant
+do you want to allow configuration setting 'extra-substituters'
+to be set to 'https://giant.cachix.org' (y/N)? y
+```
+
+To trust it permanently (no prompts, works for transitive use too):
+
+```bash
+cachix use giant
+# or by hand, in nix.conf:
+#   extra-substituters = https://giant.cachix.org
+#   extra-trusted-public-keys = giant.cachix.org-1:v3xudJPm6zp3waq/lTUVqKBwm+BWzbs3aVZopsD4QM4=
+```
+
 ### In a devenv project
 
-Add the flake as an input and put the suite in your packages - two
-edits, and every `devenv shell` has the whole toolchain:
+Add the flake as an input, put the suite in your packages, and pull the
+cache - devenv has cachix support built in:
 
 ```yaml
 # devenv.yaml
@@ -113,10 +138,12 @@ inputs:
 { inputs, pkgs, ... }:
 {
   packages = [ inputs.giant.packages.${pkgs.stdenv.system}.giant-suite ];
+  cachix.pull = [ "giant" ];
 }
 ```
 
-The flake also exposes `overlays.default` for setups that prefer
+Every `devenv shell` then has the whole suite on PATH, prebuilt. The
+flake also exposes `overlays.default` for setups that prefer
 `pkgs.giant` / `pkgs.giant-suite` via an overlay.
 
 ## Verify the install
