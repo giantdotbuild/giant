@@ -39,7 +39,7 @@ fn no_op_build_1k_targets_under_500ms() {
         String::from("workspace:\n  name: perf_noop\ncache:\n  dir: ./cache\ntargets:\n");
     for i in 0..1_000 {
         yaml.push_str(&format!(
-            "  - id: \"t:{i:04}\"\n    inputs: []\n    outputs: [\"out_{i:04}.txt\"]\n    command: \"touch out_{i:04}.txt\"\n",
+            "  - name: \"t_{i:04}\"\n    inputs: []\n    outputs: [\"out_{i:04}.txt\"]\n    command: \"touch out_{i:04}.txt\"\n",
         ));
     }
     write_yaml(ws, &yaml);
