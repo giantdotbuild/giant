@@ -13,14 +13,15 @@ the key shifts, and Giant rebuilds.
 Composed in this order (the exact byte stream matters for
 reproducibility):
 
-1. **Schema version marker** - a leading version tag, so a change to
-   the key layout invalidates old entries deterministically.
+1. **Schema version marker** - a leading version tag. It bumps when a
+   Giant change would alter what a target produces or how the key is
+   computed, invalidating old entries deterministically. Routine Giant
+   releases don't bump it, so upgrading Giant keeps your caches warm.
 2. **The command** - verbatim. Changing `go build` to `go build -trimpath`
    changes the key.
 3. **The cwd** - workspace-relative path.
-4. **Env vars** - the target's `env:`, sorted by name, plus two
-   built-ins Giant always sets: `GIANT_TARGET_TRIPLE` and
-   `GIANT_VERSION`.
+4. **Env vars** - the target's `env:`, sorted by name, plus one
+   built-in Giant always sets: `GIANT_TARGET_TRIPLE`.
 5. **File inputs** - for every file matched by an input glob, its
    resolved workspace-relative path and content hash. Sorted by path.
    A package-relative input (`src/foo.rs`) is resolved against the
@@ -47,6 +48,9 @@ differ.
 - **The current time, current user, current host.** Two users on two
   machines running the same command on the same inputs get the same
   cache key.
+- **The Giant version.** Upgrading Giant doesn't invalidate your cache.
+  The schema version marker covers the rare release that changes what a
+  recipe would produce.
 - **Output file paths.** Changing where outputs land doesn't shift the
   key (but it does change the recipe - adjust thoughtfully).
 - **Comments in your config file.** Giant parses the YAML; whitespace
@@ -66,10 +70,9 @@ command:
   go build -o bin/server ./cmd/server
 cwd:         //
 
-env (3):
+env (2):
   CGO_ENABLED=0
   GIANT_TARGET_TRIPLE=x86_64-unknown-linux-gnu
-  GIANT_VERSION=0.1.0
 
 file inputs (12):
   cmd/server/main.go        sha256:9f3c8d...

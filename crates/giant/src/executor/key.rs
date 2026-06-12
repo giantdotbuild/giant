@@ -10,13 +10,16 @@ use crate::paths::{AbsPath, WsRelPath};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Built-in env contributions for the cache key.
-const GIANT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Built-in env contribution for the cache key.
 const TARGET_TRIPLE: &str = env!("GIANT_TARGET_TRIPLE");
 
-/// Schema version for the cache-key composition. Bump on any change.
+/// Schema version for the cache-key composition. Bump when a giant
+/// change would alter what a target produces or how its key is
+/// computed; a release that touches neither keeps every cache warm.
 /// v2: dropped the `structural_inputs` section.
-const KEY_SCHEMA: &str = "v2";
+/// v3: dropped GIANT_VERSION from the env section - this constant is
+///     now the only giant-side invalidation knob.
+const KEY_SCHEMA: &str = "v3";
 
 /// Breakdown of what went into a target's cache key. Populated when the
 /// caller asks for it (see `compute_cache_key_with_breakdown`); the
@@ -101,7 +104,6 @@ pub async fn compute_cache_key_with_breakdown(
 fn empty_breakdown(spec: &TargetSpec) -> CacheKeyBreakdown {
     let mut built_in = std::collections::BTreeMap::new();
     built_in.insert("GIANT_TARGET_TRIPLE".into(), TARGET_TRIPLE.into());
-    built_in.insert("GIANT_VERSION".into(), GIANT_VERSION.into());
     CacheKeyBreakdown {
         schema: KEY_SCHEMA.to_string(),
         command: spec.command.clone(),
@@ -142,7 +144,7 @@ fn compose_cache_key_blocking(
     h.update(spec.cwd.as_path().to_string_lossy().as_bytes());
     h.update(b"\0");
 
-    // env (sorted by key) + built-in target triple + version
+    // env (sorted by key) + built-in target triple
     h.update(b"env\0");
     let mut env_keys: Vec<&String> = spec.env.keys().collect();
     env_keys.sort();
@@ -154,9 +156,6 @@ fn compose_cache_key_blocking(
     }
     h.update(b"GIANT_TARGET_TRIPLE=");
     h.update(TARGET_TRIPLE.as_bytes());
-    h.update(b"\0");
-    h.update(b"GIANT_VERSION=");
-    h.update(GIANT_VERSION.as_bytes());
     h.update(b"\0");
 
     // file inputs (expand globs, sort, hash content)
