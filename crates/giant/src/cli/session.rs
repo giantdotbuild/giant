@@ -799,8 +799,10 @@ impl SessionState {
     }
 
     /// Answer `query.status`: per-target cache state. Recomputes each
-    /// target's cache key (the same walk `giant explain` uses) and consults the
-    /// action cache. Read-only; safe to run alongside or between builds.
+    /// target's cache key (the same walk `giant explain` uses) and consults
+    /// the action cache. Read-only - and answered from a spawned task, in
+    /// parallel chunks: at thousands of targets the keys take real time,
+    /// and a status query must never make a build command wait.
     async fn query_status(&self, command_id: Option<String>, targets: Vec<TargetId>) {
         if !targets.is_empty()
             && let Some(reason) = self.validate_targets(&targets)
@@ -816,50 +818,77 @@ impl SessionState {
             targets
         };
 
-        let mut memo = std::collections::BTreeMap::new();
-        let mut out = Vec::with_capacity(ids.len());
-        for id in &ids {
-            let status = match crate::explain::walk_target(
-                &self.graph,
-                &self.cache,
-                &self.workspace_root,
-                id,
-                &mut memo,
-            )
-            .await
-            {
-                Ok((key, _)) => {
-                    let entry = self.cache.get_ac(&key).await.ok().flatten();
-                    let (state, last_duration_ms) = match entry {
-                        Some(e) => ("cached", Some(e.duration_ms)),
-                        None => ("stale", None),
-                    };
-                    TargetStatus {
-                        id: id.clone(),
-                        state: state.to_string(),
-                        key: key.to_hex(),
-                        last_duration_ms,
+        let graph = self.graph.clone();
+        let cache = self.cache.clone();
+        let workspace_root = self.workspace_root.clone();
+        let event_tx = self.event_tx.clone();
+        let chunks = self.parallelism.max(1);
+        tokio::spawn(async move {
+            let chunk_size = ids.len().div_ceil(chunks);
+            let mut tasks = tokio::task::JoinSet::new();
+            for chunk in ids.chunks(chunk_size.max(1)) {
+                let chunk = chunk.to_vec();
+                let (graph, cache, workspace_root) =
+                    (graph.clone(), cache.clone(), workspace_root.clone());
+                tasks.spawn(async move {
+                    // Each chunk keeps its own memo: dep keys shared within
+                    // the chunk compute once; across chunks they recompute,
+                    // which costs less than serializing on a shared map.
+                    let mut memo = std::collections::BTreeMap::new();
+                    let mut out = Vec::with_capacity(chunk.len());
+                    for id in &chunk {
+                        let status = match crate::explain::walk_target(
+                            &graph,
+                            &cache,
+                            &workspace_root,
+                            id,
+                            &mut memo,
+                        )
+                        .await
+                        {
+                            Ok((key, _)) => {
+                                let entry = cache.get_ac(&key).await.ok().flatten();
+                                let (state, last_duration_ms) = match entry {
+                                    Some(e) => ("cached", Some(e.duration_ms)),
+                                    None => ("stale", None),
+                                };
+                                TargetStatus {
+                                    id: id.clone(),
+                                    state: state.to_string(),
+                                    key: key.to_hex(),
+                                    last_duration_ms,
+                                }
+                            }
+                            // A key we cannot compute (e.g. a missing declared
+                            // input) reads as stale with no key, rather than
+                            // failing the whole query.
+                            Err(_) => TargetStatus {
+                                id: id.clone(),
+                                state: "stale".to_string(),
+                                key: String::new(),
+                                last_duration_ms: None,
+                            },
+                        };
+                        out.push(status);
                     }
+                    out
+                });
+            }
+            let mut out: Vec<TargetStatus> = Vec::with_capacity(ids.len());
+            while let Some(chunk) = tasks.join_next().await {
+                if let Ok(statuses) = chunk {
+                    out.extend(statuses);
                 }
-                // A key we cannot compute (e.g. a missing declared input) reads
-                // as stale with no key, rather than failing the whole query.
-                Err(_) => TargetStatus {
-                    id: id.clone(),
-                    state: "stale".to_string(),
-                    key: String::new(),
-                    last_duration_ms: None,
-                },
-            };
-            out.push(status);
-        }
-
-        let _ = self
-            .event_tx
-            .send(Event::QueryStatus {
-                command_id,
-                targets: out,
-            })
-            .await;
+            }
+            // Chunks land in completion order; restore the deterministic one.
+            out.sort_by(|a, b| a.id.cmp(&b.id));
+            let _ = event_tx
+                .send(Event::QueryStatus {
+                    command_id,
+                    targets: out,
+                })
+                .await;
+        });
     }
 
     fn start_affected(&mut self, base: String) {
