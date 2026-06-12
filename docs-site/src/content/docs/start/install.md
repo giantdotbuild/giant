@@ -142,8 +142,14 @@ inputs:
 }
 ```
 
-Every `devenv shell` then has the whole suite on PATH, prebuilt. The
-flake also exposes `overlays.default` for setups that prefer
+One caveat: `cachix.pull` registers the substituter, but current devenv
+does not fetch the cache's signing key, and nix only substitutes paths
+signed by a key it trusts. Without the key, nix quietly compiles giant
+from source. Trust the key once per machine - `cachix use giant`, the
+nix.conf lines above, or `nix.settings` on NixOS - and every
+`devenv shell` after that has the whole suite on PATH, prebuilt.
+
+The flake also exposes `overlays.default` for setups that prefer
 `pkgs.giant` / `pkgs.giant-suite` via an overlay.
 
 ## Verify the install
