@@ -354,59 +354,90 @@ fn expand_globs_batched(
         "target",
     ];
 
+    // Anchor each walk at its patterns' literal directory prefix: a glob
+    // like `components/comp7/**/*.yaml` can only match under
+    // `components/comp7/`, so walking the whole workspace for it is pure
+    // waste - and at N targets each declaring such a glob, it was N full
+    // workspace walks per build. Patterns whose first metachar comes
+    // before any directory (e.g. `**/*.go`) keep the workspace root.
+    // Matching itself is unchanged: the same globset, against the same
+    // workspace-relative paths.
+    let mut roots: Vec<PathBuf> = recursive
+        .iter()
+        .map(|g| literal_dir_prefix(g))
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    // Drop roots nested under another root: their files are visited by
+    // the ancestor's walk, and visiting twice would double-match.
+    let mut walk_roots: Vec<PathBuf> = Vec::new();
+    for r in roots {
+        if !walk_roots.iter().any(|kept| r.starts_with(kept)) {
+            walk_roots.push(r);
+        }
+    }
+
     let matches: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
-    let workspace_root_owned = workspace_root.to_path_buf();
-    // Owned copies for the `'static` filter closure: the subpackage dirs to
-    // prune, and the root to make entry paths workspace-relative.
-    let prune_owned: Vec<PathBuf> = prune.iter().map(|p| p.as_path().to_path_buf()).collect();
-    let ws_for_prune = workspace_root.to_path_buf();
+    for walk_root in &walk_roots {
+        let abs_root = workspace_root.join(walk_root);
+        if !abs_root.is_dir() {
+            continue; // nothing there to match
+        }
 
-    ignore::WalkBuilder::new(workspace_root)
-        .standard_filters(false)
-        .hidden(false)
-        .follow_links(false)
-        .filter_entry(move |entry| {
-            let path = entry.path();
-            if path == cache_dir.as_path() {
-                return false;
-            }
-            if let Some(name) = entry.file_name().to_str()
-                && skip_names.contains(&name)
-            {
-                return false;
-            }
-            // Stop at a subpackage boundary - its files belong to that
-            // package, not this glob's. Pruning the boundary directory
-            // skips its whole subtree, so the match callback below never
-            // sees a file under a subpackage. Same `starts_with` predicate
-            // as the shallow-glob branch.
-            let rel = path.strip_prefix(&ws_for_prune).unwrap_or(path);
-            if prune_owned.iter().any(|d| rel.starts_with(d)) {
-                return false;
-            }
-            true
-        })
-        .build_parallel()
-        .run(|| {
-            let matches = Arc::clone(&matches);
-            let workspace_root = workspace_root_owned.clone();
-            let glob_set = Arc::clone(&glob_set);
-            Box::new(move |result| {
-                let Ok(entry) = result else {
-                    return ignore::WalkState::Continue;
-                };
-                if !entry.file_type().is_some_and(|t| t.is_file()) {
-                    return ignore::WalkState::Continue;
-                }
+        let workspace_root_owned = workspace_root.to_path_buf();
+        // Owned copies for the `'static` filter closure: the subpackage dirs
+        // to prune, and the root to make entry paths workspace-relative.
+        let prune_owned: Vec<PathBuf> = prune.iter().map(|p| p.as_path().to_path_buf()).collect();
+        let ws_for_prune = workspace_root.to_path_buf();
+        let cache_dir = cache_dir.clone();
+
+        ignore::WalkBuilder::new(&abs_root)
+            .standard_filters(false)
+            .hidden(false)
+            .follow_links(false)
+            .filter_entry(move |entry| {
                 let path = entry.path();
-                let rel = path.strip_prefix(&workspace_root).unwrap_or(path);
-                if glob_set.is_match(rel) {
-                    matches.lock().unwrap().push(path.to_path_buf());
+                if path == cache_dir.as_path() {
+                    return false;
                 }
-                ignore::WalkState::Continue
+                if let Some(name) = entry.file_name().to_str()
+                    && skip_names.contains(&name)
+                {
+                    return false;
+                }
+                // Stop at a subpackage boundary - its files belong to that
+                // package, not this glob's. Pruning the boundary directory
+                // skips its whole subtree, so the match callback below never
+                // sees a file under a subpackage. Same `starts_with` predicate
+                // as the shallow-glob branch.
+                let rel = path.strip_prefix(&ws_for_prune).unwrap_or(path);
+                if prune_owned.iter().any(|d| rel.starts_with(d)) {
+                    return false;
+                }
+                true
             })
-        });
+            .build_parallel()
+            .run(|| {
+                let matches = Arc::clone(&matches);
+                let workspace_root = workspace_root_owned.clone();
+                let glob_set = Arc::clone(&glob_set);
+                Box::new(move |result| {
+                    let Ok(entry) = result else {
+                        return ignore::WalkState::Continue;
+                    };
+                    if !entry.file_type().is_some_and(|t| t.is_file()) {
+                        return ignore::WalkState::Continue;
+                    }
+                    let path = entry.path();
+                    let rel = path.strip_prefix(&workspace_root).unwrap_or(path);
+                    if glob_set.is_match(rel) {
+                        matches.lock().unwrap().push(path.to_path_buf());
+                    }
+                    ignore::WalkState::Continue
+                })
+            });
+    }
 
     let mut found = Arc::try_unwrap(matches)
         .map(|m| m.into_inner().unwrap())
@@ -414,6 +445,24 @@ fn expand_globs_batched(
     out.append(&mut found);
 
     Ok(out)
+}
+
+/// The literal directory prefix of a glob pattern: the leading path
+/// components before the first one containing a metachar. `a/b/**/*.c`
+/// -> `a/b`; `**/*.go` -> `` (the workspace root).
+fn literal_dir_prefix(pattern: &str) -> PathBuf {
+    let mut prefix = PathBuf::new();
+    for comp in pattern.split('/') {
+        if has_glob_metachars(comp) {
+            break;
+        }
+        prefix.push(comp);
+    }
+    // The last literal component may be a filename, not a directory, but
+    // walking from a file path is a no-op for `is_dir`-guarded roots; a
+    // pattern with no metachars at all never reaches here (it's handled
+    // as a literal above).
+    prefix
 }
 
 fn has_glob_metachars(s: &str) -> bool {
