@@ -31,7 +31,7 @@ jobs:
           - runner: macos-15 # aarch64-darwin
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: DeterminateSystems/determinate-nix-action@v3
       - uses: cachix/cachix-action@v16
         with:
