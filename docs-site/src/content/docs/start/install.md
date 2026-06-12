@@ -142,12 +142,27 @@ inputs:
 }
 ```
 
-One caveat: `cachix.pull` registers the substituter, but current devenv
-does not fetch the cache's signing key, and nix only substitutes paths
-signed by a key it trusts. Without the key, nix quietly compiles giant
-from source. Trust the key once per machine - `cachix use giant`, the
-nix.conf lines above, or `nix.settings` on NixOS - and every
-`devenv shell` after that has the whole suite on PATH, prebuilt.
+One caveat, and it applies to any Cachix cache, not just this one:
+devenv fetches the cache's signing key from Cachix automatically, but
+the nix daemon only accepts substituters from users in its
+`trusted-users` list. For everyone else it prints a warning and
+compiles from source. This is the daemon's security model - accepting
+a cache means accepting its binaries into the shared store - so no
+repo-local config can grant it. One-time setup per machine, either:
+
+```nix
+# NixOS / nix-darwin configuration - all devenv caches then just work
+nix.settings.trusted-users = [ "root" "@wheel" ];
+```
+
+or trust this one cache system-wide without trusting the user:
+
+```bash
+sudo cachix use giant   # appends the substituter + key to /etc/nix/nix.conf
+```
+
+After either, every `devenv shell` in a project that pulls the cache
+has the whole suite on PATH, prebuilt.
 
 The flake also exposes `overlays.default` for setups that prefer
 `pkgs.giant` / `pkgs.giant-suite` via an overlay.
