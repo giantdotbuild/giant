@@ -251,17 +251,6 @@ async fn run(initial_patterns: &[String], config: Option<&std::path::Path>) -> R
             ev = event_rx.recv() => {
                 match ev {
                     Some(ev) => {
-                        let significant = matches!(
-                            ev,
-                            Event::EngineReady
-                                | Event::BuildStarted { .. }
-                                | Event::BuildFinished { .. }
-                                | Event::TargetStarted { .. }
-                                | Event::TargetFinished { .. }
-                                | Event::CommandRejected { .. }
-                                | Event::CommandError { .. }
-                                | Event::CatalogReady
-                        );
                         // Cache state can change when the catalog (re)loads or
                         // a build completes; ask the engine to recompute it
                         // (query.status). The reply lands as a
@@ -279,9 +268,11 @@ async fn run(initial_patterns: &[String], config: Option<&std::path::Path>) -> R
                                 })
                                 .await;
                         }
-                        if significant {
-                            terminal.draw(|f| ui::draw(f, &state))?;
-                        }
+                        // No draw here, deliberately: a large build delivers
+                        // thousands of events in a burst, and a synchronous
+                        // frame per event freezes the UI for its duration.
+                        // The 30Hz ticker below renders the accumulated
+                        // state; 33ms of visual latency is imperceptible.
                     }
                     None => {
                         // Session ended. Render one last frame, wait
