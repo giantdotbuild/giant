@@ -17,11 +17,11 @@ $ giant task deploy
 deployed
 ```
 
-The engine doesn't know what a task is - `giant-task` re-reads
-`giant.yaml` with its own schema and ignores everything except the
-`tasks:` block. If you don't install `giant-task`, the `tasks:`
-field in your config is simply ignored. Other porcelains can claim
-their own top-level keys the same way.
+The engine doesn't know what a task is - `giant-task` asks the engine
+which packages exist, then re-reads each package's `giant.yaml` with its
+own schema, looking only at the `tasks:` and `services:` blocks. If you
+don't install `giant-task`, those fields in your config are simply
+ignored. Other porcelains can claim their own top-level keys the same way.
 
 ## Install
 
@@ -80,7 +80,64 @@ listening on :8080
 ```
 
 `giant-task` first asks `giant build` to materialize the deps, then
-runs the task's `command` via `sh -c` in the workspace root.
+runs the task's `command` via `sh -c` in the task's package directory
+(here the root, `//`).
+
+## Tasks in subdirectories
+
+Tasks are packaged like targets. A `tasks:` block in any package's
+`giant.yaml` - not just the root - defines tasks labelled
+`//<package>:<name>`, and each task's command runs in that package's
+directory by default. So in a monorepo, a subproject keeps its own tasks
+next to its code:
+
+```
+my-repo/
+├── giant.yaml              # workspace root (//)
+├── blackmetal/giant.yaml   # tasks //blackmetal:test, //blackmetal:fmt
+└── cryosleep/giant.yaml    # tasks //cryosleep:test, //cryosleep:fmt
+```
+
+```yaml
+# blackmetal/giant.yaml
+tasks:
+  test:
+    command: "go test ./..."   # runs in blackmetal/
+```
+
+Both subprojects can define `test` without colliding - the labels
+`//blackmetal:test` and `//cryosleep:test` are distinct. `giant task list`
+from anywhere shows the whole tree, grouped by package.
+
+### How a bare name resolves
+
+You rarely type the full label. A bare `giant task test` resolves from
+your current directory:
+
+- **Inside a package**, the nearest enclosing package wins. From
+  `blackmetal/`, `giant task test` runs `//blackmetal:test` even if other
+  packages also define `test`.
+- **Unique across the workspace**, it runs wherever it lives. If only
+  `blackmetal` defines `deploy`, `giant task deploy` works from anywhere.
+- **Shared by several packages with none enclosing your cwd** (e.g. at the
+  repo root with `test` in two subprojects), it's ambiguous and giant-task
+  asks you to qualify it:
+
+```console
+$ giant task test
+giant-task: task 'test' is defined in several packages; qualify it,
+e.g. `giant task //blackmetal:test` (candidates: //blackmetal:test, //cryosleep:test)
+```
+
+A `//pkg:name` label always resolves directly, from any directory.
+
+### References across packages
+
+`needs:`, `finally:`, and `services:` entries resolve **within the task's
+own package** when written bare, or across packages when written as a
+label. A `//blackmetal:test` task with `needs: ["lint"]` runs
+`//blackmetal:lint`; to reach another package, write the full label
+(`needs: ["//cryosleep:gen"]`).
 
 ## The task schema
 
@@ -91,9 +148,11 @@ tasks:
                                 #   if `services:` is set (foreground supervise)
     description: "..."          # optional; shown in `giant task list`
     deps: ["..."]               # target labels (//pkg:name) to build before running
-    needs: ["..."]              # other task names to run before command
-    services: ["..."]           # service names to start before, stop after
-    finally: ["..."]            # task names to run after command (always)
+    needs: ["..."]              # task names (same package) or //pkg:name labels,
+                                #   run before command
+    services: ["..."]           # service names (same package) or labels; start
+                                #   before, stop after
+    finally: ["..."]            # task names or labels to run after command (always)
     args:                       # optional; ordered list, bound positionally
       - name: env
         default: "..."          # present => optional; absent => required
@@ -103,7 +162,8 @@ tasks:
         variadic: true          # trailing only; collects the rest into $@
     env:                        # extra env vars
       KEY: "value"
-    cwd: "..."                  # workspace-relative; default = root
+    cwd: "..."                  # package-relative (// escapes to root);
+                                #   default = the task's package directory
     timeout_secs: 300           # kill after N seconds; default = no timeout
     inputs: ["..."]             # optional; extra watch globs for files no
                                 # target owns (consulted by --watch)
@@ -150,10 +210,12 @@ Because the watching lives in core, a task and a `giant build --watch`
 see the same change signal from one shared file-watching implementation.
 
 Task names follow the same rules as workspace names (alphanumeric,
-hyphen, underscore; no leading digit). Any valid name is allowed - a task
-named `build` or `test` is fine. Tasks are always invoked as `giant task
-<name>`, so they never collide with a `giant` command like `giant build`
-(which runs the build porcelain); the two namespaces are separate.
+hyphen, underscore; no leading digit), and need only be unique **within
+their package** - two packages can both define `test`. Any valid name is
+allowed; a task named `build` or `test` is fine. Tasks are always invoked
+as `giant task <name>`, so they never collide with a `giant` command like
+`giant build` (which runs the build porcelain); the two namespaces are
+separate.
 
 ## The service schema
 
@@ -170,7 +232,8 @@ services:
       timeout_secs: 30          # give up after this (default 30)
     env:                        # extra env vars
       KEY: "value"
-    cwd: "..."                  # workspace-relative; default = root
+    cwd: "..."                  # package-relative (// escapes to root);
+                                #   default = the service's package directory
 ```
 
 A service is a long-lived process. When a task brings up services, the
@@ -405,16 +468,53 @@ A body without a shebang runs under `sh -c` as usual.
 
 ## Listing tasks
 
+`giant task list` (or `giant-task --list`) shows every task in the
+workspace, grouped by package:
+
 ```console
-$ giant task list             # or `giant-task --list`
+$ giant task list
 tasks (my-monorepo)
+//
   serve    Run the server locally
-  deploy   Deploy to an environment
+//blackmetal
+  test     Run the test suite
+//cryosleep
   test     Run the test suite
 ```
 
 If you have no tasks declared, this prints a single dim "no tasks
 defined" note instead.
+
+### Output formats
+
+`--format` selects how the list is rendered (it works before the task
+name or after `list`):
+
+| Format | Output |
+|---|---|
+| `text` (default) | Human-readable, grouped by package. |
+| `labels` | One `//pkg:name` per line - pipe into a fuzzy finder. |
+| `json` | Structured: workspace name, and each task's label, package, description, and declared arg schema. |
+
+```console
+$ giant task list --format labels
+//:serve
+//blackmetal:test
+//cryosleep:test
+```
+
+The `json` form carries each task's `args` (names, defaults, `choices`,
+`variadic`), so an external picker can show or fill a task's arguments. A
+fuzzy-finder binding, for example, can list labels and preview each task's
+signature with `giant task <label> --help`:
+
+```bash
+giant task "$(giant task list --format labels | fzf \
+  --preview 'giant task {} --help')"
+```
+
+Giant deliberately ships no built-in fuzzy finder or task TUI - the list
+output is designed to feed the picker you already use.
 
 ## Dep-phase output
 
@@ -469,9 +569,9 @@ giant-task --completions nushell >> ~/.config/nushell/completions.nu
 ```
 
 Dynamic completion of task names works at TAB time - `giant-task`
-reads the nearest `giant.yaml` and returns the matching tasks,
-including their descriptions. Same idea for `giant` itself: target
-labels from the merged `giant.yaml` package files.
+scans the workspace and returns the matching tasks (bare names plus their
+`//pkg:name` labels), including their descriptions. Same idea for `giant`
+itself: target labels from the merged `giant.yaml` package files.
 
 ## How it composes with the engine
 
@@ -481,12 +581,13 @@ contract:
 - **Build deps:** spawned as `giant build <labels…> --events ndjson`,
   the output parsed event-by-event so the porcelain can render a
   compact summary instead of streaming everything.
-- **Config schema:** parsed by `giant-task` directly with its own
-  narrow `TopLevel { workspace, tasks }` shape. Core's wider config
-  parsing isn't involved.
-- **Workspace root:** `giant-task` walks up from cwd looking for
-  `giant.yaml` / `giant.json` (~30 LOC, deliberately not reaching
-  into Giant's private modules).
+- **Package discovery:** `giant-task` calls the engine's workspace scan
+  to learn which packages exist and where their config files are - the
+  same scan core emits as `package.described` events over the protocol,
+  including directories that define only tasks.
+- **Config schema:** each package's `giant.yaml` is parsed by `giant-task`
+  directly with its own narrow `TopLevel { tasks, services }` shape. Core's
+  wider config parsing isn't involved.
 
 If you want to write your own porcelain (`giant-deploy`,
 `giant-bench`, anything), see [Porcelains](/extending/porcelains/)

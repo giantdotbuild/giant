@@ -53,10 +53,15 @@ The `t` field discriminates. All other fields are type-specific.
 rather than assuming a feature by protocol number.
 
 After `engine.hello`, a persistent session streams its catalog - one
-`target.described` per target in the graph - then `engine.ready`
-to signal it will accept commands.
+`package.described` per discovered package, then one `target.described`
+per target in the graph - then `engine.ready` to signal it will accept
+commands.
 
 ```jsonc
+{ "t": "package.described",
+  "package": "src/go/server",   // workspace-relative dir ("" for the root)
+  "config": "src/go/server/giant.yaml" }
+
 { "t": "target.described",
   "id": "//src/go/server:server",
   "command": "go build -o bin/server ./cmd/server",
@@ -68,6 +73,12 @@ to signal it will accept commands.
 
 { "t": "engine.ready" }
 ```
+
+A `package.described` is emitted for every directory the scan finds a
+config in, **including directories that define no targets** (a package
+with only `tasks:`). This lets a porcelain learn the package layout -
+`giant-task` uses it to find every package's tasks - without re-walking
+the tree itself.
 
 ### Config
 
@@ -89,7 +100,7 @@ A running session watches `giant.yaml` / `giant.json`. On an edit (or an
 explicit `config.reload` command) it re-reads the config and re-emits the
 catalog without a restart. The swap is bracketed by these two events;
 between them the client drops its old catalog and rebuilds it from the
-fresh `target.described` stream.
+fresh `package.described` + `target.described` stream.
 
 ```jsonc
 { "t": "catalog.invalidating" }

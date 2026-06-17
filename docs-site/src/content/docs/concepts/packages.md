@@ -44,10 +44,19 @@ path means the target whose name matches the last path segment.
 
 The root `giant.yaml` is mandatory: it marks the workspace (what `//`
 resolves against) and is the only file that may carry workspace-global
-settings - `workspace`, `cache`, `remote` - plus the porcelain-owned
-`tasks:` / `services:` blocks (read by `giant-task`). A nested package
-file carries only `targets:`; putting a `cache:` or `workspace:` in one
-is a loud error; it is never silently ignored.
+settings - `workspace`, `cache`, `remote`. A nested package file carries
+`targets:` and the porcelain-owned `tasks:` / `services:` blocks (read by
+`giant-task`); putting a `cache:` or `workspace:` in one is a loud error,
+never silently ignored.
+
+## Tasks and services are packaged too
+
+The `tasks:` and `services:` blocks `giant-task` reads follow the same
+package rules as targets. A task in `crates/giant/giant.yaml` is
+`//crates/giant:test`, its command runs in that package's directory by
+default, and two packages can each define a `test` task without colliding.
+See [giant-task](/extending/giant-task/#tasks-in-subdirectories) for how a
+bare `giant test` resolves from your current directory.
 
 ## Package-relative paths
 
