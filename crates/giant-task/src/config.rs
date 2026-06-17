@@ -148,6 +148,13 @@ impl TaskConfig {
         let mut services = IndexMap::new();
         for pkg in &core.packages {
             let path = workspace_root.join(&pkg.config);
+            // A generator-only package (only `giant.<infix>.yaml`, no primary
+            // config) has no file to read tasks from - core reports its
+            // directory as the config path. Its targets are already merged by
+            // core; it contributes no tasks/services here.
+            if !path.is_file() {
+                continue;
+            }
             let top = parse(&path)?;
             for (name, spec) in top.tasks {
                 tasks.insert(
@@ -491,6 +498,33 @@ mod tests {
         assert!(cfg.tasks.contains_key("//blackmetal:test"));
         assert_eq!(cfg.tasks["//blackmetal:test"].package, "blackmetal");
         assert_eq!(cfg.tasks["//blackmetal:test"].name, "test");
+    }
+
+    #[test]
+    fn generator_only_package_does_not_crash_scan() {
+        // A package whose only config is a generated `giant.<infix>.yaml`
+        // (no primary giant.yaml) - core reports its directory as the config
+        // path. The scan must skip it, not try to read a directory.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("giant.yaml"),
+            "workspace: { name: w }\ntasks:\n  build:\n    command: \"true\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("cmd/foo")).unwrap();
+        fs::write(
+            root.join("cmd/foo/giant.gen.yaml"),
+            "targets:\n  - name: bin\n    command: \"true\"\n    outputs: [\"out\"]\n",
+        )
+        .unwrap();
+
+        let cfg = TaskConfig::scan(Some(&root.join("giant.yaml")))
+            .expect("generator-only package must not crash the scan");
+        std::mem::forget(dir);
+        // Root task loads; the generator-only package contributes nothing.
+        assert!(cfg.tasks.contains_key("//:build"));
+        assert_eq!(cfg.tasks.len(), 1);
     }
 
     #[test]
