@@ -119,6 +119,14 @@ pub enum Event {
     #[serde(rename = "watch.changed")]
     WatchChanged { paths: Vec<String> },
 
+    /// Describes one discovered package: its workspace-relative directory
+    /// (`""` for the root) and the workspace-relative path to its primary
+    /// config. Emitted in the catalog stream before the targets, including
+    /// packages that contribute no targets (a tasks-only directory), so
+    /// porcelains learn the package layout without re-walking the tree.
+    #[serde(rename = "package.described")]
+    PackageDescribed { package: String, config: String },
+
     /// Describes one target in the merged graph. Emitted by
     /// `giant list --events ndjson` and (when it lands) by the
     /// `query.catalog` channel of a long-running engine. Exporting

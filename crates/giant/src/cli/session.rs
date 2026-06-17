@@ -94,9 +94,9 @@ pub async fn execute(args: SessionArgs, global: &GlobalFlags) -> anyhow::Result<
         }
     };
 
-    // Catalog stream: one target.described per target in the merged
-    // graph, then engine.ready.
-    emit_catalog(&event_tx, &prepared.graph).await;
+    // Catalog stream: a package.described per discovered package, then a
+    // target.described per target in the merged graph, then engine.ready.
+    emit_catalog(&event_tx, &prepared.config.packages, &prepared.graph).await;
     let _ = event_tx.send(Event::EngineReady).await;
 
     let mut state = SessionState::new(
@@ -301,6 +301,8 @@ pub async fn run_watch_command(
 /// Carries the engine state across commands. One per session.
 struct SessionState {
     graph: Arc<BuildGraph>,
+    /// Discovered packages, re-emitted in the catalog after each reload.
+    packages: Vec<crate::config::PackageInfo>,
     cache: LocalCache,
     workspace_root: AbsPath,
     /// Resolved absolute cache directory - the watcher must exclude it
@@ -397,6 +399,7 @@ impl SessionState {
         let log_capture = crate::executor::LogCapture::from_cache_config(&prepared.config.cache);
         let state_dir = std::path::PathBuf::from(&prepared.config.state.dir);
         Self {
+            packages: prepared.config.packages,
             graph: Arc::new(prepared.graph),
             cache: prepared.cache,
             workspace_root: prepared.workspace_root,
@@ -996,6 +999,7 @@ impl SessionState {
                 self.log_capture = crate::executor::LogCapture::from_cache_config(&p.config.cache);
                 self.workspace_root = p.workspace_root;
                 self.cache = p.cache;
+                self.packages = p.config.packages;
                 self.graph = Arc::new(p.graph);
             }
             Err(e) => {
@@ -1011,7 +1015,7 @@ impl SessionState {
             }
         }
 
-        emit_catalog(&self.event_tx, &self.graph).await;
+        emit_catalog(&self.event_tx, &self.packages, &self.graph).await;
         let _ = self.event_tx.send(Event::CatalogReady).await;
 
         // Restart subscriptions against the (possibly new) graph, dropping
@@ -1271,8 +1275,20 @@ fn spawn_config_watcher(
     Some(handle)
 }
 
-async fn emit_catalog(tx: &EventSender, graph: &BuildGraph) {
+async fn emit_catalog(
+    tx: &EventSender,
+    packages: &[crate::config::PackageInfo],
+    graph: &BuildGraph,
+) {
     use crate::model::Input;
+    for pkg in packages {
+        let _ = tx
+            .send(Event::PackageDescribed {
+                package: pkg.package.clone(),
+                config: pkg.config.clone(),
+            })
+            .await;
+    }
     for (id, spec) in graph.iter() {
         let mut tags: Vec<String> = spec.tags.iter().cloned().collect();
         tags.sort();

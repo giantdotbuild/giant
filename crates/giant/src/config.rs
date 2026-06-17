@@ -25,6 +25,16 @@ pub enum ConfigError {
     Validation(String),
 }
 
+/// One discovered package: its workspace-relative directory (`""` for the
+/// root) and the workspace-relative path to its primary config file. Built
+/// by `scan` and surfaced over the protocol so porcelains (the task runner)
+/// can find every package's config without re-walking the tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageInfo {
+    pub package: String,
+    pub config: String,
+}
+
 /// Top-level config. NOT `deny_unknown_fields` - porcelains (giant-task,
 /// future giant-deploy, etc.) own their own top-level sections like
 /// `tasks:`. Core silently accepts them; the porcelain re-parses the
@@ -41,6 +51,11 @@ pub struct Config {
 
     #[serde(default)]
     pub targets: Vec<TargetSpec>,
+
+    /// Discovered packages, in stable order by directory. Populated by
+    /// `scan`, not read from the file, so skipped for deserialization.
+    #[serde(skip)]
+    pub packages: Vec<PackageInfo>,
 
     #[serde(default)]
     pub cache: CacheConfig,
@@ -452,6 +467,28 @@ impl Config {
             cfg.targets.append(&mut pkg.targets);
         }
 
+        // One catalog entry per package directory, pointing at its primary
+        // config (the only file the task porcelain reads). A dir holding only
+        // generator-owned `giant.<infix>.yaml` files has no primary; fall back
+        // to the directory itself so the package still surfaces.
+        let mut packages: Vec<PackageInfo> = package_dirs
+            .iter()
+            .map(|pkg| {
+                let dir = if pkg.is_empty() {
+                    root_dir.to_path_buf()
+                } else {
+                    root_dir.join(pkg)
+                };
+                let config = find_config_in_dir(&dir).unwrap_or(dir);
+                PackageInfo {
+                    package: pkg.clone(),
+                    config: ws_rel(root_dir, &config),
+                }
+            })
+            .collect();
+        packages.sort_by(|a, b| a.package.cmp(&b.package));
+        cfg.packages = packages;
+
         cfg.compute_prune_dirs(&package_dirs);
         cfg.validate_merged()?;
         Ok(cfg)
@@ -565,6 +602,15 @@ fn reject_root_only_sections(path: &Path) -> Result<(), ConfigError> {
         )));
     }
     Ok(())
+}
+
+/// `path` made workspace-relative to `root_dir`, with `/` separators.
+/// Falls back to the raw path if it isn't under the root.
+fn ws_rel(root_dir: &Path, path: &Path) -> String {
+    path.strip_prefix(root_dir)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 /// Whether `path`'s config declares a non-empty `workspace.name` - the
@@ -937,6 +983,41 @@ sandbox:
         // Output + cwd resolved package-relative.
         assert_eq!(t.outputs[0].as_path().to_str().unwrap(), "src/lib/out");
         assert_eq!(t.cwd.as_path().to_str().unwrap(), "src/lib");
+    }
+
+    #[test]
+    fn scan_records_packages_including_tasks_only_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("giant.yaml"), "workspace:\n  name: w\n").unwrap();
+        std::fs::create_dir_all(root.join("src/lib")).unwrap();
+        std::fs::write(
+            root.join("src/lib/giant.yaml"),
+            "targets:\n  - name: build\n    inputs: [\"a.go\"]\n    outputs: [\"out\"]\n    command: \"true\"\n",
+        )
+        .unwrap();
+        // A tasks-only package (no targets) must still surface in the catalog.
+        std::fs::create_dir_all(root.join("svc")).unwrap();
+        std::fs::write(
+            root.join("svc/giant.yaml"),
+            "tasks:\n  test:\n    command: \"true\"\n",
+        )
+        .unwrap();
+
+        let cfg = Config::scan(root).unwrap();
+        let got: Vec<(&str, &str)> = cfg
+            .packages
+            .iter()
+            .map(|p| (p.package.as_str(), p.config.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("", "giant.yaml"),
+                ("src/lib", "src/lib/giant.yaml"),
+                ("svc", "svc/giant.yaml"),
+            ]
+        );
     }
 
     #[test]
