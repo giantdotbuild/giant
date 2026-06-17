@@ -6,8 +6,8 @@
 //!
 //! Communicates with the engine via subprocess: builds run as
 //! `giant build <deps...>`, the user sees the normal renderer.
-//! Task `command:` runs in the workspace root (or task `cwd:`) via
-//! `sh -c`, stdio inherited.
+//! Task `command:` runs in the task's package directory (or task
+//! `cwd:`) via `sh -c`, stdio inherited.
 
 mod completions;
 mod config;
@@ -19,7 +19,6 @@ mod services;
 mod signals;
 mod tty;
 mod watch;
-mod workspace;
 
 use clap::{CommandFactory, Parser};
 use std::ffi::OsString;
@@ -170,19 +169,12 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
     }
 
     // Precedence: --config flag → GIANT_CONFIG env var → walk up from cwd
-    // looking for giant.yaml / giant.json.
-    let cfg_path = match cli
+    // to the workspace root. `scan` discovers every package and merges
+    // their tasks; an explicit path pins the root config.
+    let explicit = cli
         .config
-        .or_else(|| std::env::var_os("GIANT_CONFIG").map(std::path::PathBuf::from))
-    {
-        // Canonicalise so a relative path still resolves to a real
-        // workspace root. Falls back to the raw path if canonicalize
-        // fails (e.g. file doesn't exist; we want the load error, not
-        // a confusing canonicalise error).
-        Some(p) => p.canonicalize().unwrap_or(p),
-        None => workspace::find_config(&std::env::current_dir()?)?,
-    };
-    let cfg = config::TaskConfig::load(&cfg_path)?;
+        .or_else(|| std::env::var_os("GIANT_CONFIG").map(std::path::PathBuf::from));
+    let cfg = config::TaskConfig::scan(explicit.as_deref())?;
 
     // `--list`, the `list` name, or no task name → print the task list.
     if cli.list || matches!(name.as_deref(), None | Some("list")) {
@@ -192,21 +184,18 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
     let name = name.expect("None handled above");
 
     let parsed = parse_task_args(rest)?;
+    let cwd = std::env::current_dir()?;
 
     // Per-task help: `giant <task> --help` prints the task's signature.
     if parsed.want_help {
-        let spec = cfg
-            .tasks
-            .get(&name)
-            .ok_or_else(|| anyhow::anyhow!("no task named '{name}' - try `giant task --list`"))?;
-        render::task_help(&name, spec);
+        let label = cfg.resolve(&name, &cwd)?;
+        render::task_help(&cfg.tasks[&label]);
         return Ok(0);
     }
 
-    let workspace_root = cfg_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?
-        .to_path_buf();
+    // Resolve the bare name (or `//pkg:name` label) to a single task,
+    // interpreting bare names from cwd (nearest enclosing package wins).
+    let label = cfg.resolve(&name, &cwd)?;
 
     let inv = runner::Invocation {
         positionals: &parsed.positionals,
@@ -218,8 +207,8 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
         // Watching now happens in the engine session, which owns the
         // debouncer; `--quiet-ms` / `--max-delay-ms` are no longer wired
         // through. They stay accepted for compatibility.
-        watch::loop_forever(cfg, &cfg_path, &workspace_root, &name, inv, cli.verbose).await
+        watch::loop_forever(cfg, explicit.as_deref(), &label, inv, cli.verbose).await
     } else {
-        runner::run(&cfg, &name, inv, &workspace_root, cli.verbose).await
+        runner::run(&cfg, &label, inv, cli.verbose).await
     }
 }

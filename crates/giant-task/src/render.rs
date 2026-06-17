@@ -3,11 +3,11 @@
 //! Style-matches `giant build` - dim `·` notes for one-off lines,
 //! colored verbs reserved for the running phase. Auto-detects tty.
 
-use crate::config::TaskConfig;
-use crate::schema::TaskSpec;
+use crate::config::{Task, TaskConfig};
 use anstyle::{AnsiColor, Color, Style};
 use giant::events::TargetCounts;
 use giant::format_duration;
+use indexmap::IndexMap;
 use std::io::IsTerminal;
 
 fn enabled() -> bool {
@@ -97,27 +97,45 @@ pub fn list(cfg: &TaskConfig) {
     let workspace = paint(dim(), &format!("({})", cfg.workspace_name));
     println!("{header} {workspace}");
 
-    let width = cfg.tasks.keys().map(|k| k.len()).max().unwrap_or(0);
+    // Group by package, preserving discovery order. Bare names are shown
+    // under each package's `//pkg` heading; the heading is the prefix you
+    // qualify with when a bare name is ambiguous.
+    let mut by_pkg: IndexMap<&str, Vec<&Task>> = IndexMap::new();
+    for task in cfg.tasks.values() {
+        by_pkg.entry(task.package.as_str()).or_default().push(task);
+    }
+    let width = cfg.tasks.values().map(|t| t.name.len()).max().unwrap_or(0);
 
-    for (name, spec) in &cfg.tasks {
-        let name_s = paint(accent(), name);
-        let desc = spec.description.as_deref().unwrap_or("");
-        println!(
-            "  {name_s:<padded$}  {desc}",
-            padded = width + accent_padding()
-        );
+    for (pkg, tasks) in &by_pkg {
+        let heading = if pkg.is_empty() {
+            "//".to_string()
+        } else {
+            format!("//{pkg}")
+        };
+        println!("{}", paint(dim(), &heading));
+        for task in tasks {
+            let name_s = paint(accent(), &task.name);
+            let desc = task.spec.description.as_deref().unwrap_or("");
+            println!(
+                "  {name_s:<padded$}  {desc}",
+                padded = width + accent_padding()
+            );
+        }
     }
 }
 
-/// Print one task's signature, the `giant <task> --help` view: a usage
-/// line built from the declared args, then a line per arg.
-pub fn task_help(name: &str, spec: &TaskSpec) {
-    let header = paint(accent(), name);
+/// Print one task's signature, the `giant <task> --help` view: the
+/// canonical label, then a usage line built from the declared args (under
+/// the bare name the user types), then a line per arg.
+pub fn task_help(task: &Task) {
+    let spec = &task.spec;
+    let header = paint(accent(), &crate::config::label(&task.package, &task.name));
     match &spec.description {
         Some(d) => println!("{header} - {d}"),
         None => println!("{header}"),
     }
 
+    let name = &task.name;
     let mut usage = format!("  usage: giant {name}");
     for a in &spec.args {
         if a.variadic {

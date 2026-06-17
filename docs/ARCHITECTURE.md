@@ -128,12 +128,23 @@ tool this size, and these two cover the cache-sharing cases that matter.
 ## Tasks live in a porcelain
 
 The core has no `task` subcommand and no `tasks:` schema. `giant-task` owns all
-of it: it reads the `tasks:` block, runs commands with their declared
+of it: it reads each package's `tasks:` block, runs commands with their declared
 arguments, builds any target dependencies first through the engine, and handles
 the long-running and orchestration features (services with readiness probes,
 `needs`, `finally`, shell completions). `giant <task>` falls through to it once
 built-ins and other porcelains have had their turn, so a task feels like a
 first-class command without the engine knowing tasks exist.
+
+Tasks are packaged like targets. A task defined in `<pkg>/giant.yaml` has the
+label `//<pkg>:<name>`, and its command runs in that package directory by
+default. The porcelain discovers packages from the engine - core records every
+config it scans and reports them, including package directories that define
+only tasks - so a task can live in any subdirectory, not just the workspace
+root. A bare `giant test` resolves to the nearest enclosing package; when a name
+is shared by several packages and none encloses the current directory, the
+invocation is ambiguous and the `//pkg:name` label disambiguates. `needs`,
+`finally`, and `services` references resolve within the task's own package, or
+across packages when written as a label.
 
 ## Sandboxing and verify
 

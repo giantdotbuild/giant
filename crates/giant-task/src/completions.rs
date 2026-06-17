@@ -5,7 +5,6 @@
 //! at TAB time - fast enough at typical config sizes.
 
 use crate::config::TaskConfig;
-use crate::workspace;
 use clap::CommandFactory;
 use clap_complete::{CompletionCandidate, Shell};
 use std::ffi::OsStr;
@@ -38,27 +37,26 @@ pub fn emit(shell: ShellChoice) {
     }
 }
 
-/// Dynamic completion for the task-name positional. Reads the nearest
-/// giant.yaml and returns task names. Failure is silent - no
-/// candidates is better than an error popping up at TAB time.
+/// Dynamic completion for the task-name positional. Scans the workspace
+/// and returns bare task names plus their `//pkg:name` labels. Failure is
+/// silent - no candidates is better than an error popping up at TAB time.
 pub fn complete_task_names(current: &OsStr) -> Vec<CompletionCandidate> {
     let prefix = current.to_string_lossy();
     let candidates = (|| -> Option<Vec<CompletionCandidate>> {
-        let cwd = std::env::current_dir().ok()?;
-        let cfg_path = workspace::find_config(&cwd).ok()?;
-        let cfg = TaskConfig::load(&cfg_path).ok()?;
-        let out: Vec<CompletionCandidate> = cfg
-            .tasks
-            .iter()
-            .filter(|(n, _)| n.starts_with(prefix.as_ref()))
-            .map(|(n, spec)| {
-                let mut cand = CompletionCandidate::new(n);
-                if let Some(desc) = spec.description.clone() {
-                    cand = cand.help(Some(desc.into()));
-                }
-                cand
-            })
-            .collect();
+        let cfg = TaskConfig::scan(None).ok()?;
+        let mut out = Vec::new();
+        let mut seen_bare = std::collections::HashSet::new();
+        for (label, task) in &cfg.tasks {
+            let help = || task.spec.description.clone().map(Into::into);
+            // Bare name (deduped across packages) for the common case.
+            if seen_bare.insert(task.name.as_str()) && task.name.starts_with(prefix.as_ref()) {
+                out.push(CompletionCandidate::new(&task.name).help(help()));
+            }
+            // Full label, for qualifying an ambiguous bare name.
+            if label.starts_with(prefix.as_ref()) {
+                out.push(CompletionCandidate::new(label).help(help()));
+            }
+        }
         Some(out)
     })();
     candidates.unwrap_or_default()

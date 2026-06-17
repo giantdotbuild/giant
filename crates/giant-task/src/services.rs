@@ -11,10 +11,10 @@
 //! the inspector handles is tied to the `RunningService` they
 //! belong to.
 
+use crate::config::{Service, TaskConfig, package_cwd, resolve_ref};
 use crate::render;
-use crate::schema::{ReadyProbe, ServiceSpec};
+use crate::schema::ReadyProbe;
 use anstyle::{AnsiColor, Color, Style};
-use indexmap::IndexMap;
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -65,14 +65,13 @@ impl std::fmt::Debug for RunningService {
 /// poll the readiness probe. Returns once the service is ready (or
 /// errors).
 pub async fn start(
-    name: &str,
-    spec: &ServiceSpec,
+    label: &str,
+    svc: &Service,
     workspace_root: &Path,
 ) -> Result<RunningService, ServiceError> {
-    let cwd = match &spec.cwd {
-        Some(rel) => workspace_root.join(rel),
-        None => workspace_root.to_path_buf(),
-    };
+    let spec = &svc.spec;
+    // Default cwd is the service's package directory.
+    let cwd = package_cwd(workspace_root, &svc.package, spec.cwd.as_deref());
 
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(&spec.command);
@@ -84,15 +83,13 @@ pub async fn start(
     // tokio's default behaviour (it doesn't clear).
     cmd.kill_on_drop(false);
 
-    let mut handle =
-        ProcessHandle::<BroadcastOutputStream>::spawn(name.to_string(), cmd).map_err(|source| {
-            ServiceError::Spawn {
-                name: name.to_string(),
-                source,
-            }
+    let mut handle = ProcessHandle::<BroadcastOutputStream>::spawn(label.to_string(), cmd)
+        .map_err(|source| ServiceError::Spawn {
+            name: label.to_string(),
+            source,
         })?;
 
-    let prefix_for_stdout = colored_prefix(name);
+    let prefix_for_stdout = colored_prefix(&svc.name);
     let prefix_for_stderr = prefix_for_stdout.clone();
     let stdout_inspector = handle.stdout().inspect_lines(
         move |line| {
@@ -110,7 +107,7 @@ pub async fn start(
     );
 
     if let Some(probe) = &spec.ready
-        && let Err(e) = wait_ready(name, &mut handle, probe, &cwd).await
+        && let Err(e) = wait_ready(label, &mut handle, probe, &cwd).await
     {
         // The probe timed out or the service exited prematurely - we
         // need to clean up the handle so its on-drop assertion
@@ -123,7 +120,7 @@ pub async fn start(
     }
 
     Ok(RunningService {
-        name: name.to_string(),
+        name: svc.name.clone(),
         handle,
         _stdout_inspector: stdout_inspector,
         _stderr_inspector: stderr_inspector,
@@ -136,22 +133,26 @@ pub async fn start(
 /// the started services in start order (so the caller can stop them - and
 /// roll them back on failure - sensibly).
 pub async fn start_group(
-    services: &IndexMap<String, ServiceSpec>,
-    names: &[String],
-    workspace_root: &Path,
+    cfg: &TaskConfig,
+    refs: &[String],
+    from_pkg: &str,
 ) -> Result<Vec<RunningService>, (Vec<RunningService>, ServiceError)> {
-    // The group is the listed services plus their transitive `needs`.
+    let services = &cfg.services;
+    let workspace_root = cfg.workspace_root.as_path();
+
+    // The group is the listed services plus their transitive `needs`, all
+    // as labels (each reference resolved within its declaring package).
     let mut group: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut stack: Vec<String> = names.to_vec();
-    while let Some(n) = stack.pop() {
-        if !seen.insert(n.clone()) {
+    let mut stack: Vec<String> = refs.iter().map(|r| resolve_ref(r, from_pkg)).collect();
+    while let Some(lbl) = stack.pop() {
+        if !seen.insert(lbl.clone()) {
             continue;
         }
-        if let Some(spec) = services.get(&n) {
-            stack.extend(spec.needs.iter().cloned());
+        if let Some(svc) = services.get(&lbl) {
+            stack.extend(svc.spec.needs.iter().map(|n| resolve_ref(n, &svc.package)));
         }
-        group.push(n);
+        group.push(lbl);
     }
     render::note(&format!("starting services: {}", group.join(", ")));
 
@@ -162,11 +163,14 @@ pub async fn start_group(
         // Services not yet started whose needs are all ready.
         let eligible: Vec<String> = group
             .iter()
-            .filter(|n| !ready.contains(*n))
-            .filter(|n| {
-                services
-                    .get(*n)
-                    .is_some_and(|s| s.needs.iter().all(|d| ready.contains(d)))
+            .filter(|lbl| !ready.contains(*lbl))
+            .filter(|lbl| {
+                services.get(*lbl).is_some_and(|s| {
+                    s.spec
+                        .needs
+                        .iter()
+                        .all(|d| ready.contains(&resolve_ref(d, &s.package)))
+                })
             })
             .cloned()
             .collect();
@@ -182,10 +186,10 @@ pub async fn start_group(
         }
 
         // Start this level concurrently; each `start` returns once ready.
-        let futures = eligible.into_iter().map(|name| {
-            let spec = services.get(&name).expect("in group → defined").clone();
+        let futures = eligible.into_iter().map(|label| {
+            let svc = services.get(&label).expect("in group → defined").clone();
             let root = workspace_root.to_path_buf();
-            tokio::spawn(async move { (name.clone(), start(&name, &spec, &root).await) })
+            tokio::spawn(async move { (label.clone(), start(&label, &svc, &root).await) })
         });
         let results = futures_util::future::join_all(futures).await;
 
@@ -340,17 +344,22 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::ServiceSpec;
     use std::collections::HashMap;
 
-    fn spec(command: &str, ready: Option<ReadyProbe>) -> ServiceSpec {
-        ServiceSpec {
-            command: command.into(),
-            description: None,
-            deps: vec![],
-            needs: vec![],
-            ready,
-            env: HashMap::new(),
-            cwd: None,
+    fn service(name: &str, command: &str, ready: Option<ReadyProbe>) -> Service {
+        Service {
+            package: String::new(),
+            name: name.into(),
+            spec: ServiceSpec {
+                command: command.into(),
+                description: None,
+                deps: vec![],
+                needs: vec![],
+                ready,
+                env: HashMap::new(),
+                cwd: None,
+            },
         }
     }
 
@@ -358,9 +367,9 @@ mod tests {
     async fn service_with_no_ready_probe_starts_immediately() {
         let dir = tempfile::tempdir().unwrap();
         let svc = start(
-            "echo",
+            "//:echo",
             // sleep keeps the child alive long enough to terminate cleanly.
-            &spec("exec sleep 30", None),
+            &service("echo", "exec sleep 30", None),
             dir.path(),
         )
         .await
@@ -383,7 +392,7 @@ mod tests {
             period_secs: 1,
             timeout_secs: 5,
         };
-        let svc = start("db", &spec(&cmd, Some(probe)), dir.path())
+        let svc = start("//:db", &service("db", &cmd, Some(probe)), dir.path())
             .await
             .expect("ready probe should pass");
         // Once ready, our marker must exist.
@@ -401,8 +410,8 @@ mod tests {
             timeout_secs: 1,
         };
         let err = start(
-            "never-ready",
-            &spec("exec sleep 30", Some(probe)),
+            "//:never-ready",
+            &service("never-ready", "exec sleep 30", Some(probe)),
             dir.path(),
         )
         .await
@@ -419,9 +428,13 @@ mod tests {
             timeout_secs: 5,
         };
         // The "service" exits immediately with a non-zero status.
-        let err = start("quitter", &spec("exit 7", Some(probe)), dir.path())
-            .await
-            .expect_err("should have detected early exit");
+        let err = start(
+            "//:quitter",
+            &service("quitter", "exit 7", Some(probe)),
+            dir.path(),
+        )
+        .await
+        .expect_err("should have detected early exit");
         assert!(
             matches!(err, ServiceError::ExitedEarly { .. }),
             "got: {err:?}"

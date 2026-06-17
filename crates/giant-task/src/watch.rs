@@ -21,35 +21,33 @@ use giant::model::TargetId;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 
-use crate::config::TaskConfig;
+use crate::config::{Task, TaskConfig};
 use crate::deps::GIANT_BIN_ENV;
 use crate::runner;
-use crate::schema::TaskSpec;
 
 pub async fn loop_forever(
     mut cfg: TaskConfig,
-    cfg_path: &Path,
-    workspace_root: &Path,
-    name: &str,
+    explicit: Option<&Path>,
+    label: &str,
     inv: runner::Invocation<'_>,
     verbose: bool,
 ) -> anyhow::Result<u8> {
     let mut task = cfg
         .tasks
-        .get(name)
-        .ok_or_else(|| anyhow::anyhow!("unknown task: {name}"))?
+        .get(label)
+        .ok_or_else(|| anyhow::anyhow!("unknown task: {label}"))?
         .clone();
 
     // Run once up front, like the old watcher did.
     println!("· initial run");
-    let _ = runner::run(&cfg, name, inv, workspace_root, verbose).await;
+    let _ = runner::run(&cfg, label, inv, verbose).await;
 
     // Spawn the engine session: it loads config + discovery once, then
     // streams events. We hold its stdin to send the subscribe command.
     let bin = std::env::var_os(GIANT_BIN_ENV).unwrap_or_else(|| OsString::from("giant"));
     let mut child = Command::new(&bin)
         .args(["session", "--events", "ndjson"])
-        .current_dir(workspace_root)
+        .current_dir(&cfg.workspace_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -84,7 +82,7 @@ pub async fn loop_forever(
                     }
                     Event::WatchChanged { paths } => {
                         announce(&paths);
-                        let _ = runner::run(&cfg, name, inv, workspace_root, verbose).await;
+                        let _ = runner::run(&cfg, label, inv, verbose).await;
                     }
                     Event::CatalogReady => {
                         // Config / discovery changed. Reload our task config so
@@ -92,16 +90,16 @@ pub async fn loop_forever(
                         // discovery-output churn unrelated to this task - only
                         // re-subscribe + re-run when the *watch scope* (deps or
                         // inputs) actually moved, so we don't rerun on noise.
-                        match reload(cfg_path, name) {
+                        match reload(explicit, label) {
                             Ok((fresh_cfg, fresh_task)) => {
-                                let scope_moved = fresh_task.deps != task.deps
-                                    || fresh_task.inputs != task.inputs;
+                                let scope_moved = fresh_task.spec.deps != task.spec.deps
+                                    || fresh_task.spec.inputs != task.spec.inputs;
                                 cfg = fresh_cfg;
                                 task = fresh_task;
                                 if scope_moved {
                                     subscribe(&mut stdin, &task).await?;
                                     println!("· deps/inputs changed, re-running");
-                                    let _ = runner::run(&cfg, name, inv, workspace_root, verbose).await;
+                                    let _ = runner::run(&cfg, label, inv, verbose).await;
                                 }
                             }
                             Err(e) => {
@@ -140,14 +138,14 @@ pub async fn loop_forever(
     Ok(0)
 }
 
-/// Reload the task config, returning the fresh config and the named
-/// task. Errors if the task vanished from the reloaded config.
-fn reload(cfg_path: &Path, name: &str) -> anyhow::Result<(TaskConfig, TaskSpec)> {
-    let cfg = TaskConfig::load(cfg_path)?;
+/// Reload the workspace config, returning the fresh config and the task
+/// (by label). Errors if the task vanished from the reloaded config.
+fn reload(explicit: Option<&Path>, label: &str) -> anyhow::Result<(TaskConfig, Task)> {
+    let cfg = TaskConfig::scan(explicit)?;
     let task = cfg
         .tasks
-        .get(name)
-        .ok_or_else(|| anyhow::anyhow!("task '{name}' no longer exists after reload"))?
+        .get(label)
+        .ok_or_else(|| anyhow::anyhow!("task '{label}' no longer exists after reload"))?
         .clone();
     Ok((cfg, task))
 }
@@ -155,11 +153,11 @@ fn reload(cfg_path: &Path, name: &str) -> anyhow::Result<(TaskConfig, TaskSpec)>
 /// Send `watch.subscribe { targets: deps, globs: inputs }`. The engine
 /// expands the targets through the graph; the globs cover files no
 /// target owns (e2e sources, fixtures).
-async fn subscribe(stdin: &mut ChildStdin, task: &TaskSpec) -> anyhow::Result<()> {
+async fn subscribe(stdin: &mut ChildStdin, task: &Task) -> anyhow::Result<()> {
     let cmd = EngineCommand::WatchSubscribe {
         command_id: None,
-        targets: task.deps.iter().map(TargetId::new).collect(),
-        globs: task.inputs.clone(),
+        targets: task.spec.deps.iter().map(TargetId::new).collect(),
+        globs: task.spec.inputs.clone(),
     };
     let mut line = serde_json::to_vec(&cmd)?;
     line.push(b'\n');

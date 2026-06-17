@@ -10,7 +10,7 @@
 //!    exit code from `command` is what the task returns.
 //!  - `finally` failures don't change the exit code but are logged
 
-use crate::config::TaskConfig;
+use crate::config::{Task, TaskConfig};
 use crate::deps;
 use crate::render;
 use crate::schema::TaskSpec;
@@ -55,17 +55,19 @@ pub struct Invocation<'a> {
     pub passthrough: &'a [String],
 }
 
-/// Resolve + run. Returns the task command's exit code (0 on success).
+/// Run a resolved task by label. Returns the task command's exit code
+/// (0 on success).
 pub async fn run(
     cfg: &TaskConfig,
-    name: &str,
+    label: &str,
     inv: Invocation<'_>,
-    workspace_root: &Path,
     verbose: bool,
 ) -> anyhow::Result<u8> {
-    let spec = cfg.tasks.get(name).ok_or_else(|| RunError::UnknownTask {
-        name: name.to_string(),
+    let task = cfg.tasks.get(label).ok_or_else(|| RunError::UnknownTask {
+        name: label.to_string(),
     })?;
+    let spec = &task.spec;
+    let workspace_root = cfg.workspace_root.as_path();
 
     let bound = bind_args(spec, inv.positionals, inv.arg_kvs, inv.passthrough)?;
 
@@ -77,10 +79,11 @@ pub async fn run(
         }
     }
 
-    // 2. Start services, dependency-ordered and ready-gated.
+    // 2. Start services, dependency-ordered and ready-gated. Service
+    //    references resolve within the task's package.
     let mut running = Vec::new();
     if !spec.services.is_empty() {
-        match services::start_group(&cfg.services, &spec.services, workspace_root).await {
+        match services::start_group(cfg, &spec.services, &task.package).await {
             Ok(svcs) => running = svcs,
             Err((started, err)) => {
                 // Roll back what we did start, then bail.
@@ -106,8 +109,8 @@ pub async fn run(
     //    `finally` step is deliberately *not* signal-aware: once we're in
     //    cleanup, it runs to completion.
     let result = if spec.command.is_some() {
-        let r = run_body(cfg, spec, &bound, workspace_root, shutdown.as_ref()).await;
-        run_finallies(cfg, spec, workspace_root).await;
+        let r = run_body(cfg, task, &bound, shutdown.as_ref()).await;
+        run_finallies(cfg, task).await;
         r
     } else {
         // Supervise mode is `command.is_none()`, a `needs_shutdown` case,
@@ -135,13 +138,14 @@ fn needs_shutdown(spec: &TaskSpec) -> bool {
 
 /// `finally` tasks run after the command, on success or failure. Their
 /// own failures are logged but don't change the task's exit code.
-async fn run_finallies(cfg: &TaskConfig, spec: &TaskSpec, workspace_root: &Path) {
-    if spec.finally.is_empty() {
+/// References resolve within the task's package.
+async fn run_finallies(cfg: &TaskConfig, task: &Task) {
+    if task.spec.finally.is_empty() {
         return;
     }
-    render::note(&format!("finally: {}", spec.finally.join(", ")));
-    for fin in &spec.finally {
-        if let Err(e) = run_named_task(cfg, fin, workspace_root, None).await {
+    render::note(&format!("finally: {}", task.spec.finally.join(", ")));
+    for fin in &task.spec.finally {
+        if let Err(e) = run_named_task(cfg, fin, &task.package, None).await {
             render::note(&format!("finally '{fin}' failed: {e}"));
         }
     }
@@ -169,36 +173,38 @@ async fn supervise(running: &mut [RunningService], shutdown: &Shutdown) -> Resul
 /// and falls through to cleanup.
 async fn run_body(
     cfg: &TaskConfig,
-    spec: &TaskSpec,
+    task: &Task,
     bound: &BoundArgs,
-    workspace_root: &Path,
     shutdown: Option<&Shutdown>,
 ) -> Result<u8, RunError> {
-    // 3. needs (sequential).
-    for need in &spec.needs {
+    // 3. needs (sequential), resolved within this task's package.
+    for need in &task.spec.needs {
         render::note(&format!("need: {need}"));
-        run_named_task(cfg, need, workspace_root, shutdown).await?;
+        run_named_task(cfg, need, &task.package, shutdown).await?;
     }
 
     // 4. The main command.
-    run_command(spec, bound, workspace_root, shutdown).await
+    run_command(task, bound, &cfg.workspace_root, shutdown).await
 }
 
-/// Run another task by name to completion with no arguments. A non-zero
-/// exit becomes `NeedFailed`. Shared by `needs:` (signal-aware) and
-/// `finally:` (not - cleanup runs to completion).
+/// Run another task (referenced from `from_pkg`) to completion with no
+/// arguments. A non-zero exit becomes `NeedFailed`. Shared by `needs:`
+/// (signal-aware) and `finally:` (not - cleanup runs to completion). The
+/// referenced task runs in its own package's directory.
 async fn run_named_task(
     cfg: &TaskConfig,
-    name: &str,
-    workspace_root: &Path,
+    reference: &str,
+    from_pkg: &str,
     shutdown: Option<&Shutdown>,
 ) -> Result<(), RunError> {
-    let spec = cfg.tasks.get(name).ok_or_else(|| RunError::UnknownTask {
-        name: name.to_string(),
-    })?;
-    let code = run_command(spec, &BoundArgs::default(), workspace_root, shutdown).await?;
+    let task = cfg
+        .task_ref(reference, from_pkg)
+        .ok_or_else(|| RunError::UnknownTask {
+            name: reference.to_string(),
+        })?;
+    let code = run_command(task, &BoundArgs::default(), &cfg.workspace_root, shutdown).await?;
     if code != 0 {
-        return Err(RunError::NeedFailed(name.to_string()));
+        return Err(RunError::NeedFailed(reference.to_string()));
     }
     Ok(())
 }
@@ -339,15 +345,15 @@ fn bind_args(
 }
 
 async fn run_command(
-    spec: &TaskSpec,
+    task: &Task,
     bound: &BoundArgs,
     workspace_root: &Path,
     shutdown: Option<&Shutdown>,
 ) -> Result<u8, RunError> {
-    let cwd = match &spec.cwd {
-        Some(rel) => workspace_root.join(rel),
-        None => workspace_root.to_path_buf(),
-    };
+    let spec = &task.spec;
+    // Default cwd is the task's package directory; an explicit cwd is
+    // resolved package-relative.
+    let cwd = crate::config::package_cwd(workspace_root, &task.package, spec.cwd.as_deref());
 
     // Positional parameters ($@): the variadic arg's values.
     let positional: Vec<OsString> = bound.variadic.iter().map(OsString::from).collect();

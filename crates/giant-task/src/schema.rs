@@ -1,29 +1,22 @@
 //! Task schema. Owned by this porcelain, deliberately separate from
 //! core's `giant::Config`. Same `giant.yaml` file, different reader.
 //!
-//! Only the `tasks:` block (and the workspace name, for sanity) is
-//! consulted; every other field core defines is silently ignored.
+//! Only the `tasks:` and `services:` blocks are consulted; every other
+//! field core defines is silently ignored.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Top-level shape we read from giant.yaml. Other fields (targets,
-/// include, cache, etc.) belong to core; we don't look at them.
+/// Top-level shape we read from each package's giant.yaml. The workspace
+/// name comes from core's scan; other fields (targets, cache, etc.)
+/// belong to core and we don't look at them.
 #[derive(Debug, Deserialize)]
 pub struct TopLevel {
-    #[serde(default)]
-    pub workspace: WorkspaceStub,
     #[serde(default)]
     pub tasks: IndexMap<String, TaskSpec>,
     #[serde(default)]
     pub services: IndexMap<String, ServiceSpec>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct WorkspaceStub {
-    #[serde(default)]
-    pub name: String,
 }
 
 /// One task definition. The full lifecycle:
@@ -81,8 +74,8 @@ pub struct TaskSpec {
     #[serde(default)]
     pub env: HashMap<String, String>,
 
-    /// Working directory, relative to the workspace root. Default:
-    /// workspace root.
+    /// Working directory, resolved package-relative (`//x` escapes to the
+    /// workspace root). Default: the task's package directory.
     #[serde(default)]
     pub cwd: Option<String>,
 
@@ -160,7 +153,8 @@ pub struct ServiceSpec {
     #[serde(default)]
     pub env: HashMap<String, String>,
 
-    /// Working directory, workspace-relative. Default: workspace root.
+    /// Working directory, resolved package-relative (`//x` escapes to the
+    /// workspace root). Default: the service's package directory.
     #[serde(default)]
     pub cwd: Option<String>,
 }
