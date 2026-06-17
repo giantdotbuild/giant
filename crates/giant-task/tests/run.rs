@@ -57,6 +57,72 @@ tasks:
 }
 
 #[test]
+fn list_json_carries_labels_and_arg_schema_across_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(dir.path(), "workspace: { name: mono }\n");
+    std::fs::create_dir_all(dir.path().join("svc")).unwrap();
+    write_config(
+        &dir.path().join("svc"),
+        r#"
+tasks:
+  deploy:
+    description: "ship it"
+    command: "true"
+    args:
+      - name: env
+        choices: ["staging", "prod"]
+"#,
+    );
+
+    let out = Command::new(giant_task_bin())
+        .args(["list", "--format", "json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn giant-task");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
+    assert_eq!(v["workspace"], "mono");
+    let task = &v["tasks"][0];
+    assert_eq!(task["label"], "//svc:deploy");
+    assert_eq!(task["package"], "svc");
+    assert_eq!(task["description"], "ship it");
+    assert_eq!(task["args"][0]["name"], "env");
+    assert_eq!(task["args"][0]["choices"][1], "prod");
+}
+
+#[test]
+fn list_labels_prints_one_label_per_line() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(
+        dir.path(),
+        "workspace: { name: mono }\ntasks:\n  build:\n    command: \"true\"\n",
+    );
+    std::fs::create_dir_all(dir.path().join("svc")).unwrap();
+    write_config(
+        &dir.path().join("svc"),
+        "tasks:\n  test:\n    command: \"true\"\n",
+    );
+
+    let out = Command::new(giant_task_bin())
+        .args(["--format", "labels"])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn giant-task");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<&str> = std::str::from_utf8(&out.stdout).unwrap().lines().collect();
+    assert!(lines.contains(&"//:build"), "got: {lines:?}");
+    assert!(lines.contains(&"//svc:test"), "got: {lines:?}");
+}
+
+#[test]
 fn empty_invocation_prints_list_with_zero_exit() {
     let dir = tempfile::tempdir().unwrap();
     write_config(

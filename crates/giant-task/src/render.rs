@@ -4,11 +4,24 @@
 //! colored verbs reserved for the running phase. Auto-detects tty.
 
 use crate::config::{Task, TaskConfig};
+use crate::schema::ArgSpec;
 use anstyle::{AnsiColor, Color, Style};
 use giant::events::TargetCounts;
 use giant::format_duration;
 use indexmap::IndexMap;
+use serde::Serialize;
 use std::io::IsTerminal;
+
+/// How `giant task list` renders.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum ListFormat {
+    /// Human-readable, grouped by package.
+    Text,
+    /// One `//pkg:name` label per line, for piping into a fuzzy finder.
+    Labels,
+    /// Structured JSON (label, package, description, arg schema).
+    Json,
+}
 
 fn enabled() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
@@ -87,8 +100,59 @@ pub fn failure_header(id: &str) {
     println!("\n{arrow} {id_s}");
 }
 
-/// Print the available tasks with descriptions.
-pub fn list(cfg: &TaskConfig) {
+/// Print the available tasks in the requested format.
+pub fn list(cfg: &TaskConfig, format: ListFormat) {
+    match format {
+        ListFormat::Text => list_text(cfg),
+        ListFormat::Labels => {
+            for label in cfg.tasks.keys() {
+                println!("{label}");
+            }
+        }
+        ListFormat::Json => list_json(cfg),
+    }
+}
+
+/// Structured task list for tooling: stable shape, arg schema included so
+/// a caller can show or fill a task's arguments. `args` is `[]` and
+/// `description` is `null` when absent.
+fn list_json(cfg: &TaskConfig) {
+    #[derive(Serialize)]
+    struct TaskJson<'a> {
+        label: &'a str,
+        package: &'a str,
+        name: &'a str,
+        description: Option<&'a str>,
+        args: &'a [ArgSpec],
+    }
+    #[derive(Serialize)]
+    struct ListJson<'a> {
+        workspace: &'a str,
+        tasks: Vec<TaskJson<'a>>,
+    }
+    let tasks = cfg
+        .tasks
+        .iter()
+        .map(|(label, t)| TaskJson {
+            label,
+            package: &t.package,
+            name: &t.name,
+            description: t.spec.description.as_deref(),
+            args: &t.spec.args,
+        })
+        .collect();
+    let out = ListJson {
+        workspace: &cfg.workspace_name,
+        tasks,
+    };
+    match serde_json::to_string_pretty(&out) {
+        Ok(s) => println!("{s}"),
+        Err(e) => note(&format!("failed to serialize tasks: {e}")),
+    }
+}
+
+/// Human-readable list, grouped by package.
+fn list_text(cfg: &TaskConfig) {
     if cfg.tasks.is_empty() {
         note("no tasks defined in giant.yaml");
         return;

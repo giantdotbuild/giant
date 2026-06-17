@@ -57,6 +57,13 @@ pub(crate) struct Cli {
     #[arg(long)]
     list: bool,
 
+    /// Output format for the task list: `text` (default, grouped by
+    /// package), `labels` (one `//pkg:name` per line, for piping into a
+    /// fuzzy finder), or `json` (label, package, description, and the
+    /// declared arg schema, for tooling).
+    #[arg(long, value_name = "FORMAT", value_enum, default_value_t = render::ListFormat::Text)]
+    format: render::ListFormat,
+
     /// Stream the full `giant build` output for dep-phase targets
     /// (cache hits, per-target log lines). Default is the compact
     /// one-line summary; failures always show their captured output.
@@ -130,6 +137,28 @@ fn parse_task_args(rest: &[OsString]) -> anyhow::Result<TaskArgs> {
     Ok(out)
 }
 
+/// Pull a `--format <fmt>` / `--format=<fmt>` out of the trailing args.
+/// `giant task list --format json` puts `--format` after the `list`
+/// pseudo-name, where clap captures it as a task arg rather than our flag.
+fn format_override(rest: &[OsString]) -> Option<render::ListFormat> {
+    use clap::ValueEnum;
+    let mut it = rest.iter();
+    while let Some(tok) = it.next() {
+        let s = tok.to_string_lossy();
+        let val = if let Some(v) = s.strip_prefix("--format=") {
+            Some(v.to_string())
+        } else if s == "--format" {
+            it.next().map(|t| t.to_string_lossy().into_owned())
+        } else {
+            None
+        };
+        if let Some(v) = val {
+            return render::ListFormat::from_str(&v, true).ok();
+        }
+    }
+    None
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
     // Dynamic completion intercept - clap_complete sees the COMPLETE
@@ -178,7 +207,11 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
 
     // `--list`, the `list` name, or no task name → print the task list.
     if cli.list || matches!(name.as_deref(), None | Some("list")) {
-        render::list(&cfg);
+        // `list` is a pseudo-name, so `giant task list --format json` lands
+        // `--format` in the trailing args; honor it there as well as before
+        // the name.
+        let format = format_override(rest).unwrap_or(cli.format);
+        render::list(&cfg, format);
         return Ok(0);
     }
     let name = name.expect("None handled above");
