@@ -83,9 +83,12 @@ ctrlc = "3"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Optional remote cache support
+# Remote cache support. On by default so every build-capable porcelain
+# (giant-build, giant-tui, giant-task) links the client - they depend on
+# `giant` without overriding default-features, so the feature propagates.
+# `remote.enabled` in giant.yaml stays the runtime on/off switch.
 [features]
-default = []
+default = ["remote"]
 remote = ["dep:reqwest", "dep:base64"]
 
 [dependencies.reqwest]

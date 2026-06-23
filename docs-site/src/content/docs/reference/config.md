@@ -26,7 +26,7 @@ std:                          # giant-gen: where @std// generator modules come f
   repo: giantdotbuild/giant-std
   # or instead of a pin:  path: ~/Development/giant-std
 
-remote:                       # feature-gated; only with --features remote
+remote:
   enabled: true               # must be true; remote is a no-op otherwise
   url: "https://cache.example.com"
   auth:
@@ -167,7 +167,7 @@ Root file only. Owned by the `giant-gen` porcelain: pins the
 
 One of `ref` or `path` is required.
 
-## `remote` (feature-gated)
+## `remote`
 
 Root file only.
 

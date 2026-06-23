@@ -12,17 +12,19 @@ Giant's remote cache has two backends:
   on Actions, Giant uses the runner's own cache service directly -
   shared caching with zero infrastructure to host.
 
-## Enable the feature
+## Enable it
 
-The remote cache lives behind a feature flag so the default binary
-stays small and dependency-light:
+The remote client is compiled into every release binary, so there's
+nothing to turn on at build time - set `remote.enabled: true` in
+`giant.yaml` (below) and you're done. A source build picks it up by
+default too:
 
 ```bash
-cargo install --path crates/giant --features remote
+cargo install --path crates/giant
 ```
 
-Pre-built binaries from giant.build/install.sh include the remote
-feature.
+If you build with `--no-default-features`, add `--features remote` to
+put the client back.
 
 ## Configure
 
@@ -140,7 +142,8 @@ docker run -d \
   -p 8080:8080 \
   -v /var/cache/bazel-remote:/data \
   buchgr/bazel-remote:latest \
-  --dir /data --max_size 50
+  --dir /data --max_size 50 \
+  --disable_http_ac_validation
 ```
 
 That's an open, unauthenticated cache. Point Giant at it:
@@ -153,6 +156,16 @@ remote:
 
 For auth, see bazel-remote's docs - Giant supports the bearer-token
 flow it offers.
+
+### `--disable_http_ac_validation` is required
+
+bazel-remote defaults to validating every action-cache write as a
+[REAPI](https://bazel.build/remote/rpc) `ActionResult` protobuf. Giant
+stores its own JSON in the AC, so without the flag bazel-remote rejects
+every AC write with `400 Bad Request` - CAS blobs upload fine, but no
+entry is ever readable, and the cache looks enabled yet never hits.
+Giant logs one error when it sees the rejection. Run bazel-remote with
+`--disable_http_ac_validation` and the AC accepts giant's entries.
 
 ## Permissions in shared caches
 

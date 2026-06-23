@@ -154,6 +154,91 @@ targets:
     );
 }
 
+/// Rejects every AC PUT with 400 (as bazel-remote does with HTTP AC
+/// validation on), accepts CAS. The build must still succeed, and giant
+/// must surface one actionable error pointing at the fix.
+#[derive(Clone, Default)]
+struct AcRejecting(Arc<Mutex<HashMap<String, Vec<u8>>>>);
+
+impl Respond for AcRejecting {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let path = req.url.path().to_string();
+        match req.method.as_ref() {
+            "PUT" if path.starts_with("/ac/") => ResponseTemplate::new(400),
+            "PUT" => {
+                self.0.lock().unwrap().insert(path, req.body.clone());
+                ResponseTemplate::new(200)
+            }
+            "GET" | "HEAD" => {
+                if self.0.lock().unwrap().contains_key(&path) {
+                    ResponseTemplate::new(200)
+                } else {
+                    ResponseTemplate::new(404)
+                }
+            }
+            _ => ResponseTemplate::new(405),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ac_rejection_is_surfaced_but_build_succeeds() {
+    let server = MockServer::start().await;
+    let store = AcRejecting::default();
+    for m in ["PUT", "GET", "HEAD"] {
+        Mock::given(method(m))
+            .respond_with(store.clone())
+            .mount(&server)
+            .await;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(ws.join("in.txt"), "hello\n").unwrap();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        format!(
+            r#"
+workspace:
+  name: ac_rejection
+cache:
+  dir: ./cache
+remote:
+  enabled: true
+  url: "{}"
+  skip_head: true
+  auth:
+    kind: none
+targets:
+  - name: "demo"
+    inputs: ["in.txt"]
+    outputs: ["out.txt"]
+    command: "cp in.txt out.txt"
+"#,
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "a rejected AC write must not fail the build: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--disable_http_ac_validation"),
+        "the AC rejection should be surfaced with the fix; got: {stderr}"
+    );
+}
+
 // ============================================================================
 // GitHub Actions cache backend
 // ============================================================================

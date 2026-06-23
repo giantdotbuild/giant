@@ -140,6 +140,9 @@ struct Inner {
     client: Client,
     config: RemoteCacheConfig,
     disabled: AtomicBool,
+    /// Set the first time an AC write is rejected, so the explanation
+    /// surfaces once instead of per target.
+    ac_rejected: AtomicBool,
 }
 
 impl RemoteCache {
@@ -158,6 +161,7 @@ impl RemoteCache {
                 client,
                 config,
                 disabled: AtomicBool::new(false),
+                ac_rejected: AtomicBool::new(false),
             }),
         })
     }
@@ -169,6 +173,23 @@ impl RemoteCache {
     fn disable(&self, reason: &str) {
         if !self.inner.disabled.swap(true, Ordering::Relaxed) {
             tracing::warn!("remote cache disabled for remainder of run: {reason}");
+        }
+    }
+
+    /// An AC write was rejected with a status that means the server won't
+    /// ever accept our entries (a `400` from bazel-remote's HTTP AC
+    /// validation is the usual cause). Surface it once at error level - the
+    /// default log filter is errors-only, so a `warn!` here would be
+    /// invisible and the remote would look enabled but inert. Reads can
+    /// never hit until writes land, so it's worth one loud line.
+    fn note_ac_rejected(&self, status: StatusCode) {
+        if !self.inner.ac_rejected.swap(true, Ordering::Relaxed) {
+            tracing::error!(
+                "remote cache rejected an action-cache write ({status}); no remote hits \
+                 are possible until it accepts giant's entries. giant stores opaque JSON, \
+                 not REAPI ActionResult protobufs - if this is bazel-remote, run it with \
+                 --disable_http_ac_validation."
+            );
         }
     }
 
@@ -285,6 +306,10 @@ impl RemoteCache {
             Ok(r) if r.status().is_success() => Ok(()),
             Ok(r) if matches!(r.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) => {
                 self.disable("auth failed on PUT (401/403)");
+                Ok(())
+            }
+            Ok(r) if r.status() == StatusCode::BAD_REQUEST => {
+                self.note_ac_rejected(r.status());
                 Ok(())
             }
             Ok(r) => {
