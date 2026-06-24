@@ -239,6 +239,58 @@ targets:
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_creds_disable_remote_without_failing_the_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(ws.join("in.txt"), "hello\n").unwrap();
+    // Basic auth pointing at env vars that are unset in the build process.
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: missing_creds
+cache:
+  dir: ./cache
+remote:
+  enabled: true
+  url: "https://cache.invalid"
+  auth:
+    kind: basic
+    username_env: GIANT_TEST_MISSING_USER
+    password_env: GIANT_TEST_MISSING_PASS
+targets:
+  - name: "demo"
+    inputs: ["in.txt"]
+    outputs: ["out.txt"]
+    command: "cp in.txt out.txt"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .env_remove("GIANT_TEST_MISSING_USER")
+        .env_remove("GIANT_TEST_MISSING_PASS")
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "missing remote creds must not fail the build: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("remote cache disabled"),
+        "expected a soft-disable warning; got: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("out.txt")).unwrap().trim(),
+        "hello"
+    );
+}
+
 // ============================================================================
 // GitHub Actions cache backend
 // ============================================================================

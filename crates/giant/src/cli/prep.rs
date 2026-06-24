@@ -128,10 +128,26 @@ pub fn open_remote(config: &Config) -> anyhow::Result<OpenedRemote> {
         tracing::info!("remote cache (github_actions) inactive outside GitHub Actions");
         return Ok((None, None, None));
     }
-    let resolved = crate::remote::RemoteCacheConfig::from_config(&config.remote)
-        .map_err(|e| anyhow::anyhow!("remote cache config: {e}"))?;
-    let remote = crate::remote::RemoteCache::open(resolved)
-        .map_err(|e| anyhow::anyhow!("open remote cache: {e}"))?;
+    // Setup failures (missing creds, unparseable config, client build) are
+    // best-effort like every other remote error: warn and run local-only
+    // rather than fail the build. The exception is a github_actions remote
+    // inside Actions - a missing token there is a workflow bug, so it stays
+    // loud (the earlier guard already returned for the outside-Actions case).
+    let setup = crate::remote::RemoteCacheConfig::from_config(&config.remote)
+        .and_then(crate::remote::RemoteCache::open);
+    let remote = match setup {
+        Ok(remote) => remote,
+        Err(e) if config.remote.kind == crate::config::RemoteKind::GithubActions => {
+            return Err(anyhow::anyhow!("remote cache (github_actions): {e}"));
+        }
+        Err(e) => {
+            // Error level on purpose: the default log filter is errors-only,
+            // and a remote that's enabled in config but silently inert is the
+            // trap to avoid. One line, then local-only.
+            tracing::error!("remote cache disabled (setup failed): {e}");
+            return Ok((None, None, None));
+        }
+    };
     let (tx, handle) = crate::remote::spawn_uploader(remote.clone());
     Ok((Some(remote), Some(tx), Some(handle)))
 }
