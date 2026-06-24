@@ -20,7 +20,7 @@ pub use gha::GhaConfig;
 
 use crate::cache::AcEntry;
 use crate::model::{CacheKey, ContentHash};
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, RETRY_AFTER};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -140,9 +140,9 @@ struct Inner {
     client: Client,
     config: RemoteCacheConfig,
     disabled: AtomicBool,
-    /// Set the first time an AC write is rejected, so the explanation
-    /// surfaces once instead of per target.
-    ac_rejected: AtomicBool,
+    /// Set the first time an AC write fails, so the explanation surfaces
+    /// once instead of per target.
+    ac_write_failed: AtomicBool,
 }
 
 impl RemoteCache {
@@ -161,7 +161,7 @@ impl RemoteCache {
                 client,
                 config,
                 disabled: AtomicBool::new(false),
-                ac_rejected: AtomicBool::new(false),
+                ac_write_failed: AtomicBool::new(false),
             }),
         })
     }
@@ -170,25 +170,37 @@ impl RemoteCache {
         self.inner.disabled.load(Ordering::Relaxed)
     }
 
+    /// Error level on purpose: the default log filter is errors-only, and a
+    /// remote that disables itself mid-run (auth failure, say) is otherwise
+    /// invisible - it just looks like the cache stopped helping. One line.
     fn disable(&self, reason: &str) {
         if !self.inner.disabled.swap(true, Ordering::Relaxed) {
-            tracing::warn!("remote cache disabled for remainder of run: {reason}");
+            tracing::error!("remote cache disabled for remainder of run: {reason}");
         }
     }
 
-    /// An AC write was rejected with a status that means the server won't
-    /// ever accept our entries (a `400` from bazel-remote's HTTP AC
-    /// validation is the usual cause). Surface it once at error level - the
-    /// default log filter is errors-only, so a `warn!` here would be
-    /// invisible and the remote would look enabled but inert. Reads can
-    /// never hit until writes land, so it's worth one loud line.
-    fn note_ac_rejected(&self, status: StatusCode) {
-        if !self.inner.ac_rejected.swap(true, Ordering::Relaxed) {
+    /// An action-cache write failed. Surface it once at error level - the
+    /// default log filter is errors-only, so a `warn!` would be swallowed
+    /// and a remote that can't store entries would look enabled but inert.
+    /// Reads can't hit until writes land, so it's worth one loud line; we
+    /// say it once and stay quiet after to avoid per-target spam. A `400` is
+    /// the usual bazel-remote case (HTTP AC validation rejecting giant's
+    /// JSON), so that one carries the fix.
+    fn note_ac_write_failed(&self, reason: &str, validation_rejected: bool) {
+        if self.inner.ac_write_failed.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        if validation_rejected {
             tracing::error!(
-                "remote cache rejected an action-cache write ({status}); no remote hits \
+                "remote cache rejected an action-cache write ({reason}); no remote hits \
                  are possible until it accepts giant's entries. giant stores opaque JSON, \
                  not REAPI ActionResult protobufs - if this is bazel-remote, run it with \
                  --disable_http_ac_validation."
+            );
+        } else {
+            tracing::error!(
+                "remote action-cache write failed ({reason}); remote cache writes are not \
+                 landing - builds won't share results until this clears."
             );
         }
     }
@@ -279,8 +291,11 @@ impl RemoteCache {
                 self.bazel_put_ac(base_url, auth, key, body).await
             }
             BackendConfig::GithubActions(g) => {
-                let stored = gha::store(&self.inner.client, g, &gha::ac_key(key), body).await;
-                self.gha_result("AC put", stored);
+                match gha::store(&self.inner.client, g, &gha::ac_key(key), body).await {
+                    Ok(_) => {}
+                    Err(gha::GhaError::Auth) => self.disable("auth failed (401/403)"),
+                    Err(e) => self.note_ac_write_failed(&e.to_string(), false),
+                }
                 Ok(())
             }
         }
@@ -309,20 +324,15 @@ impl RemoteCache {
                 Ok(())
             }
             Ok(r) if r.status() == StatusCode::BAD_REQUEST => {
-                self.note_ac_rejected(r.status());
+                self.note_ac_write_failed(&r.status().to_string(), true);
                 Ok(())
             }
             Ok(r) => {
-                let retry_after = parse_retry_after(r.headers());
-                tracing::warn!(
-                    "remote AC put returned {} for {url} (retry-after: {:?})",
-                    r.status(),
-                    retry_after
-                );
+                self.note_ac_write_failed(&format!("{} for {url}", r.status()), false);
                 Ok(())
             }
             Err(e) => {
-                tracing::warn!("remote AC put failed for {url}: {e}");
+                self.note_ac_write_failed(&format!("{e} for {url}"), false);
                 Ok(())
             }
         }
@@ -494,11 +504,6 @@ fn auth_headers(auth: &Auth) -> HeaderMap {
         }
     }
     h
-}
-
-fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
-    let v = headers.get(RETRY_AFTER)?.to_str().ok()?;
-    v.parse().ok()
 }
 
 /// Decode an AC entry fetched from any backend. An unparseable entry is a

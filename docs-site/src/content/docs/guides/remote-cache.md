@@ -133,7 +133,19 @@ When Giant computes a cache key, it tries sources in this order:
 
 The upload queue runs in the background - the build doesn't wait for
 it before moving to the next target. Uploads are best-effort; a
-failure here doesn't fail the build (you get a warning).
+failure here never fails the build. When a write does fail, Giant logs
+one error line (it won't repeat per target) so an enabled-but-inert
+remote doesn't pass unnoticed.
+
+## When the remote can't be set up
+
+A remote that's `enabled` but can't start - missing credentials, an
+unreadable config - doesn't fail the build either. Giant logs one error
+and runs with the local cache only. So `remote.enabled: true` can sit in
+a shared `giant.yaml` while a developer without the cache credentials
+still builds locally. The one exception is a `github_actions` remote
+running inside Actions with the credential-export step missing: that's a
+workflow bug, so it fails at startup.
 
 ## Bring up a bazel-remote server
 

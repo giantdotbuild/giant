@@ -154,23 +154,34 @@ targets:
     );
 }
 
-/// Rejects every AC PUT with 400 (as bazel-remote does with HTTP AC
-/// validation on), accepts CAS. The build must still succeed, and giant
-/// must surface one actionable error pointing at the fix.
-#[derive(Clone, Default)]
-struct AcRejecting(Arc<Mutex<HashMap<String, Vec<u8>>>>);
+/// Fails every AC PUT with a fixed status, accepts CAS. Used to check that
+/// AC-write failures surface and don't fail the build.
+#[derive(Clone)]
+struct AcFailing {
+    cas: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    ac_status: u16,
+}
 
-impl Respond for AcRejecting {
+impl AcFailing {
+    fn new(ac_status: u16) -> Self {
+        Self {
+            cas: Arc::new(Mutex::new(HashMap::new())),
+            ac_status,
+        }
+    }
+}
+
+impl Respond for AcFailing {
     fn respond(&self, req: &Request) -> ResponseTemplate {
         let path = req.url.path().to_string();
         match req.method.as_ref() {
-            "PUT" if path.starts_with("/ac/") => ResponseTemplate::new(400),
+            "PUT" if path.starts_with("/ac/") => ResponseTemplate::new(self.ac_status),
             "PUT" => {
-                self.0.lock().unwrap().insert(path, req.body.clone());
+                self.cas.lock().unwrap().insert(path, req.body.clone());
                 ResponseTemplate::new(200)
             }
             "GET" | "HEAD" => {
-                if self.0.lock().unwrap().contains_key(&path) {
+                if self.cas.lock().unwrap().contains_key(&path) {
                     ResponseTemplate::new(200)
                 } else {
                     ResponseTemplate::new(404)
@@ -181,17 +192,22 @@ impl Respond for AcRejecting {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ac_rejection_is_surfaced_but_build_succeeds() {
+/// Start a mock server whose AC PUTs all fail with `ac_status`.
+async fn ac_failing_server(ac_status: u16) -> MockServer {
     let server = MockServer::start().await;
-    let store = AcRejecting::default();
+    let store = AcFailing::new(ac_status);
     for m in ["PUT", "GET", "HEAD"] {
         Mock::given(method(m))
             .respond_with(store.clone())
             .mount(&server)
             .await;
     }
+    server
+}
 
+/// Run a one-target build against `server_uri` and return its stderr. The
+/// build must succeed - a failing remote never fails the build.
+async fn build_with_remote(server_uri: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();
     std::fs::write(ws.join("in.txt"), "hello\n").unwrap();
@@ -200,12 +216,12 @@ async fn ac_rejection_is_surfaced_but_build_succeeds() {
         format!(
             r#"
 workspace:
-  name: ac_rejection
+  name: ac_failing
 cache:
   dir: ./cache
 remote:
   enabled: true
-  url: "{}"
+  url: "{server_uri}"
   skip_head: true
   auth:
     kind: none
@@ -214,8 +230,7 @@ targets:
     inputs: ["in.txt"]
     outputs: ["out.txt"]
     command: "cp in.txt out.txt"
-"#,
-            server.uri()
+"#
         ),
     )
     .unwrap();
@@ -227,15 +242,29 @@ targets:
         .expect("spawn");
     assert!(
         out.status.success(),
-        "a rejected AC write must not fail the build: {}",
+        "a failing AC write must not fail the build: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
 
-    let stderr = String::from_utf8_lossy(&out.stderr);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ac_validation_rejection_is_surfaced_with_the_fix() {
+    let server = ac_failing_server(400).await;
+    let stderr = build_with_remote(&server.uri()).await;
     assert!(
         stderr.contains("--disable_http_ac_validation"),
-        "the AC rejection should be surfaced with the fix; got: {stderr}"
+        "a 400 AC rejection should name the bazel-remote fix; got: {stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn other_ac_write_failures_are_surfaced() {
+    let server = ac_failing_server(503).await;
+    let stderr = build_with_remote(&server.uri()).await;
+    assert!(
+        stderr.contains("remote action-cache write failed"),
+        "a non-400 AC failure should still surface; got: {stderr}"
     );
 }
 
