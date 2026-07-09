@@ -880,7 +880,7 @@ fn draw_explain_overlay(frame: &mut Frame, area: Rect, state: &State) {
                 v.push(Line::from(Span::styled(
                     format!(
                         "    {}  {}",
-                        &f.hash.chars().take(12).collect::<String>(),
+                        f.hash.chars().take(12).collect::<String>(),
                         f.path
                     ),
                     Style::default().fg(Color::DarkGray),
