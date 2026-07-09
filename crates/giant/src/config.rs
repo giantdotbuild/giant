@@ -416,8 +416,13 @@ impl Config {
                     t.name
                 )));
             }
-            // Cacheable target with no outputs and no exists check is meaningless.
-            if t.is_cacheable() && t.outputs_raw.is_empty() && t.exists.is_none() {
+            // A cacheable BUILD target with no outputs and no exists check
+            // is meaningless — there is nothing to restore on a hit. A
+            // cacheable TEST (`test: true, cache: true`) is different: the
+            // cached artifact is the green result itself — identical inputs
+            // already passed, so a hit skips the re-run and replays the
+            // captured logs. No outputs required.
+            if t.is_cacheable() && !t.test && t.outputs_raw.is_empty() && t.exists.is_none() {
                 return Err(ConfigError::Validation(format!(
                     "target '{}' is cacheable but has no outputs and no `exists:` check",
                     t.name
@@ -846,6 +851,20 @@ targets:
         let err = Config::load(f.path()).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("cacheable but has no outputs"), "got: {msg}");
+    }
+
+    #[test]
+    fn accept_cacheable_test_without_outputs() {
+        // `test: true, cache: true`: the cached artifact is the green
+        // result itself, so no outputs are required.
+        let f = write_yaml(
+            r#"
+workspace: { name: p }
+targets:
+  - { name: "t", inputs: ["src/**"], outputs: [], command: "cargo test", test: true, cache: true }
+"#,
+        );
+        Config::load(f.path()).unwrap();
     }
 
     #[test]
