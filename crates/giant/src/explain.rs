@@ -77,10 +77,12 @@ pub(crate) async fn walk_target(
     let (key, _) =
         compute_cache_key_with_breakdown(spec, workspace_root, cache, dep_outputs).await?;
 
-    // Look up the AC entry to get the real output hash if cached.
+    // Look up the AC entry to get the real output hash if cached. A
+    // failure entry (non-zero exit) carries no outputs - only replay
+    // logs - so it reads as not cached.
     let output_hash = match cache.get_ac(&key).await? {
-        Some(ac) => ContentHash::from_hex(&ac.outputs_content_hash),
-        None => None,
+        Some(ac) if ac.exit_code == 0 => ContentHash::from_hex(&ac.outputs_content_hash),
+        _ => None,
     };
 
     memo.insert(id.clone(), (key, output_hash));

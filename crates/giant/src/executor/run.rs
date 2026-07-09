@@ -36,6 +36,11 @@ pub(super) async fn try_cache_hit(
     let Some(entry) = cache.get_ac(key).await? else {
         return Ok(None);
     };
+    // Failure entries (non-zero exit) exist only so `giant logs` can
+    // replay the output of the last failed run - never a hit.
+    if entry.exit_code != 0 {
+        return Ok(None);
+    }
     // Verify each output blob exists. If any are missing, treat as miss.
     for out in &entry.outputs {
         let Some(hash) = ContentHash::from_hex(&out.content_hash) else {
@@ -150,6 +155,10 @@ pub(super) async fn try_remote_hit(
     let Ok(Some(entry)) = remote.get_ac(key).await else {
         return Ok(None);
     };
+    // We never upload failure entries, but don't trust the server on that.
+    if entry.exit_code != 0 {
+        return Ok(None);
+    }
 
     // Fetch every referenced blob from remote, write to local CAS,
     // restore to the workspace. Any failure mid-restore → treat as a
@@ -333,6 +342,7 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
             Err(e) => {
                 return TargetResult::Failed {
                     error: format!("sandbox setup failed: {e}"),
+                    duration: started.elapsed(),
                 };
             }
         },
@@ -377,6 +387,7 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
         Err(e) => {
             return TargetResult::Failed {
                 error: format!("spawn failed: {e}"),
+                duration: started.elapsed(),
             };
         }
     };
@@ -417,12 +428,15 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
         s = child.wait() => s,
         _ = ctx.cancel.cancelled() => {
             let _ = child.kill().await;
-            return TargetResult::Failed { error: "cancelled".into() };
+            return TargetResult::Failed { error: "cancelled".into(), duration: started.elapsed() };
         }
         _ = timeout => {
             let _ = child.kill().await;
             let secs = spec.timeout_secs.unwrap_or_default();
-            return TargetResult::Failed { error: format!("timed out after {secs}s") };
+            return TargetResult::Failed {
+                error: format!("timed out after {secs}s"),
+                duration: started.elapsed(),
+            };
         }
     };
     let (stdout_bytes, stderr_bytes) = tokio::join!(pump_stdout, pump_stderr);
@@ -432,6 +446,7 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
         Err(e) => {
             return TargetResult::Failed {
                 error: format!("wait failed: {e}"),
+                duration: started.elapsed(),
             };
         }
     };
@@ -447,7 +462,20 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
         {
             error = format!("{error}; {hint}");
         }
-        return TargetResult::Failed { error };
+        persist_failure_logs(
+            ctx,
+            spec,
+            key,
+            code,
+            &stdout_bytes,
+            &stderr_bytes,
+            started.elapsed(),
+        )
+        .await;
+        return TargetResult::Failed {
+            error,
+            duration: started.elapsed(),
+        };
     }
 
     // Capture and store outputs.
@@ -456,6 +484,7 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
         Err(e) => {
             return TargetResult::Failed {
                 error: format!("capture outputs: {e}"),
+                duration: started.elapsed(),
             };
         }
     };
@@ -479,6 +508,7 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
             Err(e) => {
                 return TargetResult::Failed {
                     error: format!("write stdout blob: {e}"),
+                    duration: started.elapsed(),
                 };
             }
         }
@@ -491,6 +521,7 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
             Err(e) => {
                 return TargetResult::Failed {
                     error: format!("write stderr blob: {e}"),
+                    duration: started.elapsed(),
                 };
             }
         }
@@ -518,6 +549,7 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
     if let Err(e) = ctx.cache.put_ac(&key, &ac).await {
         return TargetResult::Failed {
             error: format!("cache write: {e}"),
+            duration: started.elapsed(),
         };
     }
 
@@ -564,6 +596,64 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
     TargetResult::Built {
         duration: started.elapsed(),
         outputs,
+    }
+}
+
+/// Best-effort: persist a failed run's captured output so `giant logs`
+/// can replay it after the build. The entry is a normal AC record with
+/// the real (non-zero) exit code; everything that answers "is this
+/// cached?" skips non-zero entries, so a failure is never a hit - the
+/// entry exists only for log retrieval. Written for non-cacheable
+/// (test) targets too: those never get a success entry, but their
+/// failure output is exactly what a post-mortem needs. Never fails the
+/// build - the target already failed; losing the log replay is the
+/// lesser problem.
+async fn persist_failure_logs(
+    ctx: &TargetCtx,
+    spec: &TargetSpec,
+    key: CacheKey,
+    exit_code: i32,
+    stdout_bytes: &[u8],
+    stderr_bytes: &[u8],
+    duration: Duration,
+) {
+    if !ctx.log_capture.capture || (stdout_bytes.is_empty() && stderr_bytes.is_empty()) {
+        return;
+    }
+    let put = |bytes: &[u8]| {
+        let cache = ctx.cache.clone();
+        let bytes = bytes.to_vec();
+        async move {
+            if bytes.is_empty() {
+                return None;
+            }
+            match cache.put_cas(bytes).await {
+                Ok(h) => Some(h.to_hex()),
+                Err(e) => {
+                    tracing::warn!(target=%spec.id, error=%e, "failure log blob write failed");
+                    None
+                }
+            }
+        }
+    };
+    let (stdout_blob, stderr_blob) = tokio::join!(put(stdout_bytes), put(stderr_bytes));
+    let ac = AcEntry {
+        schema: crate::cache::AC_SCHEMA,
+        target_id: spec.id.as_str().to_string(),
+        cache_key: key.to_hex(),
+        command: spec.command.clone(),
+        cwd: spec.cwd.as_path().to_string_lossy().into_owned(),
+        outputs: vec![],
+        outputs_content_hash: compute_outputs_content_hash(&[]).to_hex(),
+        stdout_blob,
+        stderr_blob,
+        exit_code,
+        duration_ms: duration.as_millis() as u64,
+        built_at: chrono::Utc::now().to_rfc3339(),
+        built_by: None,
+    };
+    if let Err(e) = ctx.cache.put_ac(&key, &ac).await {
+        tracing::warn!(target=%spec.id, error=%e, "failure log AC write failed");
     }
 }
 

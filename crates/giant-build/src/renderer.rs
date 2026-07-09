@@ -18,7 +18,7 @@
 use anstyle::{AnsiColor, Color, Style};
 use giant::TargetId;
 use giant::events::{Event, TargetCounts, TargetResultKind};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::IsTerminal;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -163,6 +163,10 @@ pub struct Renderer {
     id_width: usize,
     quiet: bool,
     failed: Vec<TargetId>,
+    /// Output of targets whose log lines were swallowed (quiet mode,
+    /// hidden targets), kept so a failure can replay what the target
+    /// said. Bounded per target; entries drop when the target finishes.
+    replay: HashMap<TargetId, ReplayBuf>,
     /// In-flight targets and the last time they emitted output. Used
     /// by `heartbeat()` to print "still running" lines for quiet
     /// long-runners so the user gets feedback during slow builds.
@@ -178,6 +182,16 @@ pub struct Renderer {
 /// least this long. Fast targets (cache hits, < 3 s builds) get no
 /// heartbeat at all.
 const HEARTBEAT_AFTER: Duration = Duration::from_secs(3);
+
+/// Cap on buffered lines per in-flight target. A failing test's useful
+/// output is at its tail; the head is dropped (and counted) past this.
+const REPLAY_MAX_LINES: usize = 200;
+
+#[derive(Debug, Default)]
+struct ReplayBuf {
+    lines: VecDeque<String>,
+    dropped: usize,
+}
 
 #[derive(Debug)]
 struct RunningInfo {
@@ -196,6 +210,7 @@ impl Renderer {
             id_width,
             quiet,
             failed: Vec::new(),
+            replay: HashMap::new(),
             running: HashMap::new(),
             hidden: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -236,6 +251,7 @@ impl Renderer {
                 // failures of earlier cycles.
                 self.id_width = id_width(target_ids);
                 self.failed.clear();
+                self.replay.clear();
                 None
             }
             // Watch loop: announce the affected subset before its build.
@@ -266,13 +282,20 @@ impl Renderer {
                 None
             }
             Event::TargetLog { id, line, .. } => {
-                if self.is_hidden(id) {
-                    return None;
-                }
                 if let Some(info) = self.running.get_mut(id) {
                     info.last_activity = Instant::now();
                 }
-                if self.quiet {
+                // A swallowed line (quiet mode, hidden target) is kept in a
+                // bounded buffer so a failure can replay it - otherwise a
+                // failing target's own output is lost exactly when it
+                // matters.
+                if self.quiet || self.is_hidden(id) {
+                    let buf = self.replay.entry(id.clone()).or_default();
+                    if buf.lines.len() == REPLAY_MAX_LINES {
+                        buf.lines.pop_front();
+                        buf.dropped += 1;
+                    }
+                    buf.lines.push_back(line.clone());
                     return None;
                 }
                 Some(self.log_line(id, line))
@@ -285,6 +308,7 @@ impl Renderer {
                 ..
             } => {
                 self.running.remove(id);
+                let buf = self.replay.remove(id);
                 let failed = matches!(result, TargetResultKind::Failed);
                 if failed {
                     self.failed.push(id.clone());
@@ -297,7 +321,25 @@ impl Renderer {
                 if self.quiet && !failed {
                     return None;
                 }
-                Some(self.finished_line(id, *result, *duration_ms, error.as_deref()))
+                let mut out = String::new();
+                if failed && let Some(buf) = buf.filter(|b| !b.lines.is_empty()) {
+                    let msg = if buf.dropped > 0 {
+                        format!(
+                            "output of {} (last {} lines, {} earlier dropped):",
+                            id.as_str(),
+                            buf.lines.len(),
+                            buf.dropped
+                        )
+                    } else {
+                        format!("output of {}:", id.as_str())
+                    };
+                    out.push_str(&note(&self.theme, &msg));
+                    for line in &buf.lines {
+                        out.push_str(&self.log_line(id, line));
+                    }
+                }
+                out.push_str(&self.finished_line(id, *result, *duration_ms, error.as_deref()));
+                Some(out)
             }
             Event::BuildFinished {
                 ok,
@@ -586,6 +628,81 @@ mod tests {
             .render(&ev_log("go:bin:server", "downloading deps"))
             .unwrap();
         assert_eq!(out, "[go:bin:server] downloading deps\n");
+    }
+
+    #[test]
+    fn quiet_failure_replays_swallowed_output() {
+        let mut r = Renderer::new(Mode::Human { color: false }, 16, true);
+        assert!(r.render(&ev_log("web:test", "bun test v1.3.13")).is_none());
+        assert!(
+            r.render(&ev_log("web:test", "Cannot find module '$lib/span-model'"))
+                .is_none()
+        );
+        let out = r
+            .render(&ev_finished("web:test", TargetResultKind::Failed, 950))
+            .unwrap();
+        assert!(out.contains("output of web:test:"), "{out:?}");
+        assert!(out.contains("[web:test] bun test v1.3.13"));
+        assert!(out.contains("Cannot find module"));
+        // The replay precedes the FAIL line.
+        assert!(out.find("Cannot find module").unwrap() < out.find("FAIL").unwrap());
+    }
+
+    #[test]
+    fn quiet_success_discards_swallowed_output() {
+        let mut r = Renderer::new(Mode::Human { color: false }, 16, true);
+        assert!(r.render(&ev_log("web:test", "112 pass")).is_none());
+        assert!(
+            r.render(&ev_finished("web:test", TargetResultKind::Built, 950))
+                .is_none()
+        );
+        // A later failure of another target doesn't leak the buffer.
+        let out = r
+            .render(&ev_finished("other", TargetResultKind::Failed, 10))
+            .unwrap();
+        assert!(!out.contains("112 pass"));
+    }
+
+    #[test]
+    fn replay_caps_lines_and_counts_dropped() {
+        let mut r = Renderer::new(Mode::Human { color: false }, 16, true);
+        for i in 0..(REPLAY_MAX_LINES + 25) {
+            assert!(r.render(&ev_log("t", &format!("line {i}"))).is_none());
+        }
+        let out = r
+            .render(&ev_finished("t", TargetResultKind::Failed, 10))
+            .unwrap();
+        assert!(
+            out.contains(&format!(
+                "last {REPLAY_MAX_LINES} lines, 25 earlier dropped"
+            )),
+            "{out:?}"
+        );
+        assert!(!out.contains("line 24\n"), "head should be dropped");
+        assert!(out.contains(&format!("line {}\n", REPLAY_MAX_LINES + 24)));
+    }
+
+    #[test]
+    fn non_quiet_failure_does_not_double_print() {
+        let mut r = Renderer::new(Mode::Human { color: false }, 16, false);
+        // Streamed live - not buffered.
+        assert!(r.render(&ev_log("t", "hello")).is_some());
+        let out = r
+            .render(&ev_finished("t", TargetResultKind::Failed, 10))
+            .unwrap();
+        assert!(!out.contains("hello"), "{out:?}");
+    }
+
+    #[test]
+    fn hidden_target_failure_replays_output_even_unquiet() {
+        let mut r = Renderer::new(Mode::Human { color: false }, 16, false);
+        let hidden = Arc::new(Mutex::new(HashSet::from([TargetId::new("tc:go")])));
+        r.set_hidden(hidden);
+        assert!(r.render(&ev_log("tc:go", "toolchain fetch 404")).is_none());
+        let out = r
+            .render(&ev_finished("tc:go", TargetResultKind::Failed, 10))
+            .unwrap();
+        assert!(out.contains("toolchain fetch 404"), "{out:?}");
     }
 
     #[test]

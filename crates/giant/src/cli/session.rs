@@ -636,7 +636,15 @@ impl SessionState {
                 return;
             }
         };
-        let ac = self.cache.get_ac(&key).await.ok().flatten();
+        // Failure entries (non-zero exit) only carry logs for replay;
+        // the target is not cached and will re-run.
+        let ac = self
+            .cache
+            .get_ac(&key)
+            .await
+            .ok()
+            .flatten()
+            .filter(|e| e.exit_code == 0);
         let cached = ac.is_some();
         let cache_hit = ac.map(|entry| ExplainCacheHit {
             built_at: entry.built_at,
@@ -850,7 +858,14 @@ impl SessionState {
                         .await
                         {
                             Ok((key, _)) => {
-                                let entry = cache.get_ac(&key).await.ok().flatten();
+                                // Failure entries only carry logs; the
+                                // target itself is stale, not cached.
+                                let entry = cache
+                                    .get_ac(&key)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .filter(|e| e.exit_code == 0);
                                 let (state, last_duration_ms) = match entry {
                                     Some(e) => ("cached", Some(e.duration_ms)),
                                     None => ("stale", None),

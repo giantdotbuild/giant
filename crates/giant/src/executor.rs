@@ -146,6 +146,7 @@ enum TargetResult {
     },
     Failed {
         error: String,
+        duration: Duration,
     },
 }
 
@@ -500,7 +501,9 @@ async fn dispatch_target(
     };
 
     let duration_ms = match &result {
-        TargetResult::Built { duration, .. } => duration.as_millis() as u64,
+        TargetResult::Built { duration, .. } | TargetResult::Failed { duration, .. } => {
+            duration.as_millis() as u64
+        }
         _ => 0,
     };
     let outputs_paths: Vec<String> = match &result {
