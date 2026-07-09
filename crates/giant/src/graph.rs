@@ -159,7 +159,7 @@ impl BuildGraph {
     /// Topological order, deps first. A target appears after all its deps.
     pub fn topo_order(&self) -> Result<Vec<TargetId>, GraphError> {
         let order = toposort(&self.g, None).map_err(|c| {
-            GraphError::Cycle(format!("cycle includes target {}", &self.g[c.node_id()]))
+            GraphError::Cycle(format!("cycle includes target {}", self.g[c.node_id()]))
         })?;
         // Edges point parent → dep, so toposort emits parents first; we want
         // deps first.
