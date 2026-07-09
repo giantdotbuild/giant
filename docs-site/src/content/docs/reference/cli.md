@@ -59,7 +59,7 @@ no target matches "//src/go/server:sever" - did you mean "//src/go/server:server
 | `--affected` | off | Restrict to targets affected by changes. Requires `--base` or `--file`. |
 | `--base <ref>` | - | Git ref baseline for `--affected`. |
 | `--file <path>` | - | Explicit changed-file list. Repeatable. Overrides `--base`. |
-| `-q, --quiet` | off | Print only failures + summary. |
+| `-q, --quiet` | off | Print only failures + summary. A failing target replays its buffered output (last 200 lines) above its FAIL line, so the evidence survives quiet mode. |
 | `--color <when>` | `auto` | `auto`, `always`, `never`. Honors `NO_COLOR`. |
 | `--tag <tag>` | - | Include only targets carrying this tag. Repeatable. A bare value (`--tag release`) matches the tag; `key=value` (`--tag kind=bin`) matches a role tag. Multiple `--tag` flags **union** - a target passes if it carries any of them. One whole tag per flag; no comma syntax. |
 | `--no-tag <tag>` | - | Exclude targets carrying this tag. Repeatable. Same value syntax as `--tag`. |

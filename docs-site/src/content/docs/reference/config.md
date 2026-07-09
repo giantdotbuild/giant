@@ -201,7 +201,7 @@ Regular build targets. Schema below.
 | `env` | no | map | Env vars. Hashed into the cache key. |
 | `test` | no | bool | `true` = test target. Default `false`. |
 | `tags` | no | list of strings | Free-form labels for filtering. |
-| `cache` | no | bool | `false` disables caching entirely. Default: `true` for normal targets, `false` for `test: true` targets (the engine computes `cache.unwrap_or(!test)`). |
+| `cache` | no | bool | `false` disables caching entirely. Default: `true` for normal targets, `false` for `test: true` targets (the engine computes `cache.unwrap_or(!test)`). A cacheable build target must declare `outputs` or an `exists:` check; a cacheable test needs neither - the green result is the cached artifact and a hit replays the captured logs. |
 | `remote_cache` | no | bool | `false` disables remote uploads for this target. Default `true`. |
 | `sandbox` | no | bool | `false` exempts the target from sandboxing when a run opts in with `--sandbox` (or under `giant verify`). Default `true`. Has no effect on plain runs and is never a cache-key input. |
 | `network` | no | bool | `true` grants the target network access when sandboxed. Default `false` (denied). Inert outside `--sandbox` mode; never a cache-key input. |

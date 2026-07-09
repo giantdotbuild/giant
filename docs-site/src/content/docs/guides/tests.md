@@ -27,14 +27,13 @@ runs whenever you ask.
 
 The target's label is `//internal/auth:test`. `test: true` is the only thing
 separating it from a regular target: `giant build` skips it, `giant test`
-selects it, and it defaults to `cache: false` (so the "cacheable target needs
-outputs" rule doesn't apply - an uncached test needs none).
+selects it, and it defaults to `cache: false`.
 
 ## Caching test results
 
 To skip a test that can't have changed, opt it into the cache with
-`cache: true` and give it a **marker output** - a file the command touches
-only on success:
+`cache: true`. A test target needs no outputs for this - the cached
+artifact is the green result itself:
 
 ```yaml
 - name: "test"
@@ -42,18 +41,17 @@ only on success:
     - "**/*.go"
   test: true
   cache: true                       # opt in (tests are uncached by default)
-  outputs:
-    - "//test-cache/auth.ok"
   tags: ["lang=go", "kind=test"]
   cwd: "//"
-  command: |
-    go test ./internal/auth && touch test-cache/auth.ok
+  command: "go test ./internal/auth"
 ```
 
-The marker (`test-cache/auth.ok`) is what gets cached - its existence is the
-recorded "the test passed for these inputs." (A cacheable target needs an
-output or an `exists:` check; the marker is the simplest output.) On unchanged
-inputs the marker is restored and `go test` is skipped.
+On unchanged inputs the target reports `CACHE` and replays the captured
+test output instead of re-running. With the remote cache configured, a
+suite that went green on one machine is skipped on every other machine
+building the same inputs. (Build targets still require outputs or an
+`exists:` check to be cacheable - a build hit with nothing to restore
+would be meaningless; a test hit is the point.)
 
 ## Selection
 
@@ -125,6 +123,12 @@ $ giant test
 The renderer is the same one `giant build` uses - see [CLI
 reference](/reference/cli/) for output controls.
 
+Under `-q, --quiet` the streamed lines are swallowed, but a failing
+target replays its buffered output (the last 200 lines) above the FAIL
+line - a red CI log carries the evidence without a re-run. Failed runs
+also persist their captured output, so `giant logs //internal/store:test`
+replays it after the fact.
+
 ## Failing tests don't fight in parallel
 
 Test targets run in parallel by default. A failure in one doesn't stop
@@ -160,11 +164,10 @@ test database container). Express it as a regular dep:
 
 - name: "test"
   inputs: ["**/*.go"]
-  outputs: ["//test-cache/store.ok"]
   deps: ["//internal/store:fixtures-db"]
   test: true
   cwd: "//"
-  command: "go test ./internal/store && touch test-cache/store.ok"
+  command: "go test ./internal/store"
 ```
 
 `giant test` runs both - `fixtures-db` is pulled in as a dep of `test`.
