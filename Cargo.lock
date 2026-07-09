@@ -1223,7 +1223,7 @@ dependencies = [
 
 [[package]]
 name = "giant"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "giant-affected"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "clap",
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "giant-build"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -1296,7 +1296,7 @@ dependencies = [
 
 [[package]]
 name = "giant-clean"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "clap",
@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "giant-explain"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "clap",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "giant-gen"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "allocative",
  "anyhow",
@@ -1341,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "giant-graph"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "clap",
@@ -1352,7 +1352,7 @@ dependencies = [
 
 [[package]]
 name = "giant-logs"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "clap",
@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "giant-protocol"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "serde",
@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "giant-sandbox"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "birdcage",
@@ -1385,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "giant-schema"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "glob",
  "serde",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "giant-task"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "giant-tui"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "ansi-to-tui",
  "anstyle",
