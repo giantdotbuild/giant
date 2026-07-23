@@ -285,7 +285,10 @@ pub(super) async fn try_exists_check(
     let stderr = child.stderr.take();
     // exists-check output is purely informational - don't capture
     // it to CAS (no AC entry to attach it to).
-    let pump_o = pump_lines(
+    // Spawn the pumps so they drain concurrently with `child.wait()` - see
+    // the note in `run_target`; a wait-then-drain order deadlocks a target
+    // that fills its pipe buffer.
+    let pump_o = tokio::spawn(pump_lines(
         stdout,
         ctx.events.clone(),
         ctx.build_id.clone(),
@@ -293,8 +296,8 @@ pub(super) async fn try_exists_check(
         LogStream::Stdout,
         0,
         false,
-    );
-    let pump_e = pump_lines(
+    ));
+    let pump_e = tokio::spawn(pump_lines(
         stderr,
         ctx.events.clone(),
         ctx.build_id.clone(),
@@ -302,12 +305,14 @@ pub(super) async fn try_exists_check(
         LogStream::Stderr,
         0,
         false,
-    );
+    ));
 
     let status = tokio::select! {
         s = child.wait() => s,
         _ = ctx.cancel.cancelled() => {
             let _ = child.kill().await;
+            pump_o.abort();
+            pump_e.abort();
             return None;
         }
     };
@@ -396,7 +401,13 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
     let target_id = spec.id.clone();
     let build_id = ctx.build_id.clone();
 
-    let pump_stdout = pump_lines(
+    // Spawn the pumps so they drain the child's stdout/stderr pipes
+    // *concurrently* with `child.wait()`. Awaiting them only after the wait
+    // deadlocks: a chatty target (e.g. `cargo test` on a large workspace)
+    // fills the OS pipe buffer, blocks on write, and never exits, so
+    // `wait()` never returns and the drainers never start - the target
+    // hangs until its timeout.
+    let pump_stdout = tokio::spawn(pump_lines(
         stdout,
         ctx.events.clone(),
         build_id.clone(),
@@ -404,8 +415,8 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
         LogStream::Stdout,
         ctx.log_capture.cap_bytes,
         ctx.log_capture.capture,
-    );
-    let pump_stderr = pump_lines(
+    ));
+    let pump_stderr = tokio::spawn(pump_lines(
         stderr,
         ctx.events.clone(),
         build_id,
@@ -413,7 +424,7 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
         LogStream::Stderr,
         ctx.log_capture.cap_bytes,
         ctx.log_capture.capture,
-    );
+    ));
 
     // A `timeout_secs` of `None` parks forever, so the timeout arm never
     // fires; otherwise it races the child and kills it on expiry. Both the
@@ -428,10 +439,17 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
         s = child.wait() => s,
         _ = ctx.cancel.cancelled() => {
             let _ = child.kill().await;
+            // Killing `sh` can leave a grandchild (e.g. `sleep`) holding the
+            // stdout pipe open, so the drain tasks would linger reading it and
+            // keep the process alive - abort them explicitly.
+            pump_stdout.abort();
+            pump_stderr.abort();
             return TargetResult::Failed { error: "cancelled".into(), duration: started.elapsed() };
         }
         _ = timeout => {
             let _ = child.kill().await;
+            pump_stdout.abort();
+            pump_stderr.abort();
             let secs = spec.timeout_secs.unwrap_or_default();
             return TargetResult::Failed {
                 error: format!("timed out after {secs}s"),
@@ -440,6 +458,8 @@ pub(super) async fn run_target(ctx: &TargetCtx, spec: &TargetSpec, key: CacheKey
         }
     };
     let (stdout_bytes, stderr_bytes) = tokio::join!(pump_stdout, pump_stderr);
+    let stdout_bytes = stdout_bytes.unwrap_or_default();
+    let stderr_bytes = stderr_bytes.unwrap_or_default();
 
     let exit = match status {
         Ok(s) => s,

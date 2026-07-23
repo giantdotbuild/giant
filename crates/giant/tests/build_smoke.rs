@@ -1568,3 +1568,49 @@ fn failed_last_with_no_failures_errors() {
         "expected a 'no recent failures' message"
     );
 }
+
+#[test]
+fn high_output_target_does_not_deadlock_on_pipe_buffer() {
+    // A target that floods stdout with far more than the OS pipe buffer
+    // (~64K). Giant must drain the child's stdout concurrently with waiting
+    // on it; draining only after `wait()` deadlocks - the child blocks on
+    // write, never exits, and the target hangs until its timeout.
+    // `timeout_secs` bounds a regression so this test fails fast instead of
+    // hanging.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: highout
+cache:
+  dir: ./cache
+targets:
+  - name: "flood"
+    inputs: []
+    outputs: []
+    cache: false
+    timeout_secs: 60
+    command: "seq 1 200000"
+"#,
+    )
+    .unwrap();
+
+    let start = std::time::Instant::now();
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .expect("spawn giant");
+    let elapsed = start.elapsed();
+    assert!(
+        out.status.success(),
+        "high-output target should complete, not deadlock: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "high-output target should finish quickly, not hang near the timeout (took {elapsed:?})"
+    );
+}
