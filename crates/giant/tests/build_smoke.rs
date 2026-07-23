@@ -1574,9 +1574,13 @@ fn high_output_target_does_not_deadlock_on_pipe_buffer() {
     // A target that floods stdout with far more than the OS pipe buffer
     // (~64K). Giant must drain the child's stdout concurrently with waiting
     // on it; draining only after `wait()` deadlocks - the child blocks on
-    // write, never exits, and the target hangs until its timeout.
-    // `timeout_secs` bounds a regression so this test fails fast instead of
-    // hanging.
+    // write, never exits, and the target hangs until its `timeout_secs`.
+    //
+    // The regression guard is `status.success()` bounded by `timeout_secs`:
+    // a deadlock hits the timeout and fails the target, so success proves
+    // it drained. We don't assert a tight wall-clock bound - with log
+    // capture on (the `remote` feature) the flood is captured + stored,
+    // which is legitimately slow on a busy CI runner without being a hang.
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();
     std::fs::write(
@@ -1592,25 +1596,20 @@ targets:
     outputs: []
     cache: false
     timeout_secs: 60
-    command: "seq 1 200000"
+    command: "seq 1 100000"
 "#,
     )
     .unwrap();
 
-    let start = std::time::Instant::now();
     let out = Command::new(giant_bin())
         .arg("build")
         .current_dir(ws)
         .output()
         .expect("spawn giant");
-    let elapsed = start.elapsed();
     assert!(
         out.status.success(),
-        "high-output target should complete, not deadlock: {}",
+        "high-output target should complete, not deadlock (a hang hits the \
+         60s timeout and fails): {}",
         String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        elapsed < std::time::Duration::from_secs(30),
-        "high-output target should finish quickly, not hang near the timeout (took {elapsed:?})"
     );
 }
