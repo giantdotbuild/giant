@@ -1613,3 +1613,84 @@ targets:
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn non_utf8_output_does_not_stop_the_drain() {
+    // A child's output is arbitrary bytes. Decoding it as UTF-8 lines makes an
+    // invalid byte a read error, and ending the pump on that error stops the
+    // drain - so the flood that follows fills the pipe buffer and the child
+    // blocks on write forever. The invalid byte comes first here, so a decoding
+    // pump dies before the flood and the target hangs to its timeout.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: binout
+cache:
+  dir: ./cache
+targets:
+  - name: "binary-then-flood"
+    inputs: []
+    outputs: []
+    cache: false
+    timeout_secs: 60
+    command: "printf 'start\\377\\376\\n'; seq 1 100000"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .expect("spawn giant");
+    assert!(
+        out.status.success(),
+        "invalid UTF-8 must not stop the drain (a hang hits the 60s timeout \
+         and fails): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn long_multibyte_line_does_not_panic_the_pump() {
+    // Lines longer than the 8 KiB event cap get cut at that byte offset. With a
+    // multi-byte character straddling the cut, slicing a `String` there panics
+    // ("byte index is not a char boundary") and takes the pump - and the drain -
+    // with it. U+20AC is 3 bytes and 8192 is not a multiple of 3, so the cut
+    // lands mid-character. The flood afterwards turns a dead pump into a hang
+    // rather than a silent loss.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("giant.yaml"),
+        r#"
+workspace:
+  name: longline
+cache:
+  dir: ./cache
+targets:
+  - name: "wide-line-then-flood"
+    inputs: []
+    outputs: []
+    cache: false
+    timeout_secs: 60
+    command: "i=0; while [ $i -lt 4000 ]; do printf '\\342\\202\\254'; i=$((i+1)); done; printf '\\n'; seq 1 100000"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(giant_bin())
+        .arg("build")
+        .current_dir(ws)
+        .output()
+        .expect("spawn giant");
+    assert!(
+        out.status.success(),
+        "a long multi-byte line must not panic the pump (a hang hits the 60s \
+         timeout and fails): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

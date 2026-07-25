@@ -913,27 +913,46 @@ where
     } else {
         Vec::new()
     };
+    /// Longest line forwarded in a log event; the remainder is dropped and the
+    /// event carries `truncated`.
+    const MAX_LINE: usize = 8 * 1024;
+
     let mut hit_cap = false;
     let Some(r) = reader else { return buf };
-    let mut lines = BufReader::new(r).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    let mut reader = BufReader::new(r);
+    // Read raw bytes rather than `lines()`. A child's output is arbitrary bytes,
+    // not guaranteed UTF-8, and a decode error would end this loop - which stops
+    // draining the pipe, so the child blocks on its next write once the buffer
+    // fills and never exits. Only a genuine I/O error breaks out now, and at
+    // that point the fd has nothing left to drain anyway.
+    let mut raw: Vec<u8> = Vec::with_capacity(1024);
+    loop {
+        raw.clear();
+        match reader.read_until(b'\n', &mut raw).await {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        while matches!(raw.last(), Some(b'\n' | b'\r')) {
+            raw.pop();
+        }
         if capture && !hit_cap {
             // +1 for the newline we re-append.
-            let needed = line.len() + 1;
+            let needed = raw.len() + 1;
             if buf.len() + needed <= cap_bytes {
-                buf.extend_from_slice(line.as_bytes());
+                buf.extend_from_slice(&raw);
                 buf.push(b'\n');
             } else {
                 buf.extend_from_slice(b"[giant: log truncated at capture cap]\n");
                 hit_cap = true;
             }
         }
-        let truncated = line.len() > 8 * 1024;
-        let line = if truncated {
-            line[..8 * 1024].to_string()
-        } else {
-            line
-        };
+        let truncated = raw.len() > MAX_LINE;
+        // Cutting at a byte offset can land mid-codepoint. The lossy decode
+        // renders that partial tail as a replacement character; slicing a
+        // `String` at the same offset would panic and take the pump - and with
+        // it the drain - down instead.
+        let line = String::from_utf8_lossy(&raw[..raw.len().min(MAX_LINE)]).into_owned();
         let _ = events
             .send(Event::TargetLog {
                 build: build_id.clone(),
