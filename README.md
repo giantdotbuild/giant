@@ -119,6 +119,11 @@ giant clean             # clear the local cache
 the summary. `--events ndjson` switches the output to a machine-readable
 event stream consumed by porcelains.
 
+A target that stays quiet for a while gets a heartbeat line so you can
+see it's still going. On a terminal that's a `RUN` line every second; in
+a pipe or CI log it's a "still running" note after 30 seconds and then
+once a minute. `--progress tty|plain|none` picks one explicitly.
+
 ## Porcelains
 
 Unknown subcommands dispatch to `giant-<name>` on PATH, the git/cargo/kubectl

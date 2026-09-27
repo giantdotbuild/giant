@@ -14,6 +14,11 @@
 //! Color is on by default when stdout is a tty and `NO_COLOR` is unset.
 //! `--color always|never|auto` overrides; `NO_COLOR=1` always wins
 //! against `auto` per the de-facto standard.
+//!
+//! Heartbeats for quiet long-running targets follow `--progress`, which
+//! is resolved against stdout-is-tty separately from color: a terminal
+//! gets a `RUN` line every second, a log file gets a sparse "still
+//! running" note (see [`Progress`]).
 
 use anstyle::{AnsiColor, Color, Style};
 use giant::TargetId;
@@ -56,6 +61,45 @@ impl ColorChoice {
             ColorChoice::Auto => stdout_is_tty && std::env::var_os("NO_COLOR").is_none(),
         }
     }
+}
+
+/// How heartbeats for quiet in-flight targets are printed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Progress {
+    /// `tty` when stdout is a terminal, `plain` otherwise.
+    Auto,
+    /// A `RUN` line per quiet target every second, after 3 s of silence.
+    Tty,
+    /// A "still running" note after 30 s of silence, then at most one
+    /// per target per minute. Sized for CI logs.
+    Plain,
+    /// No heartbeats.
+    None,
+}
+
+impl Progress {
+    pub fn resolve(self, stdout_is_tty: bool) -> Progress {
+        match self {
+            Progress::Auto if stdout_is_tty => Progress::Tty,
+            Progress::Auto => Progress::Plain,
+            p => p,
+        }
+    }
+
+    /// `(quiet for at least, then at most once per)`, or `None` when
+    /// heartbeats are off.
+    fn cadence(self) -> Option<(Duration, Duration)> {
+        match self {
+            Progress::Tty => Some((Duration::from_secs(3), Duration::from_secs(1))),
+            Progress::Plain => Some((Duration::from_secs(30), Duration::from_secs(60))),
+            Progress::Auto | Progress::None => None,
+        }
+    }
+}
+
+/// Resolve `--progress` against the real stdout.
+pub fn detect_progress(progress: Progress) -> Progress {
+    progress.resolve(std::io::stdout().is_terminal())
 }
 
 /// Pick the right mode for a `giant build` / `build --watch` invocation.
@@ -162,6 +206,7 @@ pub struct Renderer {
     theme: Theme,
     id_width: usize,
     quiet: bool,
+    progress: Progress,
     failed: Vec<TargetId>,
     /// Output of targets whose log lines were swallowed (quiet mode,
     /// hidden targets), kept so a failure can replay what the target
@@ -178,10 +223,9 @@ pub struct Renderer {
     hidden: Arc<Mutex<HashSet<TargetId>>>,
 }
 
-/// Don't emit a heartbeat for a target until it's been quiet for at
-/// least this long. Fast targets (cache hits, < 3 s builds) get no
-/// heartbeat at all.
-const HEARTBEAT_AFTER: Duration = Duration::from_secs(3);
+/// Slack on the heartbeat interval so jitter on the caller's 1 s tick
+/// doesn't push a due heartbeat back a whole extra tick.
+const HEARTBEAT_SLACK: Duration = Duration::from_millis(500);
 
 /// Cap on buffered lines per in-flight target. A failing test's useful
 /// output is at its tail; the head is dropped (and counted) past this.
@@ -197,9 +241,7 @@ struct ReplayBuf {
 struct RunningInfo {
     started_at: Instant,
     last_activity: Instant,
-    /// Set once we've emitted a heartbeat for this run so we don't
-    /// re-announce the same elapsed bucket twice in a row.
-    last_announced_elapsed_s: u64,
+    last_heartbeat: Option<Instant>,
 }
 
 impl Renderer {
@@ -209,11 +251,18 @@ impl Renderer {
             mode,
             id_width,
             quiet,
+            progress: Progress::Tty,
             failed: Vec::new(),
             replay: HashMap::new(),
             running: HashMap::new(),
             hidden: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Set the heartbeat style. Expects a resolved value (`Auto` behaves
+    /// like `None`); defaults to `Tty`.
+    pub fn set_progress(&mut self, progress: Progress) {
+        self.progress = progress;
     }
 
     pub fn theme(&self) -> &Theme {
@@ -236,13 +285,17 @@ impl Renderer {
     /// in quiet mode, internal events that don't have user-visible
     /// output.
     pub fn render(&mut self, ev: &Event) -> Option<String> {
+        self.render_at(ev, Instant::now())
+    }
+
+    fn render_at(&mut self, ev: &Event, now: Instant) -> Option<String> {
         match self.mode {
             Mode::Ndjson => Some(serde_json::to_string(ev).ok()? + "\n"),
-            Mode::Human { .. } => self.render_human(ev),
+            Mode::Human { .. } => self.render_human(ev, now),
         }
     }
 
-    fn render_human(&mut self, ev: &Event) -> Option<String> {
+    fn render_human(&mut self, ev: &Event, now: Instant) -> Option<String> {
         match ev {
             Event::BuildStarted { target_ids, .. } => {
                 // Lock in the column width now that we know what's
@@ -270,20 +323,19 @@ impl Renderer {
                 if self.is_hidden(id) {
                     return None;
                 }
-                let now = Instant::now();
                 self.running.insert(
                     id.clone(),
                     RunningInfo {
                         started_at: now,
                         last_activity: now,
-                        last_announced_elapsed_s: 0,
+                        last_heartbeat: None,
                     },
                 );
                 None
             }
             Event::TargetLog { id, line, .. } => {
                 if let Some(info) = self.running.get_mut(id) {
-                    info.last_activity = Instant::now();
+                    info.last_activity = now;
                 }
                 // A swallowed line (quiet mode, hidden target) is kept in a
                 // bounded buffer so a failure can replay it - otherwise a
@@ -351,40 +403,49 @@ impl Renderer {
         }
     }
 
-    /// Periodic "still running" output for targets that have been
-    /// quiet a while. Returns one line per silent long-runner, or
-    /// `None` if nothing to report. Caller drives this off a timer
-    /// (e.g. every 3 s). Ndjson mode never produces heartbeat output
-    /// - porcelains have richer per-target state.
+    /// Periodic output for targets that have been quiet a while: one
+    /// line per silent long-runner, or `None` if nothing is due. The
+    /// caller drives this off a 1 s timer; [`Progress`] decides how long
+    /// a target must be quiet and how often it's re-announced. Ndjson
+    /// mode never produces heartbeat output - porcelains have richer
+    /// per-target state.
     pub fn heartbeat(&mut self) -> Option<String> {
+        self.heartbeat_at(Instant::now())
+    }
+
+    fn heartbeat_at(&mut self, now: Instant) -> Option<String> {
         if !matches!(self.mode, Mode::Human { .. }) {
             return None;
         }
-        let now = Instant::now();
-        // Collect first to release the mutable borrow before we call
-        // `running_line` (which needs &self).
+        let (after, every) = self.progress.cadence()?;
+        // Collect first to release the mutable borrow before rendering
+        // (which needs &self).
         let mut due: Vec<(TargetId, Duration)> = Vec::new();
         for (id, info) in &mut self.running {
-            let elapsed = now.duration_since(info.started_at);
-            let quiet = now.duration_since(info.last_activity);
-            if elapsed < HEARTBEAT_AFTER || quiet < HEARTBEAT_AFTER {
+            if now.duration_since(info.last_activity) < after {
                 continue;
             }
-            // Round elapsed to seconds; only emit once per second
-            // bucket so a 60s target doesn't print 60 heartbeats.
-            let bucket = elapsed.as_secs();
-            if bucket == info.last_announced_elapsed_s {
+            if let Some(last) = info.last_heartbeat
+                && now.duration_since(last) + HEARTBEAT_SLACK < every
+            {
                 continue;
             }
-            info.last_announced_elapsed_s = bucket;
-            due.push((id.clone(), elapsed));
+            info.last_heartbeat = Some(now);
+            due.push((id.clone(), now.duration_since(info.started_at)));
         }
         if due.is_empty() {
             return None;
         }
+        due.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         let mut out = String::new();
         for (id, elapsed) in due {
-            out.push_str(&self.running_line(&id, elapsed));
+            if self.progress == Progress::Plain {
+                let dur = giant::format_duration(elapsed.as_millis() as u64);
+                let msg = format!("still running {} ({dur})", id.as_str());
+                out.push_str(&note(&self.theme, &msg));
+            } else {
+                out.push_str(&self.running_line(&id, elapsed));
+            }
         }
         Some(out)
     }
@@ -799,6 +860,78 @@ mod tests {
         ];
         assert_eq!(super::id_width(&ids), "go:bin:server".len());
         assert_eq!(super::id_width::<&[TargetId]>(&[]), 0);
+    }
+
+    fn ev_started(id: &str) -> Event {
+        Event::TargetStarted {
+            build: "b_test".into(),
+            id: TargetId::new(id),
+            cache_key: String::new(),
+            command: String::new(),
+        }
+    }
+
+    /// Start a target that then stays silent for five minutes, ticking
+    /// the heartbeat once a second. Returns every heartbeat produced.
+    fn quiet_five_minutes(progress: Progress) -> Vec<String> {
+        let mut r = Renderer::new(Mode::Human { color: false }, 16, false);
+        r.set_progress(progress);
+        let t0 = Instant::now();
+        r.render_at(&ev_started("//:spool"), t0);
+        (1..=300)
+            .filter_map(|s| r.heartbeat_at(t0 + Duration::from_secs(s)))
+            .collect()
+    }
+
+    #[test]
+    fn tty_progress_beats_every_second_after_three() {
+        let beats = quiet_five_minutes(Progress::Tty);
+        assert_eq!(beats.len(), 298);
+        assert!(beats[0].starts_with("RUN"), "{:?}", beats[0]);
+        assert!(beats[0].contains("//:spool"));
+        assert!(beats[0].contains("3.00s"));
+    }
+
+    #[test]
+    fn plain_progress_beats_after_thirty_then_every_minute() {
+        let beats = quiet_five_minutes(Progress::Plain);
+        // 30 s, 90 s, 150 s, 210 s, 270 s.
+        assert_eq!(beats.len(), 5, "{beats:?}");
+        assert_eq!(beats[0], "· still running //:spool (30.00s)\n");
+        assert_eq!(beats[1], "· still running //:spool (1.5m)\n");
+    }
+
+    #[test]
+    fn none_progress_never_beats() {
+        assert!(quiet_five_minutes(Progress::None).is_empty());
+    }
+
+    #[test]
+    fn plain_progress_waits_for_silence_after_output() {
+        let mut r = Renderer::new(Mode::Human { color: false }, 16, false);
+        r.set_progress(Progress::Plain);
+        let t0 = Instant::now();
+        let at = |s| t0 + Duration::from_secs(s);
+        r.render_at(&ev_started("t"), t0);
+        r.render_at(&ev_log("t", "working"), at(20));
+        assert!(r.heartbeat_at(at(40)).is_none());
+        assert!(r.heartbeat_at(at(50)).is_some());
+    }
+
+    #[test]
+    fn ndjson_mode_never_beats() {
+        let mut r = Renderer::new(Mode::Ndjson, 0, false);
+        let t0 = Instant::now();
+        r.render_at(&ev_started("t"), t0);
+        assert!(r.heartbeat_at(t0 + Duration::from_secs(120)).is_none());
+    }
+
+    #[test]
+    fn progress_auto_follows_tty() {
+        assert_eq!(Progress::Auto.resolve(true), Progress::Tty);
+        assert_eq!(Progress::Auto.resolve(false), Progress::Plain);
+        assert_eq!(Progress::Tty.resolve(false), Progress::Tty);
+        assert_eq!(Progress::None.resolve(true), Progress::None);
     }
 
     #[test]

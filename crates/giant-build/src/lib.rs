@@ -17,7 +17,7 @@ use clap::Args;
 use giant::events::Event;
 use giant::selection::{self, TestMode};
 use giant::{TargetId, git};
-use renderer::{ColorChoice, Renderer};
+use renderer::{ColorChoice, Progress, Renderer};
 
 #[derive(Args, Debug)]
 pub struct BuildArgs {
@@ -64,6 +64,12 @@ pub struct BuildArgs {
     /// When to colorize output. `auto` honors stdout-is-tty and `NO_COLOR`.
     #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
     pub color: ColorChoice,
+
+    /// Heartbeats for quiet long-running targets. `auto` is `tty` on a
+    /// terminal (every second after 3 s) and `plain` otherwise (after 30 s,
+    /// then once a minute); `none` turns them off.
+    #[arg(long, value_enum, default_value_t = Progress::Auto)]
+    pub progress: Progress,
 
     /// Include only targets carrying this tag. Repeatable; unioned.
     #[arg(long = "tag", value_name = "TAG")]
@@ -125,6 +131,7 @@ pub async fn run(args: BuildArgs, base_mode: TestMode) -> anyhow::Result<i32> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(1024);
     let ndjson = matches!(args.events, Some(EventsFormat::Ndjson));
     let mode = renderer::detect_mode(args.color, ndjson);
+    let progress = renderer::detect_progress(args.progress);
     let quiet = args.quiet;
     let hidden: Arc<Mutex<HashSet<TargetId>>> = Arc::new(Mutex::new(HashSet::new()));
     let hidden_for_render = hidden.clone();
@@ -133,6 +140,7 @@ pub async fn run(args: BuildArgs, base_mode: TestMode) -> anyhow::Result<i32> {
         let mut out = tokio::io::stdout();
         let mut r = Renderer::new(mode, 0, quiet);
         r.set_hidden(hidden_for_render);
+        r.set_progress(progress);
         let mut final_counts: Option<giant::events::TargetCounts> = None;
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -351,4 +359,43 @@ fn resolve_changed_files(args: &BuildArgs, workspace_root: &Path) -> anyhow::Res
     })?;
     git::affected_files_since(workspace_root, base)
         .map_err(|e| anyhow::anyhow!("affected detection: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        args: BuildArgs,
+    }
+
+    fn parse(argv: &[&str]) -> Result<BuildArgs, clap::Error> {
+        Cli::try_parse_from(std::iter::once("giant-build").chain(argv.iter().copied()))
+            .map(|c| c.args)
+    }
+
+    #[test]
+    fn progress_defaults_to_auto() {
+        assert_eq!(parse(&[]).unwrap().progress, Progress::Auto);
+    }
+
+    #[test]
+    fn progress_accepts_each_mode() {
+        for (arg, want) in [
+            ("auto", Progress::Auto),
+            ("tty", Progress::Tty),
+            ("plain", Progress::Plain),
+            ("none", Progress::None),
+        ] {
+            assert_eq!(parse(&["--progress", arg]).unwrap().progress, want);
+        }
+    }
+
+    #[test]
+    fn progress_rejects_unknown_mode() {
+        assert!(parse(&["--progress", "fancy"]).is_err());
+    }
 }
